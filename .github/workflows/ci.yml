@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  core:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,8 +25,44 @@ jobs:
 
       - name: Lint
         run: |
-          uv run ruff check core/ tests/ foundry/
-          uv run ruff format --check core/ tests/ foundry/
+          uv run ruff check core/ tests/ foundry/ examples/
+          uv run ruff format --check core/ tests/ foundry/ examples/
 
       - name: Test (mock provider only — no API keys in CI)
         run: uv run pytest tests/ -v
+
+  web:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc -b
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify core/sarva/server/static/ matches a fresh build
+        # Catches the exact risk scripts/build-web.sh exists to prevent: a UI
+        # source change committed without also running the build/copy step,
+        # leaving `sarva serve` shipping a stale bundle silently.
+        run: |
+          if ! diff -rq dist ../../core/sarva/server/static; then
+            echo "::error::core/sarva/server/static/ is stale — run ./scripts/build-web.sh and commit the result."
+            exit 1
+          fi

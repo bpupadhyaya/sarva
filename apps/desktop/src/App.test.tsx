@@ -1,0 +1,151 @@
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App from "./App";
+
+/**
+ * A minimal, controllable stand-in for the browser WebSocket API. Real
+ * WebSocket delivery is proven end-to-end elsewhere (BUILD-JOURNAL.md —
+ * a real `sarva serve` process was hit with a real `websockets` client);
+ * this mock exists to drive App.tsx's own event-handling logic
+ * deterministically, one simulated frame at a time.
+ */
+class MockWebSocket {
+  static instances: MockWebSocket[] = [];
+  sent: string[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  closed = false;
+
+  constructor(public url: string) {
+    MockWebSocket.instances.push(this);
+  }
+
+  send(data: string) {
+    this.sent.push(data);
+  }
+
+  close() {
+    this.closed = true;
+  }
+}
+
+beforeEach(() => {
+  MockWebSocket.instances = [];
+  vi.stubGlobal("WebSocket", MockWebSocket);
+});
+
+function latestSocket(): MockWebSocket {
+  const ws = MockWebSocket.instances.at(-1);
+  if (!ws) throw new Error("no WebSocket was constructed");
+  return ws;
+}
+
+/** Simulate the server sending one AgentEvent JSON frame. Wrapped in act()
+ * because App.tsx's onmessage handler updates React state, and — unlike
+ * fireEvent, which wraps DOM events automatically — a call reached through
+ * a plain mock callback isn't recognized by React as an update source
+ * worth flushing synchronously without this. */
+function emit(ws: MockWebSocket, event: unknown) {
+  act(() => {
+    ws.onmessage?.({ data: JSON.stringify(event) });
+  });
+}
+
+function open(ws: MockWebSocket) {
+  act(() => {
+    ws.onopen?.();
+  });
+}
+
+function triggerError(ws: MockWebSocket) {
+  act(() => {
+    ws.onerror?.();
+  });
+}
+
+function submitMessage(text: string) {
+  fireEvent.change(screen.getByPlaceholderText("Message Sarva…"), {
+    target: { value: text },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /send/i }));
+}
+
+describe("App", () => {
+  it("shows the empty state before any message is sent", () => {
+    render(<App />);
+    expect(screen.getByText("Say something to get started.")).toBeInTheDocument();
+  });
+
+  it("adds a user bubble and opens a WebSocket carrying the message on submit", () => {
+    render(<App />);
+    submitMessage("hello sarva");
+
+    expect(screen.getByText("hello sarva")).toBeInTheDocument();
+
+    const ws = latestSocket();
+    expect(ws.url).toMatch(/\/ws\/chat$/);
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "hello sarva", session: "web" });
+  });
+
+  it("accumulates text_delta events into the assistant bubble as they stream in", () => {
+    render(<App />);
+    submitMessage("what's the weather?");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, { type: "model_stream", event: { type: "text_delta", text: "It's " } });
+    emit(ws, { type: "model_stream", event: { type: "text_delta", text: "sunny " } });
+    emit(ws, { type: "model_stream", event: { type: "text_delta", text: "today." } });
+
+    expect(screen.getByText("It's sunny today.")).toBeInTheDocument();
+  });
+
+  it("re-enables the composer and shows nothing extra on a clean run_done", () => {
+    render(<App />);
+    submitMessage("hi");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, { type: "model_stream", event: { type: "text_delta", text: "hello" } });
+    emit(ws, { type: "run_done", state: "done", final_message: null });
+
+    const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+    expect(ws.closed).toBe(true);
+    expect(screen.queryByText(/run ended/)).not.toBeInTheDocument();
+  });
+
+  it("shows an error message when the run ends in a non-done state", () => {
+    render(<App />);
+    submitMessage("this will fail");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, { type: "run_done", state: "failed", final_message: null });
+
+    expect(screen.getByText(/run ended: failed/)).toBeInTheDocument();
+  });
+
+  it("disables the composer while a response is streaming", () => {
+    render(<App />);
+    const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
+    submitMessage("hi");
+
+    expect(input.disabled).toBe(true);
+    expect(screen.getByRole("button", { name: /thinking/i })).toBeDisabled();
+  });
+
+  it("shows a connection error and re-enables the composer on a socket error", () => {
+    render(<App />);
+    submitMessage("hi");
+
+    const ws = latestSocket();
+    triggerError(ws);
+
+    expect(screen.getByText(/connection error/)).toBeInTheDocument();
+    const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+  });
+});

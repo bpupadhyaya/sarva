@@ -337,3 +337,49 @@ Still not CI-automated, but meaningfully lower-risk.
 
 **Next:** UI component tests, or the tool-confirmation-over-WS design
 needed before tool-using conversations can reach the browser.
+
+## 2026-07-21 — UI component tests + CI now covers the web app
+
+**Built:**
+- Vitest + React Testing Library wired into `apps/desktop/` (`npm run
+  test`). 7 tests covering `App.tsx`'s own logic: empty state, WebSocket
+  URL/payload on send, streaming-delta accumulation into the assistant
+  bubble, clean success, failure-state error display, composer
+  disabled-while-streaming, and connection-error handling. A small mock
+  `WebSocket` class drives these deterministically — real WebSocket
+  delivery is already proven end-to-end (previous entry: a real
+  `sarva serve` process hit with a real `websockets` client), so this mock
+  exists to test the UI's *reaction* to events, not to re-prove transport.
+- CI (`.github/workflows/ci.yml`) gained a second job, `web`: npm install,
+  typecheck, test, build — the frontend was completely unverified in CI
+  until now. Also fixed a real gap in the existing Python job: `examples/`
+  was linted locally every milestone but never actually in CI's lint
+  command — added it.
+- **A CI check with teeth for the exact risk flagged last entry:** after
+  building, CI now diffs the fresh `dist/` against the committed
+  `core/sarva/server/static/` and fails with a clear message if they
+  differ — turning "a human might forget to run `scripts/build-web.sh`
+  before committing" from a documented risk into something CI actually
+  catches.
+
+**Real bugs found while writing these tests, not before:**
+- Testing Library's DOM auto-cleanup between tests silently doesn't
+  register without Vitest's `globals: true` (which this project
+  deliberately doesn't use, preferring explicit imports) — every test
+  after the first was finding duplicate elements from prior tests' unmounted
+  DOM. Fixed with an explicit `afterEach(cleanup)` in `setupTests.ts`.
+- Manually invoking the mock WebSocket's `onmessage`/`onopen`/`onerror`
+  callbacks from test code doesn't reliably flush the resulting React state
+  update before the next assertion runs — these calls aren't recognized as
+  React-managed events the way `fireEvent` is. Fixed by wrapping each
+  simulated callback in `act()`.
+
+**Verified the CI check isn't just decorative:** actually broke the static
+bundle on purpose (changed visible UI text, rebuilt, diffed) and confirmed
+the check catches it with a clear failure message, then reverted and
+confirmed it passes clean again — the same discipline applied to every
+claim of "this works" all week, now applied to a CI check about CI checks.
+
+**Next:** the tool-confirmation-over-WS design needed before tool-using
+conversations can reach the browser, or continue toward T4 (Tauri desktop
+wrapper).
