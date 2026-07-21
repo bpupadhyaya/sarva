@@ -18,7 +18,7 @@ from rich.markup import escape
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import ContentBlock, ImageBlock, Message, TextBlock
+from sarva.multimodal.content import ContentBlock, ImageBlock, Message
 from sarva.providers.base import TextDeltaEvent
 from sarva.runtime import build_providers, build_router
 
@@ -65,25 +65,23 @@ async def _chat(message: str, image: Path | None, session: str | None) -> None:
     loop = AgentLoop(
         router=_build_router(), providers=_build_providers(), tools=[], confirm=always_allow
     )
-    final_message: Message | None = None
-    async for event in loop.run(message, history=history, extra_content=extra_content):
+    final_state = None
+    transcript: list[Message] = []
+    async for event in loop.run(
+        message, history=history, extra_content=extra_content, transcript_out=transcript
+    ):
         # Model output may itself contain "[", e.g. markdown links or
         # citations — never markup-parse text that came from the model.
         if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
             console.print(event.event.text, end="", markup=False)
         if event.type == "run_done":
             console.print()
-            final_message = event.final_message
+            final_state = event.state
             if event.state != "done":
                 console.print(f"[red]run ended: {event.state}[/red]")
 
-    # Tool-free by construction (chat passes tools=[]), so the full turn is
-    # exactly [user message, final assistant message] — safe to append as-is.
-    # `sarva run` isn't wired for --session yet: reconstructing history across
-    # tool-use rounds needs more than this. See BUILD-JOURNAL.md.
-    if session and final_message is not None:
-        user_message = Message(role="user", content=[TextBlock(text=message), *extra_content])
-        store.save(session, [*history, user_message, final_message])
+    if session and final_state == "done":
+        store.save(session, transcript)
 
 
 @app.command()
@@ -93,16 +91,24 @@ def run(
     auto: bool = typer.Option(
         False, "--auto", help="Auto-approve destructive tools (no confirmation prompts)."
     ),
+    session: str | None = typer.Option(
+        None,
+        "--session",
+        help="Remember this conversation under a name, including tool-use rounds "
+        "(loads prior history, saves after the turn). Omit for a one-shot run.",
+    ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell)."""
-    asyncio.run(_run(task, workdir, auto))
+    asyncio.run(_run(task, workdir, auto, session))
 
 
 async def _confirm_prompt(call: Any) -> bool:
     return typer.confirm(f"Allow {call.name}({call.arguments})?")
 
 
-async def _run(task: str, workdir: str, auto: bool) -> None:
+async def _run(task: str, workdir: str, auto: bool, session: str | None) -> None:
+    store = SessionStore()
+    history = store.load(session) if session else []
     confirm = always_allow if auto else _confirm_prompt
     loop = AgentLoop(
         router=_build_router(),
@@ -111,7 +117,9 @@ async def _run(task: str, workdir: str, auto: bool) -> None:
         confirm=confirm,
         workdir=workdir,
     )
-    async for event in loop.run(task):
+    final_state = None
+    transcript: list[Message] = []
+    async for event in loop.run(task, history=history, transcript_out=transcript):
         if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
             console.print(event.event.text, end="", markup=False)
         elif event.type == "tool_started":
@@ -123,8 +131,12 @@ async def _run(task: str, workdir: str, auto: bool) -> None:
             console.print(f"  {status}")
         elif event.type == "run_done":
             console.print()
+            final_state = event.state
             if event.state != "done":
                 console.print(f"[red]run ended: {event.state}[/red]")
+
+    if session and final_state == "done":
+        store.save(session, transcript)
 
 
 @app.command("models")

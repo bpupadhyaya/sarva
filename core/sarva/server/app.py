@@ -18,7 +18,7 @@ from sarva.agent.events import AgentState
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import always_allow
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import ContentBlock, ImageBlock, Message, TextBlock
+from sarva.multimodal.content import ContentBlock, ImageBlock, Message
 from sarva.runtime import build_providers, build_router
 from sarva.server.schemas import ChatRequest, ChatResponse, ModelInfoOut
 
@@ -65,17 +65,17 @@ def create_app() -> FastAPI:
         state = AgentState.FAILED
         final_message: Message | None = None
         spend = Spend()
-        async for event in loop.run(req.message, history=history, extra_content=extra_content):
+        transcript: list[Message] = []
+        async for event in loop.run(
+            req.message, history=history, extra_content=extra_content, transcript_out=transcript
+        ):
             if event.type == "run_done":
                 state = event.state
                 final_message = event.final_message
                 spend = event.spend
 
-        if req.session and final_message is not None:
-            user_message = Message(
-                role="user", content=[TextBlock(text=req.message), *extra_content]
-            )
-            store.save(req.session, [*history, user_message, final_message])
+        if req.session and state == AgentState.DONE:
+            store.save(req.session, transcript)
 
         return ChatResponse(
             state=state,
@@ -101,15 +101,15 @@ def create_app() -> FastAPI:
             loop = AgentLoop(
                 router=build_router(), providers=build_providers(), tools=[], confirm=always_allow
             )
-            final_message: Message | None = None
-            async for event in loop.run(message, history=history):
+            state = AgentState.FAILED
+            transcript: list[Message] = []
+            async for event in loop.run(message, history=history, transcript_out=transcript):
                 await websocket.send_text(event.model_dump_json())
                 if event.type == "run_done":
-                    final_message = event.final_message
+                    state = event.state
 
-            if session and final_message is not None:
-                user_message = Message(role="user", content=[TextBlock(text=message)])
-                store.save(session, [*history, user_message, final_message])
+            if session and state == AgentState.DONE:
+                store.save(session, transcript)
         except WebSocketDisconnect:
             pass
         finally:

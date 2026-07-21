@@ -277,3 +277,70 @@ async def test_text_only_task_still_works_against_text_only_model(run_root):
 
     assert events[-1].type == "run_done"
     assert events[-1].state == AgentState.DONE
+
+
+@pytest.mark.asyncio
+async def test_transcript_out_includes_final_turn_on_plain_success(run_root):
+    """Regression test for a real bug: `messages` (and therefore
+    transcript_out) used to only gain the final assistant turn on the
+    TOOL_USE path — a plain END_TURN success silently dropped it."""
+    provider = MockProvider(script=[ScriptedTurn(text="the answer is 42")])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+    transcript: list[Message] = []
+
+    events = [e async for e in loop.run("what's the answer?", transcript_out=transcript)]
+
+    assert events[-1].state == AgentState.DONE
+    assert [m.role for m in transcript] == ["user", "assistant"]
+    assert transcript[0].text() == "what's the answer?"
+    assert transcript[1].text() == "the answer is 42"
+
+
+@pytest.mark.asyncio
+async def test_transcript_out_includes_full_tool_use_round(run_root):
+    """The whole reason transcript_out exists: recover history across a
+    tool-use round for session persistence, since RunDoneEvent.final_message
+    alone only ever carries the *last* turn."""
+    call = ToolCallBlock(id="c1", name="echo", arguments={"text": "ping"})
+    provider = MockProvider(
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="done: ping")]
+    )
+    loop = AgentLoop(
+        router=_router(), providers={"mock": provider}, tools=[_EchoTool()], run_root=run_root
+    )
+    transcript: list[Message] = []
+
+    events = [e async for e in loop.run("echo ping please", transcript_out=transcript)]
+
+    assert events[-1].state == AgentState.DONE
+    assert [m.role for m in transcript] == ["user", "assistant", "user", "assistant"]
+    assert any(b.type == "tool_call" for b in transcript[1].content)  # assistant requests the tool
+    assert any(b.type == "tool_result" for b in transcript[2].content)  # user carries the result
+    assert transcript[3].text() == "done: ping"
+
+
+@pytest.mark.asyncio
+async def test_transcript_out_populated_even_on_failure(run_root):
+    """The contract says 'any terminal state', not just success — a caller
+    debugging a failed run should still see what led up to it."""
+    provider = MockProvider(script=[ScriptedTurn(error="boom", error_retryable=False)])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+    transcript: list[Message] = []
+
+    events = [e async for e in loop.run("this will fail", transcript_out=transcript)]
+
+    assert events[-1].state == AgentState.FAILED
+    assert len(transcript) == 1
+    assert transcript[0].role == "user"
+
+
+@pytest.mark.asyncio
+async def test_transcript_out_defaults_to_none_and_is_optional(run_root):
+    """Purely additive: every existing call site that doesn't pass
+    transcript_out must be completely unaffected."""
+    provider = MockProvider(script=[ScriptedTurn(text="fine")])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+
+    events = [e async for e in loop.run("no transcript wanted here")]
+
+    assert events[-1].state == AgentState.DONE

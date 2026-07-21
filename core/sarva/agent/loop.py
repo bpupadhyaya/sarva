@@ -102,10 +102,19 @@ class AgentLoop:
         history: list[Message] | None = None,
         model_override: str | None = None,
         extra_content: list[ContentBlock] | None = None,
+        transcript_out: list[Message] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """`extra_content` attaches non-text blocks (e.g. an ImageBlock) to
         the initiating user turn alongside `task`'s text — purely additive,
-        every existing text-only call site is unaffected."""
+        every existing text-only call site is unaffected.
+
+        `transcript_out`, if given, is extended in place with the complete
+        final message list (history + every turn appended this run,
+        including intermediate tool-use/tool-result messages) once the run
+        reaches any terminal state. This is the only way to recover a
+        tool-using run's full history for session persistence without
+        changing the frozen RunDoneEvent shape — `RunDoneEvent.final_message`
+        alone only ever carries the *last* assistant turn."""
         run_id = uuid.uuid4().hex[:12]
         run_dir = Path(self._run_root) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -140,6 +149,8 @@ class AgentLoop:
             state = AgentState.FAILED
             yield await emit(StateChangedEvent(state=state, detail=str(e)))
             yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+            if transcript_out is not None:
+                transcript_out.extend(messages)
             return
         provider = self._providers[model.provider]
         ctx = ToolContext(workdir=self._workdir, run_dir=str(run_dir), emit=emit)
@@ -171,12 +182,16 @@ class AgentLoop:
                         yield await emit(StateChangedEvent(state=state, detail=pevent.detail))
                         spend.wall_seconds = time.monotonic() - started
                         yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+                        if transcript_out is not None:
+                            transcript_out.extend(messages)
                         return
             except Exception as e:  # a provider crash never propagates to the skin
                 transition(AgentState.FAILED)
                 yield await emit(StateChangedEvent(state=state, detail=str(e)))
                 spend.wall_seconds = time.monotonic() - started
                 yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+                if transcript_out is not None:
+                    transcript_out.extend(messages)
                 return
 
             if done is None:
@@ -191,6 +206,14 @@ class AgentLoop:
                 transition(AgentState.BUDGET_EXCEEDED)
                 yield await emit(StateChangedEvent(state=state, detail=reason))
                 break
+
+            # Appended once here, unconditionally, regardless of stop_reason —
+            # `messages` (and therefore `transcript_out`) must reflect every
+            # assistant turn that actually happened, not just the ones on the
+            # tool-use path. A prior version only appended inside the
+            # TOOL_USE branch below, silently dropping the final turn from
+            # the recorded history on every successful (END_TURN) run.
+            messages.append(done.message)
 
             if done.stop_reason == StopReason.END_TURN:
                 final_message = done.message
@@ -209,7 +232,6 @@ class AgentLoop:
                 break
 
             # StopReason.TOOL_USE
-            messages.append(done.message)
             calls = [b for b in done.message.content if isinstance(b, ToolCallBlock)]
 
             transition(AgentState.RUNNING_TOOLS)
@@ -270,3 +292,5 @@ class AgentLoop:
 
         spend.wall_seconds = time.monotonic() - started
         yield await emit(RunDoneEvent(state=state, final_message=final_message, spend=spend))
+        if transcript_out is not None:
+            transcript_out.extend(messages)

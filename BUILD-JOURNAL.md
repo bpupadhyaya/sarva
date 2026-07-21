@@ -222,3 +222,54 @@ process cleanly stopped afterward.
 **Next:** the web UI (React) that talks to this server, or extend
 `/chat`/`/ws/chat` to accept tools (closing the `sarva run` session gap for
 both CLI and server at once).
+
+## 2026-07-21 — Closed the tool-use session-persistence gap
+
+**Built:**
+- `AgentLoop.run()` gained `transcript_out: list[Message] | None` — purely
+  additive (default `None`, every existing call site unaffected). If given,
+  it's extended in place with the complete final message list — history
+  plus every turn this run appended, including intermediate
+  tool-call/tool-result messages — at whatever terminal state the run
+  reaches. This is the piece that was missing twice now (flagged in both
+  the session-persistence and server-FastAPI journal entries): recovering
+  a tool-using run's full history without changing the frozen
+  `RunDoneEvent` shape (`final_message` alone only ever carries the *last*
+  turn).
+- **Found and fixed a real bug while wiring this**, not before: the
+  loop only appended the model's message to its own internal `messages`
+  list on the `TOOL_USE` path — a plain successful `END_TURN` run never
+  added its own final answer to that list. Harmless before now (nothing
+  read `messages` from outside), but it would have silently produced
+  *wrong* transcripts — missing exactly the final turn — the moment
+  anything depended on it. Fixed by moving the append to happen once,
+  unconditionally, right after the budget check.
+- `sarva chat --session` and `sarva run --session` both switched to
+  `transcript_out`, removing the old manual `[history, user, final]`
+  reconstruction that only happened to be correct because `chat` never
+  used tools. `sarva run --session` **now works for tool-using runs** —
+  the gap flagged in the previous two entries is closed.
+- The server's `/chat` and `WS /ws/chat` switched to the same pattern for
+  consistency (still `tools=[]` — server tool support is a separate,
+  bigger decision: confirmation prompts don't have an obvious answer over
+  a stateless REST call, and deserves its own design pass, not a rushed
+  add-on here).
+- 4 new loop tests: full tool-use-round reconstruction, plain-success
+  reconstruction (the regression test for the bug above), failure-path
+  population, and a not-passed-is-a-no-op guard (16/16 in this file, 55/55
+  total).
+
+**Verified, not just written:** the tool-use-round reconstruction is
+proven by a dedicated test using a scripted mock (deterministic — no real
+model can be made to reliably choose to call a tool, so this is the
+correct verification tool for this specific claim). Separately, ran
+`sarva run --session` through two real, separate CLI process invocations
+and confirmed history persists correctly for the (mock-driven, tool-free)
+path the CLI can actually exercise without a live model. Both forms of
+verification are honestly reported as what they are — a unit test for the
+tool-round mechanics, a live CLI run for the process-level plumbing —
+rather than overstating either as covering the other.
+
+**Next:** the web UI (React), or a considered design for server-side tool
+confirmation (REST vs. a stateful WS round-trip) before adding tools to
+`/chat`/`/ws/chat`.
