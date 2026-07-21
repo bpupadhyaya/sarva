@@ -220,3 +220,10 @@ __marimo__/
 # Sarva agent run transcripts (runtime artifacts, not source)
 .sarva/
 
+# apps/desktop web UI (Node/Vite). `dist/` above already covers the Vite
+# build output. `core/sarva/server/static/` is the deliberately-committed
+# copy of that build output that ships inside the Python package — see
+# BUILD-JOURNAL.md for why, and do NOT add it here.
+node_modules/
+*.tsbuildinfo
+

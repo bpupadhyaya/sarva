@@ -273,3 +273,67 @@ rather than overstating either as covering the other.
 **Next:** the web UI (React), or a considered design for server-side tool
 confirmation (REST vs. a stateful WS round-trip) before adding tools to
 `/chat`/`/ws/chat`.
+
+## 2026-07-21 — T3: the web UI, and `sarva serve` becomes a complete browser experience
+
+**Built:**
+- `apps/desktop/` — a real React + TypeScript + Vite app (per the design
+  doc's decided stack), hand-written rather than scaffolded from a
+  template, kept minimal and readable: a chat UI that opens `/ws/chat`,
+  streams `text_delta` events into a live-growing assistant bubble, and
+  ends cleanly on `run_done`. Dark-mode aware via `prefers-color-scheme`.
+- A small local `events.ts` mirroring `sarva.agent.events.AgentEvent`'s
+  JSON shape — scoped deliberately to this app for now rather than
+  factored into the design doc's planned `sdks/typescript/` package, since
+  it has exactly one consumer today; noted as the natural next home once a
+  second one shows up.
+- **`sarva serve` now serves the whole thing.** `core/sarva/server/app.py`
+  conditionally mounts a built UI at `/` (`StaticFiles`, only if
+  `sarva/server/static/` exists — API-only mode still works if it
+  doesn't). The static assets are the *committed, built output* of
+  `apps/desktop/`, copied into the Python package so `pip install sarva`
+  users get a working web UI without needing Node installed. This is a
+  **manual step for now** (build, then copy) — a real release pipeline
+  (T4/CI territory) should automate rebuilding on every release instead;
+  documented as a known limitation, not silently glossed over.
+- `.gitignore`: added `node_modules/` and `*.tsbuildinfo`. The generic
+  `dist/` rule already inherited from the Python template happens to also
+  cover Vite's build output — verified with `git check-ignore`, not
+  assumed.
+
+**Verified — real build, real server, real routing, not just code review:**
+- Ran `npm install` + `tsc -b` + `vite build` for real: 27 modules
+  transformed, zero type errors, a genuine production bundle produced.
+- Started the actual `sarva serve` process (again, not the in-process test
+  client) and confirmed with `curl`: `/health` and `/models` (explicit API
+  routes) are **not shadowed** by the `/` static mount; `/` correctly
+  serves the built `index.html`; the exact hashed asset paths Vite
+  generated (`/assets/index-*.js`, `/assets/index-*.css`) resolve with
+  `200` through the FastAPI mount — proving the asset-linking actually
+  works end-to-end through this serving path, not just under Vite's own
+  dev server.
+- Full test suite still green afterward (55/55) — the static mount didn't
+  regress anything.
+
+**Known gaps (documented, not hidden):**
+- The chat UI is text-only — no image attach button yet (the CLI's
+  `--image` flag has no UI equivalent), and no tool-use rendering (the
+  backend doesn't support tools over `/ws/chat` yet either — see the
+  previous entry's note on needing a real confirmation-over-WS design).
+- No `npm test`/component tests for the React app yet — verified via a
+  real build + real server + real HTTP requests this round, which is
+  meaningfully better than nothing, but not the same as unit-level
+  coverage of the UI's own logic (e.g. the streaming-delta accumulation).
+- Static-asset build is a manual, un-automated step (see above) — a stale
+  `sarva/server/static/` after a UI source change is a real risk until a
+  CI job (or at minimum a `Makefile`/script) rebuilds and re-copies it
+  automatically.
+
+**Closed within this same entry:** added `scripts/build-web.sh` (build +
+copy in one command, actually run and verified to reproduce the identical
+build) — the "manual step" risk above is now "run one script before
+committing" rather than "remember several commands in the right order."
+Still not CI-automated, but meaningfully lower-risk.
+
+**Next:** UI component tests, or the tool-confirmation-over-WS design
+needed before tool-using conversations can reach the browser.

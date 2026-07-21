@@ -5,13 +5,21 @@ everything routes to the offline MockProvider. `/chat` is single-turn
 non-streaming (mirrors `sarva chat`); `/ws/chat` streams the same
 AgentEvents the CLI renders, one JSON frame per event, ending with a
 `run_done` frame.
+
+If a built web UI is present at `sarva/server/static/` (the React app in
+`apps/desktop/`, built via `npm run build` and copied in — see
+BUILD-JOURNAL.md for why this is currently a manual step rather than a CI
+one), it's mounted at `/` so `sarva serve` alone gives a complete browser
+experience. Without it, this is API-only — nothing breaks either way.
 """
 
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 from sarva.agent.budget import Spend
 from sarva.agent.events import AgentState
@@ -21,6 +29,8 @@ from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message
 from sarva.runtime import build_providers, build_router
 from sarva.server.schemas import ChatRequest, ChatResponse, ModelInfoOut
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 def _extra_content_from(req: ChatRequest) -> list[ContentBlock]:
@@ -114,5 +124,8 @@ def create_app() -> FastAPI:
             pass
         finally:
             await websocket.close()
+
+    if _STATIC_DIR.is_dir():
+        app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="web-ui")
 
     return app
