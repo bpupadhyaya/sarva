@@ -19,7 +19,8 @@ from rich.markup import escape
 
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
-from sarva.multimodal.content import ContentBlock, ImageBlock
+from sarva.memory.session import SessionStore
+from sarva.multimodal.content import ContentBlock, ImageBlock, Message, TextBlock
 from sarva.providers.anthropic_provider import AnthropicProvider
 from sarva.providers.base import TextDeltaEvent
 from sarva.providers.mock import MockProvider
@@ -27,6 +28,8 @@ from sarva.providers.ollama_provider import OllamaProvider
 from sarva.providers.registry import Registry, Router, load_routing
 
 app = typer.Typer(help="Sarva — an open, all-in-one multimodal AGI tool.")
+sessions_app = typer.Typer(help="Manage persisted chat sessions (used by `sarva chat --session`).")
+app.add_typer(sessions_app, name="sessions")
 console = Console()
 
 _DATA_DIR = Path(__file__).parent / "providers" / "data"
@@ -75,25 +78,44 @@ def chat(
     image: Path | None = typer.Option(
         None, "--image", help="Attach an image file (requires a vision-capable model)."
     ),
+    session: str | None = typer.Option(
+        None,
+        "--session",
+        help="Remember this conversation under a name (loads prior history, "
+        "saves after the turn). Omit for a one-shot, unremembered chat.",
+    ),
 ) -> None:
     """One-shot chat — no tools, single turn."""
-    asyncio.run(_chat(message, image))
+    asyncio.run(_chat(message, image, session))
 
 
-async def _chat(message: str, image: Path | None) -> None:
+async def _chat(message: str, image: Path | None, session: str | None) -> None:
+    store = SessionStore()
+    history = store.load(session) if session else []
     extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
+
     loop = AgentLoop(
         router=_build_router(), providers=_build_providers(), tools=[], confirm=always_allow
     )
-    async for event in loop.run(message, extra_content=extra_content):
+    final_message: Message | None = None
+    async for event in loop.run(message, history=history, extra_content=extra_content):
         # Model output may itself contain "[", e.g. markdown links or
         # citations — never markup-parse text that came from the model.
         if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
             console.print(event.event.text, end="", markup=False)
         if event.type == "run_done":
             console.print()
+            final_message = event.final_message
             if event.state != "done":
                 console.print(f"[red]run ended: {event.state}[/red]")
+
+    # Tool-free by construction (chat passes tools=[]), so the full turn is
+    # exactly [user message, final assistant message] — safe to append as-is.
+    # `sarva run` isn't wired for --session yet: reconstructing history across
+    # tool-use rounds needs more than this. See BUILD-JOURNAL.md.
+    if session and final_message is not None:
+        user_message = Message(role="user", content=[TextBlock(text=message), *extra_content])
+        store.save(session, [*history, user_message, final_message])
 
 
 @app.command()
@@ -144,6 +166,26 @@ def models_cmd() -> None:
     for m in router.registry.all():
         mark = "[green]x[/green]" if m.id in router.available else " "
         console.print(f"\\[{mark}] {m.id:20s} {m.display_name}")
+
+
+@sessions_app.command("list")
+def sessions_list() -> None:
+    """List saved chat sessions and how many messages each holds."""
+    store = SessionStore()
+    names = store.list_sessions()
+    if not names:
+        console.print("no saved sessions")
+        return
+    for name in names:
+        count = len(store.load(name))
+        console.print(f"{name}  ({count} messages)")
+
+
+@sessions_app.command("clear")
+def sessions_clear(name: str = typer.Argument(..., help="Session name to delete.")) -> None:
+    """Delete a saved session."""
+    SessionStore().clear(name)
+    console.print(f"cleared session {name!r}")
 
 
 if __name__ == "__main__":

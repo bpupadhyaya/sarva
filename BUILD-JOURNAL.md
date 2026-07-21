@@ -142,3 +142,38 @@ agent loop; image input end-to-end; first audio path).
 **Next:** first audio path (transcription-based degradation for text-only
 models), or content-level degradation for image→text as the alternative to
 routing failure. Then continue toward T3 (server + web UI).
+
+## 2026-07-21 — Session persistence (memory, first slice)
+
+**Built:**
+- `sarva.memory.session.SessionStore` — file-based session persistence
+  (`~/.sarva/sessions/<name>.json`, one JSON file per session, plain and
+  greppable per the design doc's memory philosophy). Session names are
+  validated against `[A-Za-z0-9_-]+` and **rejected** (not silently
+  stripped) if invalid — silent sanitization risked two distinct names
+  colliding onto the same file and corrupting history.
+- `sarva chat --session <name>` now remembers: loads prior history before
+  the run, appends the new user+assistant turn, saves after. Omitting
+  `--session` keeps the original one-shot behavior unchanged (no regression).
+- `sarva sessions list` / `sarva sessions clear <name>` — inspect and manage
+  saved sessions.
+- 8 new conformance tests (round trip, binary content survives, missing
+  session behavior, name validation, clear/list).
+
+**Verified, not just written:** ran two genuinely separate CLI process
+invocations against a scratch `$HOME`, confirmed the second call actually
+loaded the first call's history (4 total messages after 2 calls, correct
+role/content), confirmed `sessions list`/`clear` operate on the real file.
+
+**Scope, stated plainly:** this is proven correct only for `sarva chat`,
+which never uses tools — the full turn is provably exactly `[user message,
+final assistant message]`, safe to reconstruct from `RunDoneEvent`.
+`sarva run` (which does use tools) is **not** wired for `--session` yet:
+reconstructing history across multiple model/tool rounds needs either a
+richer return value from the loop or a transcript replay, and building
+either without getting the ordering subtly wrong deserved its own slice of
+work rather than a rushed add-on here.
+
+**Next:** extend session persistence to `sarva run` (likely via transcript
+replay, since every run already writes `transcript.jsonl`), or move to T3
+(FastAPI server + web UI) — whichever proves more valuable next iteration.
