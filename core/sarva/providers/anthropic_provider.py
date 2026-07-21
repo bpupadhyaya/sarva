@@ -13,12 +13,14 @@ without ANTHROPIC_API_KEY) until a real run validates it. See BUILD-JOURNAL.md.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator
 from typing import Any
 
 import anthropic
 
 from sarva.multimodal.content import (
+    ImageBlock,
     Message,
     TextBlock,
     ThinkingBlock,
@@ -58,6 +60,17 @@ def _to_anthropic_message(m: Message) -> dict[str, Any]:
     for b in m.content:
         if isinstance(b, TextBlock):
             blocks.append({"type": "text", "text": b.text})
+        elif isinstance(b, ImageBlock):
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": b.media_type,
+                        "data": base64.standard_b64encode(b.resolve_bytes()).decode(),
+                    },
+                }
+            )
         elif isinstance(b, ToolCallBlock):
             blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.arguments})
         elif isinstance(b, ToolResultBlock):

@@ -20,6 +20,12 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.flake8-bugbear]
+# typer requires typer.Option(...)/typer.Argument(...) as literal default
+# values — that's how it introspects the CLI signature. Not a mutable-default
+# footgun; exempt it from B008 rather than suppressing the whole rule.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = ["live: requires a real provider API key/runtime (skipped by default)"]

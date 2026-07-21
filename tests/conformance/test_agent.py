@@ -8,12 +8,19 @@ from pathlib import Path
 import pytest
 from sarva.agent.budget import Budget
 from sarva.agent.events import LEGAL, AgentState
-from sarva.agent.loop import AgentLoop
+from sarva.agent.loop import AgentLoop, _required_modalities
 from sarva.agent.tools import ToolContext, always_allow
-from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
-from sarva.providers.base import ToolSpec
+from sarva.multimodal.content import (
+    ImageBlock,
+    Message,
+    Modality,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
+from sarva.providers.base import ModelCapabilities, ModelCost, ModelInfo, ToolSpec
 from sarva.providers.mock import MockProvider, ScriptedTurn
-from sarva.providers.registry import Registry, Router, load_routing
+from sarva.providers.registry import Registry, Router, TaskClass, load_routing
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "core" / "sarva" / "providers" / "data"
 
@@ -22,6 +29,29 @@ def _router() -> Router:
     registry = Registry.load(_DATA_DIR / "models.yaml")
     routing = load_routing(_DATA_DIR / "routing.yaml")
     return Router(registry, routing, available={"mock"})
+
+
+def _text_only_model() -> ModelInfo:
+    return ModelInfo(
+        id="text-only",
+        provider="mock",
+        display_name="Text Only Mock",
+        capabilities=ModelCapabilities(
+            modalities_in={Modality.TEXT},
+            modalities_out={Modality.TEXT},
+            tool_use=True,
+            thinking=False,
+            context_window=100_000,
+            max_output=8_000,
+        ),
+        cost=ModelCost(),
+    )
+
+
+def _text_only_router() -> Router:
+    model = _text_only_model()
+    registry = Registry(models={model.id: model})
+    return Router(registry, routing={TaskClass.MAIN: ["text-only"]}, available={"text-only"})
 
 
 class _EchoTool:
@@ -198,3 +228,52 @@ async def test_transcript_is_replayable(run_root):
     assert len(run_dirs) == 1
     lines = (run_dirs[0] / "transcript.jsonl").read_text().splitlines()
     assert len(lines) == len(events)
+
+
+def test_required_modalities_text_only():
+    messages = [Message(role="user", content=[TextBlock(text="hi")])]
+    assert _required_modalities(messages) == {Modality.TEXT}
+
+
+def test_required_modalities_includes_image_when_present():
+    messages = [
+        Message(
+            role="user",
+            content=[
+                TextBlock(text="what's this?"),
+                ImageBlock(media_type="image/png", data=b"\x89PNG\r\n"),
+            ],
+        )
+    ]
+    assert _required_modalities(messages) == {Modality.TEXT, Modality.IMAGE}
+
+
+@pytest.mark.asyncio
+async def test_image_content_with_no_vision_capable_model_fails_cleanly(run_root):
+    """The loop asks the router for a model supporting every modality present
+    in the conversation. When none is available, this must be a clean
+    terminal FAILED state — never an unhandled exception out of the
+    generator."""
+    provider = MockProvider(script=[ScriptedTurn(text="should never be reached")])
+    loop = AgentLoop(router=_text_only_router(), providers={"mock": provider}, run_root=run_root)
+    image = ImageBlock(media_type="image/png", data=b"\x89PNG\r\n")
+
+    events = [e async for e in loop.run("what's in this image?", extra_content=[image])]
+
+    assert [e.type for e in events] == ["state_changed", "run_done"]
+    assert events[0].state == AgentState.FAILED
+    assert events[-1].state == AgentState.FAILED
+    assert events[-1].final_message is None
+
+
+@pytest.mark.asyncio
+async def test_text_only_task_still_works_against_text_only_model(run_root):
+    """Regression guard: modality-aware routing must not break the plain
+    text-only path that every other test in this file relies on."""
+    provider = MockProvider(script=[ScriptedTurn(text="all good")])
+    loop = AgentLoop(router=_text_only_router(), providers={"mock": provider}, run_root=run_root)
+
+    events = [e async for e in loop.run("hello")]
+
+    assert events[-1].type == "run_done"
+    assert events[-1].state == AgentState.DONE

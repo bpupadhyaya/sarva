@@ -7,6 +7,7 @@ the offline MockProvider so `sarva chat "hello"` always works.
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from rich.markup import escape
 
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
+from sarva.multimodal.content import ContentBlock, ImageBlock
 from sarva.providers.anthropic_provider import AnthropicProvider
 from sarva.providers.base import TextDeltaEvent
 from sarva.providers.mock import MockProvider
@@ -60,17 +62,30 @@ def _build_providers() -> dict[str, Any]:
     return providers
 
 
+def _load_image(path: str) -> ImageBlock:
+    media_type, _ = mimetypes.guess_type(path)
+    if media_type is None or not media_type.startswith("image/"):
+        raise typer.BadParameter(f"cannot determine an image media type for {path!r}")
+    return ImageBlock(media_type=media_type, data=Path(path).read_bytes())
+
+
 @app.command()
-def chat(message: str = typer.Argument(..., help="Message to send.")) -> None:
+def chat(
+    message: str = typer.Argument(..., help="Message to send."),
+    image: Path | None = typer.Option(
+        None, "--image", help="Attach an image file (requires a vision-capable model)."
+    ),
+) -> None:
     """One-shot chat — no tools, single turn."""
-    asyncio.run(_chat(message))
+    asyncio.run(_chat(message, image))
 
 
-async def _chat(message: str) -> None:
+async def _chat(message: str, image: Path | None) -> None:
+    extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
     loop = AgentLoop(
         router=_build_router(), providers=_build_providers(), tools=[], confirm=always_allow
     )
-    async for event in loop.run(message):
+    async for event in loop.run(message, extra_content=extra_content):
         # Model output may itself contain "[", e.g. markdown links or
         # citations — never markup-parse text that came from the model.
         if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):

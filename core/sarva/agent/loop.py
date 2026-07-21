@@ -5,10 +5,14 @@ calls (concurrently, gated by confirm policy for destructive tools),
 enforces budgets, and yields a single typed AgentEvent stream. The
 transcript is append-only JSONL so a run is inspectable and resumable.
 
-T1 simplifications (documented, not hidden):
-  * Multimodal degradation is not yet wired here — T1 tools are text-only,
-    so messages already satisfy every routed model's `modalities_in`. Real
-    wiring lands with the multimodal I/O pipeline (T2).
+T2: the loop is now multimodal-aware at model selection — it scans the
+initiating message(s) for the modalities actually present (text, image,
+...) and routes to a model that supports all of them, instead of always
+assuming text-only. Full content-level degradation (e.g. auto-downgrading
+video to sampled frames for a model that can't see video) still lands with
+the multimodal I/O pipeline; T2 wires *routing*, not yet *degradation*.
+
+T1 simplifications still true (documented, not hidden):
   * Tool-start/finish events for a batch of concurrent tool calls are
     yielded in two grouped passes (all-started, then all-finished) rather
     than truly interleaved in wall-clock order. Tools still execute
@@ -37,7 +41,15 @@ from sarva.agent.events import (
     ToolStartedEvent,
 )
 from sarva.agent.tools import ConfirmPolicy, Tool, ToolContext, always_allow
-from sarva.multimodal.content import Message, TextBlock, ToolCallBlock, ToolResultBlock
+from sarva.multimodal.content import (
+    ContentBlock,
+    Message,
+    Modality,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+    modality_of,
+)
 from sarva.providers.base import (
     DoneEvent,
     GenerateRequest,
@@ -47,6 +59,17 @@ from sarva.providers.base import (
     ToolSpec,
 )
 from sarva.providers.registry import Router, TaskClass
+
+
+def _required_modalities(messages: list[Message]) -> set[Modality]:
+    """What the routed model must support, computed from what's actually in
+    the conversation so far. Always includes TEXT — every current model
+    handles it, and it keeps the set non-empty for the router's subset check."""
+    needed = {Modality.TEXT}
+    for m in messages:
+        for block in m.content:
+            needed.add(modality_of(block))
+    return needed
 
 
 class AgentLoop:
@@ -78,7 +101,11 @@ class AgentLoop:
         task: str,
         history: list[Message] | None = None,
         model_override: str | None = None,
+        extra_content: list[ContentBlock] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        """`extra_content` attaches non-text blocks (e.g. an ImageBlock) to
+        the initiating user turn alongside `task`'s text — purely additive,
+        every existing text-only call site is unaffected."""
         run_id = uuid.uuid4().hex[:12]
         run_dir = Path(self._run_root) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -90,14 +117,30 @@ class AgentLoop:
             return event
 
         messages: list[Message] = list(history or []) + [
-            Message(role="user", content=[TextBlock(text=task)])
+            Message(role="user", content=[TextBlock(text=task), *(extra_content or [])])
         ]
         spend = Spend()
         started = time.monotonic()
         state = AgentState.INIT
         final_message: Message | None = None
 
-        model = self._router.pick(self._task_class, override=model_override)
+        try:
+            model = self._router.pick(
+                self._task_class,
+                needs=_required_modalities(messages),
+                override=model_override,
+            )
+        except LookupError as e:
+            # No available model supports what this conversation needs (e.g.
+            # an image with no vision-capable model configured). This is an
+            # INIT-time failure the frozen LEGAL table doesn't model as a
+            # transition (it has no predecessor state to violate) — handled
+            # directly rather than via transition(), which doesn't exist yet
+            # at this point in the function.
+            state = AgentState.FAILED
+            yield await emit(StateChangedEvent(state=state, detail=str(e)))
+            yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+            return
         provider = self._providers[model.provider]
         ctx = ToolContext(workdir=self._workdir, run_dir=str(run_dir), emit=emit)
 

@@ -89,3 +89,56 @@ all four offline examples run end-to-end with correct output.
 
 **Next:** T2 — multimodal I/O pipeline (wire `degrade_message` into the
 agent loop; image input end-to-end; first audio path).
+
+## 2026-07-21 — T2 started: image input end-to-end
+
+**Built:**
+- `AgentLoop.run()` gained `extra_content: list[ContentBlock] | None` — a
+  purely additive parameter (every existing `task: str`-only call site is
+  unaffected) that attaches non-text blocks to the initiating user turn.
+- A new `_required_modalities()` helper scans the conversation for the
+  modalities actually present and the loop now calls
+  `router.pick(needs=...)` with it, instead of always assuming text-only.
+  A message with an image now correctly routes to a vision-capable model.
+- `AnthropicProvider._to_anthropic_message` now encodes `ImageBlock` into
+  the real Anthropic API image content-block shape (base64 `source`) — this
+  closed a real gap: the content model had `ImageBlock` since T0, but no
+  adapter could actually *send* one until now.
+- `sarva chat --image path.png "..."` — CLI support for attaching an image,
+  with a friendly rejection (`typer.BadParameter`) for non-image files.
+- Router-failure hardening: if no available model supports what the
+  conversation needs (e.g. an image with only text-only models configured),
+  the loop now yields a clean `FAILED` terminal event instead of letting
+  `router.pick`'s `LookupError` escape the generator unhandled — a real bug
+  that existed since T0/T1 and was only caught while building this feature.
+
+**Verified, not just written:**
+- 36/36 tests passing (7 new: modality computation, clean-failure-on-no-model,
+  text-only regression guard, image-block base64 round-trip, tool call/result
+  translation — all pure/offline, no network).
+- **Ran the actual CLI against a real generated PNG** (`sarva chat --image`):
+  confirmed the image is correctly routed to `mock` (registered as
+  vision-capable) and the run completes `DONE` — the full
+  CLI → ContentBlock → loop → `_required_modalities` → `Router.pick` →
+  provider pipeline verified working, not just unit-tested in isolation.
+- Verified the non-image-file rejection path produces a clean CLI error
+  (exit code 2, readable message) rather than a stack trace.
+- Fixed a ruff false-positive (B008 on `typer.Option` defaults — required by
+  typer's own introspection, not a mutable-default bug) via
+  `extend-immutable-calls` rather than suppressing the rule wholesale.
+
+**Known gaps (documented, not hidden):**
+- This is *routing* awareness, not full *degradation* — `degrade_message`
+  (the recursive video→frames→text style fallback from spec-02) still isn't
+  called anywhere. Today: either a model supports what's in the message, or
+  the run fails cleanly. Graceful downgrading (e.g. auto-describing an image
+  for a text-only model) is real T2 remaining work.
+- `ImageBlock` only supports `data`/`path` sources end-to-end — a `url`
+  source still raises in `resolve_bytes()` (unimplemented `fetch` module, as
+  spec-02 already documented).
+- No audio or document (PDF) path yet — image was the first modality wired
+  because it's the one with a real vision-capable model already registered.
+
+**Next:** first audio path (transcription-based degradation for text-only
+models), or content-level degradation for image→text as the alternative to
+routing failure. Then continue toward T3 (server + web UI).
