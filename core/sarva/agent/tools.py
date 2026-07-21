@@ -12,9 +12,14 @@ import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
+
+import httpx
 
 from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.providers.base import ToolSpec
+
+_MAX_FETCH_CHARS = 50_000
 
 
 class ToolContext:
@@ -128,4 +133,50 @@ class RunShellTool:
         )
 
 
-BUILTIN_TOOLS: list[Tool] = [ReadFileTool(), WriteFileTool(), RunShellTool()]
+class WebFetchTool:
+    """Non-destructive: read-only network access, no state changed."""
+
+    spec = ToolSpec(
+        name="web_fetch",
+        description="Fetch the text content of an http(s) URL. Content is "
+        f"truncated to {_MAX_FETCH_CHARS} characters.",
+        input_schema={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        destructive=False,
+    )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        url = args["url"]
+        scheme = urlparse(url).scheme
+        if scheme not in ("http", "https"):
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=f"unsupported URL scheme: {scheme!r}")],
+                is_error=True,
+            )
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                text = resp.text[:_MAX_FETCH_CHARS]
+                if len(resp.text) > _MAX_FETCH_CHARS:
+                    text += "\n\n[truncated]"
+                return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
+        except httpx.HTTPError as e:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=f"fetch failed: {e}")],
+                is_error=True,
+            )
+
+
+BUILTIN_TOOLS: list[Tool] = [
+    ReadFileTool(),
+    WriteFileTool(),
+    RunShellTool(),
+    WebFetchTool(),
+]

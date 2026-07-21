@@ -47,3 +47,45 @@ One entry per milestone: what was built, what was verified, what's next.
 
 **Next:** Ollama local adapter, live-key validation of the Anthropic adapter,
 more built-in tools (web fetch/search), then T2 (multimodal I/O pipeline).
+
+## 2026-07-21 — T1 continued: Ollama adapter, web_fetch, graded examples
+
+**Built:**
+- `sarva.providers.ollama_provider.OllamaProvider` — talks to a local Ollama
+  server's `/api/chat` (NDJSON streaming), tool-call translation, namespaced
+  model-id stripping (`ollama/qwen3:8b` -> `qwen3:8b`). CLI now probes
+  `localhost:11434` (fast, 0.3s timeout) and routes to it automatically when
+  reachable — this is what makes the "free & private" tier real.
+- `WebFetchTool` — non-destructive http(s) fetch tool (scheme-validated,
+  truncated, error-handled), added to `BUILTIN_TOOLS`.
+- `tests/live/` — a new marker tier (`@pytest.mark.live`, skipped by default
+  via `-m 'not live'`) holding real-adapter conformance tests for Anthropic
+  and Ollama, `skipif`-gated on credentials/reachability so CI stays green
+  with zero secrets while still documenting what "done" means for these
+  adapters once run against the real thing.
+- `tests/conformance/test_tools.py` — file round-trip, path-escape rejection,
+  URL-scheme rejection, one live-marked real fetch.
+- **Examples 02–05**: tool use, budget-exceeded (clean stop, no hang),
+  confirmation-gating (destructive tool denied, loop continues), and a
+  real-model web-fetch demo (needs `ANTHROPIC_API_KEY`, degrades to a clear
+  message without one). Examples 01–04 actually **executed** in this
+  environment and produced the expected teaching output; 05 verified to
+  fail gracefully with no key.
+
+**Verified, not just written:** full lint (`ruff check` + `format --check`)
+clean, 29/29 mock-tier tests passing (3 live tests correctly deselected),
+all four offline examples run end-to-end with correct output.
+
+**Known gaps (documented, not hidden):**
+- Neither the Anthropic nor the Ollama adapter has been exercised against a
+  real endpoint in this sandboxed environment — both are written to their
+  documented API shapes and covered by `tests/live/`, but that suite has
+  never actually run. Treat both as **unverified until someone runs them
+  with real credentials / a real local server.**
+- Ollama's `/api/chat` doesn't return token usage — `Usage()` defaults to
+  zero for local models; cost tracking for local inference stays $0, which
+  is correct, but "tokens used" will read 0 too, which understates true
+  context consumption. Revisit if budget-by-tokens matters for local runs.
+
+**Next:** T2 — multimodal I/O pipeline (wire `degrade_message` into the
+agent loop; image input end-to-end; first audio path).

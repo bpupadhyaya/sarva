@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -20,12 +21,23 @@ from sarva.agent.tools import BUILTIN_TOOLS, always_allow
 from sarva.providers.anthropic_provider import AnthropicProvider
 from sarva.providers.base import TextDeltaEvent
 from sarva.providers.mock import MockProvider
+from sarva.providers.ollama_provider import OllamaProvider
 from sarva.providers.registry import Registry, Router, load_routing
 
 app = typer.Typer(help="Sarva — an open, all-in-one multimodal AGI tool.")
 console = Console()
 
 _DATA_DIR = Path(__file__).parent / "providers" / "data"
+_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+
+def _ollama_reachable() -> bool:
+    """Best-effort, fast probe — never blocks CLI startup for more than a beat."""
+    try:
+        httpx.get(f"{_OLLAMA_HOST}/api/tags", timeout=0.3)
+        return True
+    except httpx.HTTPError:
+        return False
 
 
 def _build_router() -> Router:
@@ -34,6 +46,8 @@ def _build_router() -> Router:
     available = {"mock"}
     if os.environ.get("ANTHROPIC_API_KEY"):
         available |= {m.id for m in registry.all() if m.provider == "anthropic"}
+    if _ollama_reachable():
+        available |= {m.id for m in registry.all() if m.provider == "ollama"}
     return Router(registry, routing, available)
 
 
@@ -41,6 +55,8 @@ def _build_providers() -> dict[str, Any]:
     providers: dict[str, Any] = {"mock": MockProvider()}
     if os.environ.get("ANTHROPIC_API_KEY"):
         providers["anthropic"] = AnthropicProvider()
+    if _ollama_reachable():
+        providers["ollama"] = OllamaProvider(host=_OLLAMA_HOST)
     return providers
 
 

@@ -6,6 +6,7 @@ mock model if ANTHROPIC_API_KEY isn't set).
 
 Run: uv run python examples/01_hello_model.py
 """
+
 from __future__ import annotations
 
 import asyncio
