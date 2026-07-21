@@ -1,0 +1,8 @@
+# Sarva routing policy — ordered candidate models per task class.
+# `mock` is always last so the CLI and test suite work with zero config.
+routing:
+  main: [claude-opus-4-8, "ollama/qwen3:8b", mock]
+  subtask: [claude-haiku-4-5, "ollama/qwen3:8b", mock]
+  escalation: [claude-fable-5, claude-opus-4-8, mock]
+  vision: [claude-opus-4-8, mock]
+  audio: [mock]

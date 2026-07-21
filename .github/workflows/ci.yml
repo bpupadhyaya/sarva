@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync workspace
+        run: uv sync --all-packages --group dev
+
+      - name: Lint
+        run: |
+          uv run ruff check core/ tests/ foundry/
+          uv run ruff format --check core/ tests/ foundry/
+
+      - name: Test (mock provider only — no API keys in CI)
+        run: uv run pytest tests/ -v

@@ -1,0 +1,65 @@
+# Sarva model registry — one entry per model Sarva can route to.
+# This is what makes "absorb the next frontier model" a data edit, not a code
+# change. Keep this file current; it is re-validated at every release.
+models:
+  - id: claude-opus-4-8
+    provider: anthropic
+    display_name: Claude Opus 4.8
+    capabilities:
+      modalities_in: [text, image, document]
+      modalities_out: [text]
+      tool_use: true
+      thinking: true
+      context_window: 1000000
+      max_output: 128000
+    cost: { input_per_mtok: 5.0, output_per_mtok: 25.0 }
+
+  - id: claude-fable-5
+    provider: anthropic
+    display_name: Claude Fable 5
+    capabilities:
+      modalities_in: [text, image, document]
+      modalities_out: [text]
+      tool_use: true
+      thinking: true
+      context_window: 1000000
+      max_output: 128000
+    cost: { input_per_mtok: 10.0, output_per_mtok: 50.0 }
+
+  - id: claude-haiku-4-5
+    provider: anthropic
+    display_name: Claude Haiku 4.5
+    capabilities:
+      modalities_in: [text, image, document]
+      modalities_out: [text]
+      tool_use: true
+      thinking: false
+      context_window: 200000
+      max_output: 64000
+    cost: { input_per_mtok: 1.0, output_per_mtok: 5.0 }
+
+  - id: ollama/qwen3:8b
+    provider: ollama
+    display_name: Qwen 3 8B (local)
+    local: true
+    capabilities:
+      modalities_in: [text]
+      modalities_out: [text]
+      tool_use: true
+      thinking: false
+      context_window: 131072
+      max_output: 32768
+    cost: { input_per_mtok: 0.0, output_per_mtok: 0.0 }
+
+  - id: mock
+    provider: mock
+    display_name: Mock Provider (offline, deterministic)
+    local: true
+    capabilities:
+      modalities_in: [text, image, document]
+      modalities_out: [text]
+      tool_use: true
+      thinking: true
+      context_window: 1000000
+      max_output: 128000
+    cost: { input_per_mtok: 0.0, output_per_mtok: 0.0 }

@@ -1,0 +1,26 @@
+site_name: Sarva — Building a Multimodal AGI Tool
+site_description: An open, all-in-one multimodal AGI tool, and a book on how to build one.
+repo_url: https://github.com/bpupadhyaya/sarva
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.tabbed

@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Sarva agent run transcripts (runtime artifacts, not source)
+.sarva/
+

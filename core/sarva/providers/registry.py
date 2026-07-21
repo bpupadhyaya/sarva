@@ -1,0 +1,81 @@
+"""sarva.providers.registry — the model registry and router.
+
+The registry is data (`models.yaml`); the router is a small policy that
+picks a model per task class from that data. This is the mechanism that
+lets Sarva absorb a new frontier model as a one-entry registry change
+instead of a code change anywhere else in the system.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from pathlib import Path
+
+import yaml
+
+from sarva.multimodal.content import Modality
+from sarva.providers.base import ModelInfo
+
+
+class TaskClass(StrEnum):
+    MAIN = "main"  # the primary agent loop
+    SUBTASK = "subtask"  # cheap delegated work
+    ESCALATION = "escalation"  # hardest problems (two-strikes)
+    VISION = "vision"
+    AUDIO = "audio"
+
+
+class Registry:
+    def __init__(self, models: dict[str, ModelInfo]):
+        self._models = models
+
+    @classmethod
+    def load(cls, path: Path) -> Registry:
+        raw = yaml.safe_load(path.read_text())
+        models = {m["id"]: ModelInfo.model_validate(m) for m in raw["models"]}
+        return cls(models)
+
+    def get(self, model_id: str) -> ModelInfo:
+        return self._models[model_id]
+
+    def all(self) -> list[ModelInfo]:
+        return list(self._models.values())
+
+
+def load_routing(path: Path) -> dict[TaskClass, list[str]]:
+    raw = yaml.safe_load(path.read_text())
+    return {TaskClass(k): v for k, v in raw["routing"].items()}
+
+
+class Router:
+    """Policy: data-driven default candidates per TaskClass with a
+    modality-aware, availability-aware fallback. `pick()` returns the first
+    candidate that (a) exists in the registry, (b) supports the modalities
+    the caller needs, and (c) is available (API key present / local runtime
+    up / etc., as tracked by the caller in `available`)."""
+
+    def __init__(
+        self,
+        registry: Registry,
+        routing: dict[TaskClass, list[str]],
+        available: set[str],
+    ):
+        self.registry = registry
+        self.routing = routing
+        self.available = available
+
+    def pick(
+        self,
+        task: TaskClass,
+        needs: set[Modality] = frozenset({Modality.TEXT}),
+        override: str | None = None,
+    ) -> ModelInfo:
+        if override:
+            return self.registry.get(override)
+        for mid in self.routing.get(task, []):
+            if mid not in self.available:
+                continue
+            m = self.registry.get(mid)
+            if needs <= m.capabilities.modalities_in:
+                return m
+        raise LookupError(f"no available model for {task} needing {needs}")

@@ -1,0 +1,26 @@
+[project]
+name = "sarva-workspace"
+version = "0.0.0"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["core", "foundry"]
+
+[tool.uv.sources]
+sarva = { workspace = true }
+sarva-foundry = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.8"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["live: requires a real provider API key/runtime (skipped by default)"]
+addopts = "-m 'not live'"
