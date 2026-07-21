@@ -148,4 +148,69 @@ describe("App", () => {
     const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
     expect(input.disabled).toBe(false);
   });
+
+  it("shows an Approve/Deny card on needs_confirmation and sends the reply on Approve", () => {
+    render(<App />);
+    submitMessage("delete something");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, {
+      type: "needs_confirmation",
+      call: { id: "c1", name: "delete_thing", arguments: { path: "x.txt" } },
+    });
+
+    expect(screen.getByText("delete_thing")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+
+    expect(JSON.parse(ws.sent.at(-1)!)).toEqual({ approved: true });
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("sends {approved: false} on Deny and dismisses the card", () => {
+    render(<App />);
+    submitMessage("delete something");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, {
+      type: "needs_confirmation",
+      call: { id: "c1", name: "delete_thing", arguments: {} },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /deny/i }));
+
+    expect(JSON.parse(ws.sent.at(-1)!)).toEqual({ approved: false });
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("renders tool_started and tool_finished as inline status lines", () => {
+    render(<App />);
+    submitMessage("write a file");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, {
+      type: "tool_started",
+      call: { id: "c1", name: "write_file", arguments: { path: "hi.txt" } },
+    });
+    emit(ws, { type: "tool_finished", result: { is_error: false }, seconds: 0.01 });
+
+    expect(screen.getByText(/write_file/)).toBeInTheDocument();
+    expect(screen.getByText(/ok/)).toBeInTheDocument();
+  });
+
+  it("clears the confirmation card on run_done even if never answered", () => {
+    render(<App />);
+    submitMessage("delete something");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, {
+      type: "needs_confirmation",
+      call: { id: "c1", name: "delete_thing", arguments: {} },
+    });
+    emit(ws, { type: "run_done", state: "done", final_message: null });
+
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
 });

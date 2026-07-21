@@ -383,3 +383,54 @@ claim of "this works" all week, now applied to a CI check about CI checks.
 **Next:** the tool-confirmation-over-WS design needed before tool-using
 conversations can reach the browser, or continue toward T4 (Tauri desktop
 wrapper).
+
+## 2026-07-21 — Tool confirmation over WebSocket: the browser can now act, safely
+
+**Built:**
+- `/ws/chat` now runs with `BUILTIN_TOOLS` enabled (mirrors `sarva run`,
+  not `sarva chat` — documented explicitly, since `/chat` stays tool-free:
+  a stateless REST request can't naturally pause mid-request for a
+  confirmation round-trip, which is exactly why this lives on the
+  WebSocket). Client sends `{"message", "session", "auto"}`; a destructive
+  tool call pauses the run and sends `needs_confirmation`, then the
+  *next* value the client sends — `{"approved": bool}` — is consumed as
+  the answer before the loop continues. `"auto": true` mirrors
+  `sarva run --auto`.
+- **A real protocol subtlety, found and documented, not glossed over:**
+  `needs_confirmation` is emitted by the loop whenever a destructive call
+  happens *at all* — it is not suppressed by `auto`. What changes is the
+  confirm *policy* (`always_allow`, which never reads from the socket). A
+  client in auto mode must treat the event as informational only and must
+  NOT reply to it — there's nothing waiting to consume a reply, and
+  sending one risks it being misread as the answer to a later, real
+  prompt. Documented in the handler's docstring for whoever builds the
+  next client.
+- **The web UI now has real confirmation UI**, not just backend plumbing:
+  an Approve/Deny card renders on `needs_confirmation` and blocks further
+  input until answered; `tool_started`/`tool_finished` render as inline
+  status lines in the assistant bubble.
+- 3 new server tests (approve runs the tool, deny skips it, auto never
+  blocks waiting for a reply) + 4 new UI tests (confirmation card renders
+  and responds correctly, tool status lines render, card clears on
+  run_done even if never answered) — 58 Python + 11 web tests, all
+  passing.
+
+**A real bug in my own first test, caught by actually running it:** my
+first "auto mode" test asserted `needs_confirmation` would never be sent
+at all — wrong assumption about the wire protocol, not a code bug. Writing
+a test that failed for the *right* reason (a false assumption, not a
+missed edge case) led directly to documenting the actual, correct
+behavior above instead of shipping an incorrect mental model into the
+docstring.
+
+**Verified beyond the test suite (again, real process not just TestClient):**
+started the actual `sarva serve`, confirmed `/health`, `/models`, and a
+real WebSocket connection with `BUILTIN_TOOLS` wired in all still work
+over an actual TCP socket (the mock provider can't self-initiate tool
+calls to prove the confirmation round-trip this way — that's what the
+scripted-provider pytest tests are for, and they exercise the identical
+server code path via ASGI transport, not a mock of it).
+
+**Next:** T4 — the Tauri desktop wrapper (the one-click app for
+non-developers), or extending `/chat` (REST) with a "define outcome"
+style async pattern if tool use is ever needed there too.
