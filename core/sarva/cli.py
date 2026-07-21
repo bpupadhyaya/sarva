@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
-import os
 from pathlib import Path
 from typing import Any
 
-import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -21,48 +19,18 @@ from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message, TextBlock
-from sarva.providers.anthropic_provider import AnthropicProvider
 from sarva.providers.base import TextDeltaEvent
-from sarva.providers.mock import MockProvider
-from sarva.providers.ollama_provider import OllamaProvider
-from sarva.providers.registry import Registry, Router, load_routing
+from sarva.runtime import build_providers, build_router
 
 app = typer.Typer(help="Sarva — an open, all-in-one multimodal AGI tool.")
 sessions_app = typer.Typer(help="Manage persisted chat sessions (used by `sarva chat --session`).")
 app.add_typer(sessions_app, name="sessions")
 console = Console()
 
-_DATA_DIR = Path(__file__).parent / "providers" / "data"
-_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-
-
-def _ollama_reachable() -> bool:
-    """Best-effort, fast probe — never blocks CLI startup for more than a beat."""
-    try:
-        httpx.get(f"{_OLLAMA_HOST}/api/tags", timeout=0.3)
-        return True
-    except httpx.HTTPError:
-        return False
-
-
-def _build_router() -> Router:
-    registry = Registry.load(_DATA_DIR / "models.yaml")
-    routing = load_routing(_DATA_DIR / "routing.yaml")
-    available = {"mock"}
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        available |= {m.id for m in registry.all() if m.provider == "anthropic"}
-    if _ollama_reachable():
-        available |= {m.id for m in registry.all() if m.provider == "ollama"}
-    return Router(registry, routing, available)
-
-
-def _build_providers() -> dict[str, Any]:
-    providers: dict[str, Any] = {"mock": MockProvider()}
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        providers["anthropic"] = AnthropicProvider()
-    if _ollama_reachable():
-        providers["ollama"] = OllamaProvider(host=_OLLAMA_HOST)
-    return providers
+# Kept as thin aliases so the rest of this file reads the same as before the
+# provider-wiring logic moved to sarva.runtime (shared with the server skin).
+_build_router = build_router
+_build_providers = build_providers
 
 
 def _load_image(path: str) -> ImageBlock:
@@ -186,6 +154,19 @@ def sessions_clear(name: str = typer.Argument(..., help="Session name to delete.
     """Delete a saved session."""
     SessionStore().clear(name)
     console.print(f"cleared session {name!r}")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Host to bind."),
+    port: int = typer.Option(8000, help="Port to bind."),
+) -> None:
+    """Run the REST + WebSocket server — the surface a web UI or desktop app uses."""
+    import uvicorn
+
+    from sarva.server.app import create_app
+
+    uvicorn.run(create_app(), host=host, port=port)
 
 
 if __name__ == "__main__":

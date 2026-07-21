@@ -177,3 +177,48 @@ work rather than a rushed add-on here.
 **Next:** extend session persistence to `sarva run` (likely via transcript
 replay, since every run already writes `transcript.jsonl`), or move to T3
 (FastAPI server + web UI) — whichever proves more valuable next iteration.
+
+## 2026-07-21 — T3 started: FastAPI server (REST + WebSocket)
+
+**Built:**
+- `sarva.runtime` — extracted the provider/router wiring (Ollama-reachability
+  probe, `build_router()`, `build_providers()`) out of `cli.py` into a shared
+  module. The server needed the exact same "zero-config, auto-detect
+  Ollama" logic as the CLI, and duplicating it would have let the two skins
+  drift out of sync on what "available" means — refactored before adding
+  the second consumer, not after.
+- `sarva.server` — a FastAPI app (`create_app()`) with:
+  - `GET /health`, `GET /models` (registry + availability)
+  - `POST /chat` — non-streaming, mirrors `sarva chat` exactly (same
+    session load/save semantics)
+  - `WS /ws/chat` — streams the same `AgentEvent`s the CLI renders, one
+    JSON frame per event, ending with `run_done`; single turn per
+    connection
+- `sarva serve [--host] [--port]` — CLI command, runs the server via
+  uvicorn.
+- 7 new conformance tests (health, models, chat zero-config, session
+  persistence via both REST and WS, WS event streaming) using FastAPI's
+  in-process `TestClient` — no real network needed for CI.
+
+**Verified beyond the test suite:** started the actual `sarva serve`
+process in the background (real uvicorn, real socket), then hit it with
+real `curl` (`/health`, `/models`, `/chat`) and a real `websockets` Python
+client against `/ws/chat` — confirmed genuine end-to-end behavior over an
+actual TCP connection, not just FastAPI's in-process test transport. Server
+process cleanly stopped afterward.
+
+**Known gaps (documented, not hidden):**
+- `/ws/chat` is single-turn per connection (matches `sarva chat`'s
+  tool-free scope) — no tool-using WS endpoint yet, same limitation as
+  `sarva run --session` noted in the previous entry.
+- No CORS configuration yet — irrelevant for the CLI-driven smoke tests
+  here, but will matter the moment a browser-based web UI (T3's other half)
+  tries to call this server from a different origin.
+- Picked up a Starlette deprecation warning during testing
+  (`httpx`-via-`starlette.testclient` → recommends `httpx2`) — noted, not
+  chased; `httpx2` isn't yet an established replacement worth pinning to
+  mid-implementation.
+
+**Next:** the web UI (React) that talks to this server, or extend
+`/chat`/`/ws/chat` to accept tools (closing the `sarva run` session gap for
+both CLI and server at once).
