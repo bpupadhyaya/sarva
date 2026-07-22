@@ -22,6 +22,7 @@ the contribution, not the hash primitive underneath it.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 
 _UINT64_MAX = 2**64 - 1
 
@@ -59,6 +60,27 @@ def _estimated_jaccard_similarity(sig_a: tuple[int, ...], sig_b: tuple[int, ...]
     return matches / len(sig_a)
 
 
+def _dedup_near_duplicates_by_key[T](
+    items: list[T],
+    key: Callable[[T], str],
+    threshold: float,
+    num_hashes: int,
+    shingle_size: int,
+) -> list[T]:
+    kept: list[T] = []
+    kept_signatures: list[tuple[int, ...]] = []
+    for item in items:
+        signature = _minhash_signature(_shingles(key(item), shingle_size), num_hashes)
+        is_near_duplicate = any(
+            _estimated_jaccard_similarity(signature, kept_sig) >= threshold
+            for kept_sig in kept_signatures
+        )
+        if not is_near_duplicate:
+            kept.append(item)
+            kept_signatures.append(signature)
+    return kept
+
+
 def dedup_near_duplicates(
     docs: list[str],
     threshold: float = 0.8,
@@ -74,15 +96,6 @@ def dedup_near_duplicates(
     document kept so far) — fine at the scale this project's own tests
     and examples run at; a web-scale corpus would need an LSH banding
     index on top, not implemented here."""
-    kept: list[str] = []
-    kept_signatures: list[tuple[int, ...]] = []
-    for doc in docs:
-        signature = _minhash_signature(_shingles(doc, shingle_size), num_hashes)
-        is_near_duplicate = any(
-            _estimated_jaccard_similarity(signature, kept_sig) >= threshold
-            for kept_sig in kept_signatures
-        )
-        if not is_near_duplicate:
-            kept.append(doc)
-            kept_signatures.append(signature)
-    return kept
+    return _dedup_near_duplicates_by_key(
+        docs, key=lambda d: d, threshold=threshold, num_hashes=num_hashes, shingle_size=shingle_size
+    )

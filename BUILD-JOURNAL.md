@@ -1531,3 +1531,51 @@ quietly corrected and forgotten.
 **Next:** the actual first version tag (still the user's call), real
 frame-sampling video degradation, or provenance/license tracking for
 the corpus-sourcing pipeline.
+
+## 2026-07-22 — F0 continued: provenance/license tracking, and a refactor first
+
+Closes the last of §3.6c's explicitly-named requirements this session
+has been working through ("each recipe documented with provenance and
+license notes"). Getting there cleanly took a refactor of already-shipped
+code first.
+
+**Built:**
+- Refactored `dedup_documents`, `filter_by_length` (`corpus.py`), and
+  `dedup_near_duplicates` (`near_dedup.py`) into thin wrappers around new
+  generic `_dedup_by_key`/`_filter_by_length_key`/`_dedup_near_duplicates_by_key`
+  helpers (PEP 695 generic syntax — `def _dedup_by_key[T](...)`, matching
+  ruff's `UP047` for this Python 3.12+ project), each parameterized by a
+  `key: Callable[[T], str]` extractor. Re-ran the full existing
+  `test_corpus.py`/`test_near_dedup.py` suites immediately after — 24
+  tests, all passing unchanged — to confirm this was a genuine
+  behavior-preserving refactor before building anything on top of it.
+- `foundry/sarva_foundry/data/provenance.py` — `SourcedDocument` (frozen:
+  `text`, `source_path`, `license`) plus `load_text_files_with_provenance`,
+  `dedup_sourced_documents`, `filter_sourced_documents_by_length`,
+  `dedup_near_duplicate_sourced_documents`. Each of the three dedup/filter
+  functions calls the *exact same* generic helper the plain-`str`
+  pipeline uses — keyed on `lambda d: d.text` instead of `lambda d: d` —
+  not a reimplementation, and deliberately not "run the string pipeline
+  separately, then guess which output belongs to which input," which
+  breaks the moment two *different* source files happen to contain
+  identical text.
+- `sarva_foundry.data.corpus`/`near_dedup`'s existing plain-`str`
+  functions are completely untouched from a caller's perspective —
+  provenance is an additive, opt-in layer, not a breaking change to
+  code three prior entries already shipped and tested.
+- 9 new tests in `tests/foundry/test_provenance.py`, including the one
+  that actually justifies the "don't reconstruct, key through instead"
+  design: two different source files with byte-identical text — the
+  correct behavior is dropping the second file while keeping the
+  *first* file's provenance, verified directly rather than assumed.
+
+**Known gaps:**
+- `load_text_files_with_provenance` applies one `license` string
+  uniformly per call — real per-file license variation within one
+  directory needs a manifest (path → license mapping), not implemented.
+- Same O(kept²) near-dup scaling limit as the plain-string version,
+  inherited by construction since they share the same underlying helper.
+
+**Next:** the actual first version tag (still the user's call), real
+frame-sampling video degradation, or a per-file license manifest for
+directories with mixed sources.

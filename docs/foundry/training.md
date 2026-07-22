@@ -129,13 +129,44 @@ round-trip), and the LR keeps decaying smoothly too instead of resetting
 to the warmup value (the schedule resumed from the checkpointed step
 count).
 
+### Provenance and license tracking
+
+`sarva_foundry.data.provenance.SourcedDocument` carries a document's
+source path and license through the same load → dedup → filter →
+near-dedup stages as the plain-string pipeline above, for callers who
+need to know *where* a training document came from and *what license it
+carries* — required if this project's docs are ever going to state
+honestly what a trained model was actually trained on.
+
+The design choice worth naming: `sarva_foundry.data.corpus`/`near_dedup`
+stay exactly as they were — plain `list[str]` in, plain `list[str]` out,
+untouched and still the simplest path for callers who don't need
+tracking. Provenance is a separate, thin layer built on the *same*
+tested logic, not a rewrite: `_dedup_by_key`, `_filter_by_length_key`,
+and `_dedup_near_duplicates_by_key` are generic over a `key` extractor,
+so `dedup_documents(docs)` and `dedup_sourced_documents(docs)` call the
+identical underlying function — one keyed on `lambda d: d`, the other on
+`lambda d: d.text`. This matters for a reason beyond code reuse: naively
+running the string-based pipeline and then trying to guess which
+`SourcedDocument` each surviving string came from breaks the moment two
+*different* source files happen to contain identical text — exactly the
+case `dedup_sourced_documents`'s own test exists to pin (two source
+files, byte-identical content: the correct behavior is dropping the
+second file while keeping the *first* file's provenance, not an
+ambiguous or arbitrary choice).
+
+`load_text_files_with_provenance` applies one `license` string uniformly
+to every file loaded in a single call — real per-file license variation
+within one directory (a manifest mapping path → license) is real,
+separate scope, named rather than silently assumed covered.
+
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
-files, exact + near-duplicate dedup, and length filtering exist now —
-provenance/license tracking and larger-scale sourcing don't yet; nor
-does an LSH banding index, which near-duplicate dedup would need to
-scale past the current O(kept²) pairwise comparison), and the
-distributed training slice of §3.6d (FSDP → 3D parallelism, loss-spike
-handling, scaling-law tooling) once a model worth training at that scale
-exists.
+files, exact + near-duplicate dedup, length filtering, and provenance/license
+tracking all exist now — larger-scale sourcing and per-file license
+manifests don't yet; nor does an LSH banding index, which near-duplicate
+dedup would need to scale past the current O(kept²) pairwise
+comparison), and the distributed training slice of §3.6d (FSDP → 3D
+parallelism, loss-spike handling, scaling-law tooling) once a model
+worth training at that scale exists.
