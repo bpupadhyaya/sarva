@@ -1791,3 +1791,55 @@ feature.
 **Next:** the actual first version tag (still the user's call), real
 frame-sampling video degradation, or scaling the foundry pipeline
 examples to a real small public-domain corpus.
+
+## Real frame-sampling video degradation, closing the last-named degrader gap
+
+`VideoToTextDegrader`'s own docstring (and `Degrader`'s in content.py,
+which uses "video -> [image frames + text transcript]" as its
+*motivating example*) had named this as real, deferred work since the
+degrader trio first shipped — closed now, not left as a permanent
+disclaimer.
+
+Uses **PyAV** (`av`), not a system `ffmpeg` binary: PyAV statically
+bundles its own decoder libraries into the wheels it publishes on PyPI
+for macOS/Linux/Windows, so there's no repeat of the cross-platform CI
+availability gamble this project already paid for once, the hard way,
+getting the Windows sidecar freeze working. The audio degrader's
+stdlib-only tradeoff (documented in its own module) was made when the
+realistic choices were "stdlib `wave`, can't touch compressed audio" or
+"a heavy dependency not justified for a metadata-only converter" — a
+genuinely portable, self-contained decoding library changes that
+calculus for video, where there's no stdlib fallback at all and
+sampling actual frames is the entire point of the modality.
+
+On a genuinely decodable video: decodes real frames, samples up to 4
+evenly spaced across the whole video (bounding output size regardless of
+source length, same spirit as the corpus pipeline's length filters), and
+reports the **real decoded duration** — proven with a test that
+deliberately sets a wrong `duration_s` on the block and confirms the
+real decoded value wins, not just that some duration string appears.
+Same honesty principle as always: sampled frames are real pixels, never
+a fabricated description of what they show. Undecodable bytes (corrupt
+data, an unsupported container, a zero-frame stream) fall back cleanly
+to the original metadata-only report rather than raising — "couldn't
+decode this particular file" is an expected case for a byte-agnostic
+converter, not a bug.
+
+**Verified with real encode+decode round trips, not fixture files
+committed to the repo:** tests synthesize tiny mp4s directly with PyAV
+(distinct solid-colored frames so a test can tell them apart, not just
+count them), decode them back through the real degrader, and confirm
+sampled frames are genuinely Pillow-openable PNGs at the right
+resolution. One test proves the full documented chain end to end
+through `degrade_message`'s own recursion: video → sampled image frames
+→ (a text-only target still can't see images either) → text — not just
+that `VideoToTextDegrader` emits `ImageBlock`s in isolation. A dedicated
+zero-frame-stream test guards the one PyAV edge case that's decodable as
+a container but has nothing to sample. 196 → 201 Python tests.
+
+**Known gap:** no audio-track extraction from video yet (frames only) —
+named, not silently assumed covered.
+
+**Next:** the actual first version tag (still the user's call), or
+scaling the foundry pipeline examples to a real small public-domain
+corpus.

@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import wave
 
+import av
 import pytest
 from PIL import Image
 from sarva.multimodal.content import (
@@ -35,6 +36,31 @@ def _wav_bytes(duration_s: float, framerate: int = 8000) -> bytes:
         wav_file.setsampwidth(2)
         wav_file.setframerate(framerate)
         wav_file.writeframes(b"\x00\x00" * n_frames)
+    return buf.getvalue()
+
+
+def _synthetic_video_bytes(n_frames: int, fps: int = 10, size: tuple[int, int] = (32, 24)) -> bytes:
+    """A real, tiny, genuinely PyAV-decodable mp4 -- encoded with PyAV
+    itself, not a fixture file checked into the repo, so the test proves
+    a real encode+decode round trip rather than trusting a byte blob no
+    one can easily regenerate or verify."""
+    width, height = size
+    buf = io.BytesIO()
+    with av.open(buf, mode="w", format="mp4") as container:
+        stream = container.add_stream("mpeg4", rate=fps)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        for i in range(n_frames):
+            # A distinct solid color per frame so a test can tell frames
+            # apart, not just count them.
+            shade = (i * 40) % 256
+            img = Image.new("RGB", size, color=(shade, 0, 255 - shade))
+            frame = av.VideoFrame.from_image(img).reformat(format="yuv420p")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
     return buf.getvalue()
 
 
@@ -164,9 +190,10 @@ async def test_audio_wired_into_degrade_message_end_to_end():
 
 
 async def test_video_degrade_reports_declared_duration():
-    # No stdlib module can decode a real video container at all (unlike
-    # audio's one WAV special case) -- this degrader always reports
-    # declared metadata, never attempts byte-level decoding.
+    # Genuinely undecodable bytes (not a real container at all) fall back
+    # to the declared-metadata-only report -- this exercises that
+    # fallback path specifically, distinct from the real-decode tests
+    # below which exercise a genuine PyAV-decodable video.
     block = VideoBlock(media_type="video/mp4", data=b"not real video data", duration_s=12.5)
     out = await VideoToTextDegrader().degrade(block)
     assert len(out) == 1
@@ -206,6 +233,90 @@ async def test_video_wired_into_degrade_message_end_to_end():
 
     assert len(result.content) == 1
     assert "7.0s" in result.content[0].text
+
+
+async def test_video_degrade_samples_real_frames_from_a_decodable_video():
+    raw = _synthetic_video_bytes(n_frames=20, fps=10)
+    block = VideoBlock(media_type="video/mp4", data=raw)
+
+    out = await VideoToTextDegrader().degrade(block)
+
+    text_blocks = [b for b in out if isinstance(b, TextBlock)]
+    image_blocks = [b for b in out if isinstance(b, ImageBlock)]
+    assert len(text_blocks) == 1
+    assert 1 <= len(image_blocks) <= 4
+    # 20 frames @ 10fps == a real, decoded 2.0s duration -- not the
+    # declared-metadata fallback text ("unknown duration" or whatever the
+    # caller happened to pass in duration_s, which is None here).
+    assert "2.0s" in text_blocks[0].text
+    # Each sampled frame is real, Pillow-decodable PNG data, not a stub.
+    for img_block in image_blocks:
+        with Image.open(io.BytesIO(img_block.data)) as decoded:
+            assert decoded.size == (32, 24)
+            assert decoded.format == "PNG"
+
+
+async def test_video_degrade_caps_sampled_frames_regardless_of_video_length():
+    raw = _synthetic_video_bytes(n_frames=50, fps=25)
+    block = VideoBlock(media_type="video/mp4", data=raw)
+
+    out = await VideoToTextDegrader().degrade(block)
+
+    image_blocks = [b for b in out if isinstance(b, ImageBlock)]
+    assert len(image_blocks) == 4  # capped, not one per decoded frame
+
+
+async def test_video_degrade_prefers_real_decoded_duration_over_declared():
+    # block.duration_s deliberately wrong -- the real decode should win,
+    # proving this isn't just echoing back whatever the caller claimed.
+    raw = _synthetic_video_bytes(n_frames=20, fps=10)
+    block = VideoBlock(media_type="video/mp4", data=raw, duration_s=999.0)
+
+    out = await VideoToTextDegrader().degrade(block)
+
+    text_blocks = [b for b in out if isinstance(b, TextBlock)]
+    assert "2.0s" in text_blocks[0].text
+    assert "999.0s" not in text_blocks[0].text
+
+
+async def test_video_frames_recursively_degrade_to_text_for_a_text_only_target():
+    # Proves the full documented chain: video -> sampled image frames ->
+    # (model still can't see images either) -> text, via degrade_message's
+    # own recursion -- not just that VideoToTextDegrader emits ImageBlocks
+    # in isolation.
+    raw = _synthetic_video_bytes(n_frames=8, fps=8)
+    block = VideoBlock(media_type="video/mp4", data=raw)
+    msg = Message(role="user", content=[block])
+
+    result = await degrade_message(
+        msg,
+        supported={Modality.TEXT},
+        degraders={Modality.VIDEO: VideoToTextDegrader(), Modality.IMAGE: ImageToTextDegrader()},
+    )
+
+    assert all(isinstance(b, TextBlock) for b in result.content)
+    assert len(result.content) >= 2  # the video summary, plus one text block per sampled frame
+    assert any("does not support video input" in b.text for b in result.content)
+    assert any("32x24" in b.text for b in result.content)  # from ImageToTextDegrader
+
+
+async def test_video_degrade_falls_back_cleanly_on_a_video_stream_with_no_frames():
+    # An mp4 container with zero frames muxed -- decodable as a container,
+    # but with nothing to sample. Must still degrade honestly, not crash.
+    buf = io.BytesIO()
+    with av.open(buf, mode="w", format="mp4") as container:
+        stream = container.add_stream("mpeg4", rate=10)
+        stream.width, stream.height = 32, 24
+        stream.pix_fmt = "yuv420p"
+        for packet in stream.encode():
+            container.mux(packet)
+    block = VideoBlock(media_type="video/mp4", data=buf.getvalue(), duration_s=3.0)
+
+    out = await VideoToTextDegrader().degrade(block)
+
+    assert len(out) == 1
+    assert isinstance(out[0], TextBlock)
+    assert "3.0s" in out[0].text  # falls back to the declared value
 
 
 # ---------- default_degraders ----------
