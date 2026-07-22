@@ -17,8 +17,10 @@ tool-approval flow are scaffolded and tested; the CLI works end to end.
 The desktop app (Tauri) now bundles and auto-starts its own backend — see
 below for the real one-click flow and its known gaps. The from-scratch
 model-training track (`foundry/`) has started: a byte-level BPE tokenizer
-is built and tested (see `examples/02_train_a_tokenizer.py`); the model
-architecture and training loop aren't built yet. See `BUILD-JOURNAL.md`
+and a dense decoder-only transformer (RoPE, RMSNorm, SwiGLU, GQA) are
+built and tested (see `examples/02_train_a_tokenizer.py` and
+`examples/03_train_toy_transformer.py`); the pretraining data pipeline and
+a real (non-toy) training loop aren't built yet. See `BUILD-JOURNAL.md`
 for progress.
 
 ## Quickstart

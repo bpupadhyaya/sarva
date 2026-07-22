@@ -21,6 +21,7 @@ nav:
   - Home: index.md
   - Foundry:
       - The tokenizer, from scratch: foundry/tokenizer.md
+      - The transformer, from scratch: foundry/transformer.md
 
 markdown_extensions:
   - admonition

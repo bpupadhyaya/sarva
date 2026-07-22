@@ -701,3 +701,72 @@ RMSNorm, SwiGLU, GQA — the teaching-baseline dense decoder from §3.6a),
 or continue rounding out desktop (branding, release CI). Foundry is the
 harder, more novel work and was the natural next pick this iteration;
 either track can lead next.
+
+## 2026-07-21 — F0 continued: the from-scratch transformer
+
+The teaching-baseline dense decoder from §3.6a: attention, RoPE, RMSNorm,
+SwiGLU, GQA — the architecture every current LLaMA/Qwen/Mistral-class
+model is a variation of, implemented directly from the math rather than
+imported from `transformers`.
+
+**Built:**
+- `foundry/sarva_foundry/model/layers.py` — `RMSNorm` (root-mean-square
+  norm, float32-upcast for stability); `precompute_rope`/`apply_rope`
+  (rotary position embeddings, rotate-half convention); `SwiGLU` (gated
+  feedforward) with `default_swiglu_hidden_dim` matching LLaMA's
+  parameter-matched sizing convention.
+- `foundry/sarva_foundry/model/attention.py` — `GroupedQueryAttention`:
+  query heads split into groups sharing one KV head each (`repeat_kv`
+  expands the shared KV heads to match), RoPE applied to q/k before
+  attention, causal masking enforced unconditionally — no non-causal mode
+  exists to accidentally select. The module docstring states explicitly
+  where "from scratch" stops: `nn.Linear`/`nn.Embedding` and PyTorch's
+  fused `scaled_dot_product_attention` kernel are commodity substrate
+  (same tier as `torch.matmul`), not model logic.
+- `foundry/sarva_foundry/model/transformer.py` — `TransformerBlock`
+  (pre-norm residual composition) and `DecoderOnlyTransformer` (tied
+  embedding/unembedding, token ids in → logits out).
+- `tests/foundry/test_model.py` — 13 conformance tests, two of which are
+  the actual point of this entry: `test_rope_encodes_relative_not_absolute_position`
+  verifies RoPE's defining mathematical property directly (rotated q·k
+  depends only on relative offset) rather than trusting a correct-looking
+  implementation, and `test_causal_masking_prevents_attending_to_future_tokens`
+  perturbs only the last token in a sequence and asserts every earlier
+  position's output is bit-for-bit unchanged — the only test that can
+  actually catch causal masking silently not masking, since a broken
+  causal flag still produces plausible, right-shaped logits. Also: a
+  full end-to-end trainability test (loss decreases over 50 optimizer
+  steps on a toy task) that exercises gradient flow through every layer
+  at once.
+- `examples/03_train_toy_transformer.py` — wires the tokenizer (previous
+  entry) into the transformer: trains on real token ids, 200 CPU steps,
+  greedy-decodes a continuation.
+- `docs/foundry/transformer.md` — the matching docs chapter, including
+  both bugs below as worked examples of why shape-correct isn't the same
+  as correct.
+
+**Two real bugs found and fixed while building (not just theorized):**
+1. The tokenizer's merge step (carried over from the previous entry) was
+   already fixed; this entry's own bug: `precompute_rope`'s cos/sin
+   tables are finite (bounded by `max_seq_len`), and `GroupedQueryAttention.forward`
+   sliced them with no bounds check. Found by actually running the
+   generation loop in example 03 — not by any unit test, since every test
+   used a fixed sequence length — which grows the sequence past
+   `max_seq_len` one token at a time. Slicing past a tensor's length
+   doesn't raise in Python, it just returns something shorter, so the
+   real failure surfaced several calls later as a confusing
+   shape-mismatch deep inside `apply_rope` instead of at the actual
+   misconfiguration. Fixed with an explicit, immediate bounds check at
+   the top of `forward()`, and pinned with
+   `test_forward_raises_a_clear_error_past_max_seq_len`.
+
+**Known gaps:**
+- Teaching baseline only — no MoE routing, long-context scaling, or
+  native multimodal input yet (§3.6a's "frontier-class" extensions).
+- No pretraining data pipeline (§3.6c) — training so far uses inline toy
+  corpora, not real corpus sourcing/cleaning/dedup.
+- No checkpointing/resume or distributed training (§3.6d) — everything
+  verified so far is single-process CPU, seconds-scale.
+
+**Next:** either the pretraining data pipeline + a real (checkpointed)
+training loop, or continue rounding out desktop (branding, release CI).

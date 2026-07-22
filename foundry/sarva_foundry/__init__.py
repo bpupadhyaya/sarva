@@ -1,10 +1,12 @@
 """sarva_foundry — from-scratch model training: tokenizer, transformer,
 pretraining, post-training, distillation, evals.
 
-Status: F0 started. `sarva_foundry.tokenizer.ByteLevelBPETokenizer` is the
-first real component — a from-scratch, trainable byte-level BPE tokenizer
-(see `examples/02_train_a_tokenizer.py`). The model architecture,
-pretraining loop, and everything after it are not built yet.
+Status: F0 in progress. `sarva_foundry.tokenizer.ByteLevelBPETokenizer`
+(a from-scratch byte-level BPE tokenizer) and `sarva_foundry.model`
+(a dense decoder-only transformer: RoPE, RMSNorm, SwiGLU, GQA) are both
+built and tested — see `examples/02_train_a_tokenizer.py` and
+`examples/03_train_toy_transformer.py`. The pretraining data pipeline and
+a real (non-toy, checkpointed) training loop are not built yet.
 No HuggingFace `transformers`/`peft`/`trl` — everything above the PyTorch/CUDA
 substrate is written from scratch here, by design.
 """
