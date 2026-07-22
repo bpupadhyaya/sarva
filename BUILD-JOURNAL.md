@@ -840,3 +840,69 @@ exception, not just after the change that looks risky.
 **Next:** real branding/icons + cross-platform release CI for the
 desktop app (still open from T4), or scaling the foundry pipeline up
 from toy-corpus to a real small dataset with an actual LR schedule.
+
+## 2026-07-22 — CI: cross-platform matrix, and a real CI-only regression found and fixed
+
+Extended the `desktop` job to a `[macos-latest, ubuntu-latest,
+windows-latest]` matrix — the T4 sidecar work had only ever been verified
+on macOS arm64, and a `cargo check`-level regression on Linux/Windows had
+no way to surface before this. This entry also caught and fixed a real
+bug that had been silently breaking CI for two prior commits.
+
+**Built:**
+- CI matrix for the `desktop` job across all three target OSes, with
+  Tauri's documented Linux system-package prerequisites
+  (webkit2gtk/appindicator/etc.) installed on `ubuntu-latest` first.
+
+**A real bug found immediately after pushing — by actually watching CI,
+not by assuming a green local run meant CI was fine too:** `gh run list`
+showed the *previous two* commits' CI runs had failed on the `desktop`
+job — going back to the T4 step-2 sidecar commit. Root cause:
+`tauri-build`'s build script validates that every `bundle.externalBin`
+path exists on disk, and fails the **entire compile** — `cargo check`
+included, not just a real `tauri build` — if it doesn't. The sidecar
+binary (`scripts/freeze-server.sh`'s output) is correctly gitignored as a
+large, per-platform artifact this repo deliberately doesn't commit, which
+means CI has never had one on disk since `bundle.externalBin` was added,
+and the `desktop` job has been failing on every single push since —
+invisible because nothing in this session's workflow had checked `gh run
+list` after those two prior pushes, only local `cargo check`, which
+always had the real binary present locally.
+
+**Fixed** with a CI step that creates an empty placeholder file at the
+exact target-triple path Tauri's build script checks for
+(`bin/sarva-server-<target-triple>[.exe]`, computed via `rustc -vV`),
+before `cargo check` runs. This is proportionate to what the job actually
+checks (compile correctness, per its own existing comment — never meant
+to verify the sidecar itself, which is verified locally and recorded
+earlier in this journal) rather than trying to run a full PyInstaller
+freeze inside a job whose entire value proposition is being fast and
+cheap. Verified the fix two ways before trusting it: (1) reproduced the
+exact failure locally by moving the real sidecar binary aside and
+re-running `cargo check`, confirming the identical `resource path ...
+doesn't exist` error; (2) applied the same placeholder-file logic
+locally, confirmed `cargo check` then passed, restored the real binary,
+confirmed it *still* passed. Only then pushed, and watched the real CI
+run (`gh run watch`) to completion — genuinely green across `core`,
+`web`, and all three `desktop` OS variants, not inferred from the fix
+"looking right."
+
+**The lesson, stated plainly because it's worth remembering beyond this
+one bug:** this session's discipline of running local tests/lint before
+every commit is necessary but was not sufficient — it caught every
+Python-side regression this session but had no way to catch a
+CI-environment-specific failure (missing file on a fresh checkout) that
+only manifests where the working tree doesn't already have local,
+gitignored build artifacts sitting around. `gh run list`/`gh run watch`
+after a push that touches CI-relevant files (or any push, periodically)
+is now part of how this loop verifies "pushed" actually means "working,"
+not just "compiled locally."
+
+**Known gaps:**
+- Still no real cross-platform **bundle** CI (`.dmg`/`.msi`/`.AppImage`)
+  or code signing — this entry only closes the compile-check gap.
+- Real app branding/icons still outstanding (Tauri's generated
+  placeholders, per T4 step 1's entry).
+
+**Next:** real branding/icons, or scaling the foundry pipeline up from
+toy-corpus to a real small dataset with an actual LR schedule.
