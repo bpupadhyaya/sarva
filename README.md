@@ -62,12 +62,16 @@ cd apps/desktop && npx tauri build --no-bundle
 ```
 
 Launching `sarva-desktop` is now the whole experience: it starts its own
-bundled backend as a sidecar process and stops it when you close the
-window — no terminal, no manual `sarva serve` step. Known gaps: a
-force-quit or crash (as opposed to closing the window) can leave the
-sidecar process running; there's no code signing yet, so an unsigned
-build will trigger Gatekeeper/SmartScreen warnings; and only macOS arm64
-is verified so far. See `BUILD-JOURNAL.md` for the full picture.
+bundled backend as a sidecar process and stops it whether you close the
+window or kill the app directly (macOS/Linux; Windows signal handling
+isn't wired up yet). Real, installable bundles (`.dmg`/`.msi` or
+`.exe`/`.AppImage`+`.deb`) for all three OSes come from
+`.github/workflows/release-bundle.yml`, triggered manually via
+`gh workflow run release-bundle.yml` — genuinely verified to produce
+working installers on macOS, Linux, and Windows, not just compile.
+Known gap: no code signing yet, so an unsigned build will trigger
+Gatekeeper/SmartScreen warnings. See `BUILD-JOURNAL.md` for the full
+picture.
 
 ## Repository layout
 
