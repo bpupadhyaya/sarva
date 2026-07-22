@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from sarva.agent.budget import Budget
 from sarva.agent.events import LEGAL, AgentState
 from sarva.agent.loop import AgentLoop, _required_modalities
@@ -18,9 +20,29 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from sarva.multimodal.degraders.image import ImageToTextDegrader
 from sarva.providers.base import ModelCapabilities, ModelCost, ModelInfo, ToolSpec
 from sarva.providers.mock import MockProvider, ScriptedTurn
 from sarva.providers.registry import Registry, Router, TaskClass, load_routing
+
+
+def _real_png_bytes() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (12, 8), color=(0, 128, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class _NullAudioDegrader:
+    """A degrader for a modality that's never actually present in these
+    tests — exists only to prove degraders={} being non-empty isn't by
+    itself what makes the fallback succeed; it must cover the *specific*
+    modality that's actually missing (IMAGE)."""
+
+    source = Modality.AUDIO
+
+    async def degrade(self, block):
+        return [TextBlock(text="[audio omitted]")]
+
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "core" / "sarva" / "providers" / "data"
 
@@ -344,3 +366,97 @@ async def test_transcript_out_defaults_to_none_and_is_optional(run_root):
     events = [e async for e in loop.run("no transcript wanted here")]
 
     assert events[-1].state == AgentState.DONE
+
+
+@pytest.mark.asyncio
+async def test_degradation_fallback_succeeds_and_sends_degraded_content(run_root):
+    """The recoverable case `test_image_content_with_no_vision_capable_model_fails_cleanly`
+    documents as *not yet wired*: with a degrader configured for the
+    missing modality, the same scenario now falls back to the
+    text-capable model instead of failing. Echo-mode MockProvider (no
+    script) echoes the last user message's TextBlocks back, so the
+    echoed response proves the *degraded* text — not just the original
+    task text — actually reached the provider, not merely that the run
+    happened to end in DONE for an unrelated reason."""
+    provider = MockProvider()  # echo mode
+    loop = AgentLoop(
+        router=_text_only_router(),
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+    image = ImageBlock(media_type="image/png", data=_real_png_bytes())
+
+    events = [e async for e in loop.run("what's in this image?", extra_content=[image])]
+
+    assert events[-1].state == AgentState.DONE
+    echoed = events[-1].final_message.text()
+    assert "what's in this image?" in echoed
+    assert "could not be described" in echoed  # the degrader's own disclaimer text
+    assert "12x8" in echoed  # the degrader's real decoded metadata, not a stub
+
+
+@pytest.mark.asyncio
+async def test_degradation_fallback_does_not_help_when_no_degrader_covers_the_modality(run_root):
+    """A non-empty `degraders` dict must not make every unsupported-modality
+    run succeed regardless of content — it must cover the *specific*
+    modality actually present. A degrader registered only for AUDIO must
+    leave an IMAGE-only conversation failing exactly as it did with no
+    degraders configured at all."""
+    provider = MockProvider(script=[ScriptedTurn(text="should never be reached")])
+    loop = AgentLoop(
+        router=_text_only_router(),
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.AUDIO: _NullAudioDegrader()},
+    )
+    image = ImageBlock(media_type="image/png", data=_real_png_bytes())
+
+    events = [e async for e in loop.run("what's in this image?", extra_content=[image])]
+
+    assert events[-1].state == AgentState.FAILED
+    assert events[-1].final_message is None
+
+
+@pytest.mark.asyncio
+async def test_degradation_fallback_not_triggered_when_a_supporting_model_exists(run_root):
+    """Regression guard: with a vision-capable model actually available
+    (the registry's `mock` entry supports image input directly — see
+    models.yaml), the degradation path must never trigger — the original
+    ImageBlock should reach the model unmodified, not a degraded
+    placeholder, exactly as before this feature existed."""
+    provider = MockProvider()  # echo mode
+    loop = AgentLoop(
+        router=_router(),  # available={"mock"}; mock's own capabilities include image
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+    image = ImageBlock(media_type="image/png", data=_real_png_bytes())
+
+    events = [e async for e in loop.run("what's in this image?", extra_content=[image])]
+
+    assert events[-1].state == AgentState.DONE
+    echoed = events[-1].final_message.text()
+    assert "could not be described" not in echoed
+
+
+@pytest.mark.asyncio
+async def test_degradation_fallback_double_failure_still_fails_cleanly(run_root):
+    """If even the TEXT-only fallback model can't be found (degenerate
+    config: zero available models at all), the loop must still terminate
+    cleanly in FAILED, not raise out of the generator."""
+    registry = Registry(models={})
+    router = Router(registry, routing={}, available=set())
+    provider = MockProvider(script=[ScriptedTurn(text="unreachable")])
+    loop = AgentLoop(
+        router=router,
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+
+    events = [e async for e in loop.run("hello")]
+
+    assert events[-1].type == "run_done"
+    assert events[-1].state == AgentState.FAILED

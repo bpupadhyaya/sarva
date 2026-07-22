@@ -43,11 +43,14 @@ from sarva.agent.events import (
 from sarva.agent.tools import ConfirmPolicy, Tool, ToolContext, always_allow
 from sarva.multimodal.content import (
     ContentBlock,
+    Degrader,
     Message,
     Modality,
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
+    UnsupportedModalityError,
+    degrade_message,
     modality_of,
 )
 from sarva.providers.base import (
@@ -83,6 +86,7 @@ class AgentLoop:
         task_class: TaskClass = TaskClass.MAIN,
         workdir: str = ".",
         run_root: str = ".sarva/runs",
+        degraders: dict[Modality, Degrader] | None = None,
     ):
         self._router = router
         self._providers: dict[str, Provider] = providers  # type: ignore[assignment]
@@ -92,6 +96,17 @@ class AgentLoop:
         self._task_class = task_class
         self._workdir = workdir
         self._run_root = run_root
+        # Opt-in: without a degrader for a modality, a conversation needing
+        # it still fails exactly as before if no model supports it. With
+        # one supplied, a model that can't see the modality at all is a
+        # *recoverable* condition (route to the best available model,
+        # degrade the unsupported content into something it *can* see)
+        # instead of an automatic hard failure — deliberately opt-in
+        # rather than a silent default, so nobody gets a lower-fidelity
+        # response than they asked for without having asked for exactly
+        # that tradeoff. See BUILD-JOURNAL.md for why this is separate
+        # from T2's modality-aware *routing*.
+        self._degraders = degraders or {}
 
     def _tool_specs(self) -> list[ToolSpec]:
         return [t.spec for t in self._tools.values()]
@@ -141,17 +156,41 @@ class AgentLoop:
             )
         except LookupError as e:
             # No available model supports what this conversation needs (e.g.
-            # an image with no vision-capable model configured). This is an
-            # INIT-time failure the frozen LEGAL table doesn't model as a
-            # transition (it has no predecessor state to violate) — handled
-            # directly rather than via transition(), which doesn't exist yet
-            # at this point in the function.
-            state = AgentState.FAILED
-            yield await emit(StateChangedEvent(state=state, detail=str(e)))
-            yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
-            if transcript_out is not None:
-                transcript_out.extend(messages)
-            return
+            # an image with no vision-capable model configured). With
+            # degraders configured, this is recoverable: fall back to the
+            # best available text-capable model and degrade the messages
+            # down to what it actually supports, rather than failing
+            # outright. (router.pick's `override`, when set, always
+            # short-circuits with no modality check at all — reaching this
+            # except block at all means model_override was None, so there
+            # is no explicit model choice this fallback could contradict.)
+            model = None
+            if self._degraders:
+                try:
+                    fallback_model = self._router.pick(self._task_class, needs={Modality.TEXT})
+                    messages = [
+                        await degrade_message(
+                            m,
+                            supported=fallback_model.capabilities.modalities_in,
+                            degraders=self._degraders,
+                        )
+                        for m in messages
+                    ]
+                    model = fallback_model
+                except (LookupError, UnsupportedModalityError):
+                    model = None  # degradation itself couldn't help either; fall through to FAILED
+
+            if model is None:
+                # This is an INIT-time failure the frozen LEGAL table doesn't
+                # model as a transition (it has no predecessor state to
+                # violate) — handled directly rather than via transition(),
+                # which doesn't exist yet at this point in the function.
+                state = AgentState.FAILED
+                yield await emit(StateChangedEvent(state=state, detail=str(e)))
+                yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+                if transcript_out is not None:
+                    transcript_out.extend(messages)
+                return
         provider = self._providers[model.provider]
         ctx = ToolContext(workdir=self._workdir, run_dir=str(run_dir), emit=emit)
 

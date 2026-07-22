@@ -1027,3 +1027,67 @@ Closed that gap with the first real one.
 **Next:** wire `ImageToTextDegrader` into the agent loop's fallback path
 (the real remaining design decision named above), or continue elsewhere
 (branding, foundry scale-up, audio/video degraders).
+
+## 2026-07-22 — Core: degradation wired into the agent loop as an opt-in fallback
+
+The design decision the previous entry deliberately deferred: when should
+the loop prefer degrading content over failing outright? Answered as
+**opt-in, not automatic** — a caller who doesn't ask for it gets exactly
+today's behavior; a caller who supplies `degraders` gets a real fallback
+attempt before failing.
+
+Before touching `core/sarva/agent/loop.py` (part of the FROZEN spec-03),
+re-read `sarva-specs/spec-03-agent-loop.md`: what's frozen is the state
+machine, event vocabulary, budget model, and tool contract — the loop's
+own module docstring already documents T2 extending routing behavior
+beyond the spec's literal code via new optional `run()`/`__init__()`
+parameters (`extra_content`, `transcript_out`, both prior entries). This
+change follows that exact established pattern — a new optional
+constructor parameter, zero change to any state transition, event shape,
+or budget check — rather than treating it as a spec change requiring
+escalation.
+
+**Built:**
+- `AgentLoop.__init__` gained `degraders: dict[Modality, Degrader] | None
+  = None`. Empty/absent (the default) is byte-for-byte the old behavior —
+  confirmed by the pre-existing `test_image_content_with_no_vision_capable_model_fails_cleanly`
+  passing completely unchanged.
+- The `LookupError` handler in `run()` (previously: fail immediately) now
+  tries a fallback when `degraders` is non-empty: pick the best available
+  model needing only `Modality.TEXT` (guaranteed to exist in any real
+  configuration, since the mock provider is always available), degrade
+  every message down to what that model actually supports via the real
+  `degrade_message` dispatcher, and proceed with that model. Any failure
+  in the fallback itself (no text-capable model either, or a degrader
+  registered but not for the modality actually present) falls through to
+  the original `FAILED` state — the exact behavior from before this
+  entry, not a new failure mode.
+- Confirmed `router.pick()`'s `override` parameter always bypasses the
+  modality check entirely and never raises `LookupError` — meaning
+  reaching this fallback path at all is only possible when the caller
+  passed no explicit `model_override`, so there's no scenario where this
+  fallback could silently contradict an explicit model choice.
+- 5 new tests in `tests/conformance/test_agent.py`: the fallback actually
+  succeeding (verified by echoing the *degraded* text back through
+  echo-mode `MockProvider` and asserting the degrader's own metadata
+  string appears in the response — not just that the run ended `DONE`
+  for some unrelated reason); a non-empty `degraders` dict that doesn't
+  cover the modality actually present still failing cleanly (proves the
+  fallback checks coverage, not just dict-truthiness); a regression guard
+  that the fallback never triggers when a directly vision-capable model
+  is already available (the registry's own `mock` entry supports images);
+  and the degenerate double-failure case (no models available at all)
+  still terminating cleanly in `FAILED` rather than raising out of the
+  generator.
+
+**Known gaps:**
+- Still only image degradation exists — audio/video/document content
+  with no covering degrader still fails outright, same as before.
+- No signal is surfaced to the caller/UI that a run actually degraded
+  (vs. routed to a fully-capable model normally) beyond inspecting which
+  `model.id` ended up in the transcript — deliberately left out to avoid
+  overloading the shared `StateChangedEvent.detail` field's semantics in
+  the same change; a dedicated signal is reasonable follow-up work.
+
+**Next:** real desktop branding/icons, continued foundry scale-up, or an
+audio/video degrader now that the loop actually knows what to do with one.
