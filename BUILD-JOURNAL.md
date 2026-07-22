@@ -770,3 +770,73 @@ imported from `transformers`.
 
 **Next:** either the pretraining data pipeline + a real (checkpointed)
 training loop, or continue rounding out desktop (branding, release CI).
+
+## 2026-07-21 — F0 continued: dataset chunking + checkpoint/resume training loop
+
+The last piece needed before the foundry track has a genuinely runnable
+(if toy-scale) pretraining pipeline: corpus → batches (§3.6c, the
+chunking mechanism) and a training loop that can actually survive being
+interrupted (§3.6d).
+
+**Built:**
+- `foundry/sarva_foundry/data/dataset.py` — `tokenize_corpus` (encodes a
+  corpus and concatenates it with `<|endoftext|>` document separators, so
+  the model learns document boundaries instead of treating unrelated
+  documents as one continuous stream) and `TextChunkDataset` (fixed-length
+  `(input, target)` chunks, target shifted right by one — standard
+  next-token-prediction framing; the trailing leftover tokens that don't
+  fill a whole chunk are dropped, not padded, and that behavior is
+  tested, not just assumed).
+- `foundry/sarva_foundry/train/trainer.py` — `Trainer`: a training step,
+  gradient clipping, and `save_checkpoint`/`load_checkpoint` that persist
+  **optimizer state** (AdamW's per-parameter momentum/variance), not just
+  model weights — the module docstring states directly why this matters:
+  a checkpoint that only restores weights silently restarts momentum
+  from zero, training differently from the run it claims to resume, with
+  no exception to catch the difference.
+- `tests/foundry/test_dataset.py` (6 tests) and `tests/foundry/test_trainer.py`
+  (3 tests) — the trainer tests are the ones that matter most here:
+  `test_checkpoint_resume_is_bit_identical_to_uninterrupted_training`
+  proves resume actually resumes (10 uninterrupted steps vs. 5 steps →
+  checkpoint → fresh `Trainer` loaded from disk → 5 more steps produce
+  identical final weights), paired with a **negative control**,
+  `test_checkpoint_without_optimizer_state_would_diverge`, that
+  deliberately reintroduces the bug the module warns about (swaps in a
+  fresh optimizer post-load) and asserts the result *does* diverge —
+  without this control, the positive test wouldn't prove much, since the
+  toy task could coincidentally converge to the same point regardless of
+  optimizer state.
+- `examples/04_pretrain_and_resume.py` — the full pipeline built across
+  three entries, run together: tokenizer → dataset → transformer →
+  trainer, 30 steps, checkpoint, a *fresh* model/trainer resuming for 30
+  more steps. Loss descends smoothly across the checkpoint boundary
+  instead of spiking — the visible proof, not just the test's numeric
+  assertion.
+- `docs/foundry/training.md` — the matching docs chapter, including the
+  positive/negative test pairing as a worked example of why a passing
+  checkpoint test alone doesn't prove correctness.
+
+**A real bug introduced and caught by this entry's own verification
+step, not shipped:** fixing a `ruff` B008 lint warning (mutable/call
+default argument — `TrainerConfig()` as a literal default value) by
+switching to `config: TrainerConfig | None = None` left the constructor
+body still reading the old parameter name (`config.lr`) instead of
+`self.config.lr`, which is `None` post-refactor — an `AttributeError` on
+every `Trainer()` call. The lint fix looked complete (ruff was clean,
+the diff looked like a mechanical rename); the bug was invisible to
+`ruff check` and would have been invisible to a review that didn't
+re-run the tests after the "trivial" fix. Caught immediately because
+this session runs the full test suite after every change without
+exception, not just after the change that looks risky.
+
+**Known gaps:**
+- No real corpus sourcing (web/code/books/math crawling, cleaning,
+  dedup, quality filtering) — `tokenize_corpus` is the chunking mechanism
+  §3.6c needs, not the sourcing pipeline.
+- No distributed training (FSDP/3D parallelism) or loss-spike handling —
+  everything verified is single-process CPU, seconds-scale.
+- No learning-rate schedule (warmup/decay) — `Trainer` uses a flat LR.
+
+**Next:** real branding/icons + cross-platform release CI for the
+desktop app (still open from T4), or scaling the foundry pipeline up
+from toy-corpus to a real small dataset with an actual LR schedule.

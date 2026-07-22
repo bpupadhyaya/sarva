@@ -16,12 +16,13 @@ tool-confirmation over the socket), and a web UI with a working chat and
 tool-approval flow are scaffolded and tested; the CLI works end to end.
 The desktop app (Tauri) now bundles and auto-starts its own backend — see
 below for the real one-click flow and its known gaps. The from-scratch
-model-training track (`foundry/`) has started: a byte-level BPE tokenizer
-and a dense decoder-only transformer (RoPE, RMSNorm, SwiGLU, GQA) are
-built and tested (see `examples/02_train_a_tokenizer.py` and
-`examples/03_train_toy_transformer.py`); the pretraining data pipeline and
-a real (non-toy) training loop aren't built yet. See `BUILD-JOURNAL.md`
-for progress.
+model-training track (`foundry/`) now has a runnable (toy-scale)
+pretraining pipeline: a byte-level BPE tokenizer, a dense decoder-only
+transformer (RoPE, RMSNorm, SwiGLU, GQA), a corpus-to-batches dataset, and
+a training loop with bit-identical checkpoint/resume — see
+`examples/04_pretrain_and_resume.py`. Real (non-toy) corpus sourcing and
+distributed training aren't built yet. See `BUILD-JOURNAL.md` for
+progress.
 
 ## Quickstart
 

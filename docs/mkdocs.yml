@@ -22,6 +22,7 @@ nav:
   - Foundry:
       - The tokenizer, from scratch: foundry/tokenizer.md
       - The transformer, from scratch: foundry/transformer.md
+      - Pretraining with real resume: foundry/training.md
 
 markdown_extensions:
   - admonition
