@@ -88,6 +88,22 @@ class _EchoTool:
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=args["text"])])
 
 
+class _SessionIdCaptureTool:
+    """Echoes back ctx.session_id so a test can assert on it directly --
+    the real proof that AgentLoop.run(session_id=...) actually reaches a
+    tool's ToolContext, not just that the parameter exists."""
+
+    spec = ToolSpec(
+        name="capture_session_id",
+        description="echo back the session id from ToolContext",
+        input_schema={"type": "object", "properties": {}},
+        destructive=False,
+    )
+
+    async def run(self, args, ctx: ToolContext) -> ToolResultBlock:
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=str(ctx.session_id))])
+
+
 class _DestructiveTool:
     spec = ToolSpec(
         name="delete_thing",
@@ -460,3 +476,44 @@ async def test_degradation_fallback_double_failure_still_fails_cleanly(run_root)
 
     assert events[-1].type == "run_done"
     assert events[-1].state == AgentState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_run_session_id_reaches_the_tool_context(run_root):
+    """The actual proof session_id threading works end to end: a tool
+    that echoes ctx.session_id back must see the exact value passed to
+    run(session_id=...), not None and not some other placeholder."""
+    call = ToolCallBlock(id="a", name="capture_session_id", arguments={})
+    provider = MockProvider(script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="done")])
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_SessionIdCaptureTool()],
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("what's my session?", session_id="my-real-session")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert finished[0].result.content[0].text == "my-real-session"
+
+
+@pytest.mark.asyncio
+async def test_run_without_session_id_leaves_ctx_session_id_none(run_root):
+    """Regression guard: every existing call site that doesn't pass
+    session_id (the vast majority of this test file) must be completely
+    unaffected -- ToolContext.session_id stays None, not some accidental
+    default."""
+    call = ToolCallBlock(id="a", name="capture_session_id", arguments={})
+    provider = MockProvider(script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="done")])
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_SessionIdCaptureTool()],
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("what's my session?")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert finished[0].result.content[0].text == "None"

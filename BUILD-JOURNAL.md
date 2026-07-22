@@ -1687,3 +1687,49 @@ check: imported the real module fresh and confirmed
 **Next:** the actual first version tag (still the user's call), threading
 session identity through `ToolContext` so memory tools can be genuinely
 per-session, or real frame-sampling video degradation.
+
+## 2026-07-22 — Core: session identity threaded through ToolContext
+
+Closes the exact known gap the memory entry named: every `remember`/
+`recall_memory` call landed in one shared `"default"` bucket, since
+nothing threaded the CLI's `--session` flag (or the server's `session`
+field) down into a tool's `ToolContext` at all.
+
+**Built:**
+- `ToolContext` gained an optional `session_id: str | None = None` field
+  — backward compatible, every existing construction site unaffected.
+- `AgentLoop.run()` gained a matching optional `session_id` parameter,
+  threaded straight into the `ToolContext` it constructs — additive,
+  following the exact pattern `extra_content`/`transcript_out` already
+  established for extending `run()`'s signature beyond spec-03's frozen
+  literal code (same reasoning as the earlier degradation-fallback
+  entry: this is the loop's established, precedented way of growing new
+  capability without touching what's actually frozen — the state
+  machine, events, budgets, tool contract).
+- `RememberTool`/`RecallMemoryTool` now prefer `ctx.session_id` over
+  their own constructor-time `session_id` default — the live session a
+  run actually belongs to wins over a static fallback.
+- All four real `AgentLoop.run()` call sites (CLI's `chat`/`run`,
+  server's `/chat` and `/ws/chat`) updated to pass their already-existing
+  `session`/`req.session` value straight through as `session_id=` —
+  each of them already had this value in scope for `SessionStore`
+  load/save, just never forwarded it to the loop.
+- 5 new tests: `ctx.session_id` winning over the tool's fallback,
+  falling back correctly when `ctx.session_id` is `None`, session-scoped
+  recall actually excluding another session's entries — plus, the one
+  that matters most, two integration tests in `test_agent.py` using a
+  tool that echoes `ctx.session_id` straight back through a *real*
+  `AgentLoop.run(session_id=...)` call: proof the value genuinely
+  reaches a tool's context end to end, and a regression guard that a
+  run with no `session_id` leaves `ctx.session_id` as `None` exactly as
+  before this entry, not some accidental new default.
+
+**Known gaps:**
+- No neural-embedding tier still (unchanged — see the prior entry for
+  why).
+- No automatic "remember this" still — memory only grows via an
+  explicit `remember` tool call.
+
+**Next:** the actual first version tag (still the user's call), real
+frame-sampling video degradation, or scaling the foundry pipeline
+examples to a real small public-domain corpus.

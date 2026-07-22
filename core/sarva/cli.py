@@ -73,7 +73,11 @@ async def _chat(message: str, image: Path | None, session: str | None) -> None:
     final_state = None
     transcript: list[Message] = []
     async for event in loop.run(
-        message, history=history, extra_content=extra_content, transcript_out=transcript
+        message,
+        history=history,
+        extra_content=extra_content,
+        transcript_out=transcript,
+        session_id=session,
     ):
         # Model output may itself contain "[", e.g. markdown links or
         # citations — never markup-parse text that came from the model.
@@ -125,7 +129,9 @@ async def _run(task: str, workdir: str, auto: bool, session: str | None) -> None
     )
     final_state = None
     transcript: list[Message] = []
-    async for event in loop.run(task, history=history, transcript_out=transcript):
+    async for event in loop.run(
+        task, history=history, transcript_out=transcript, session_id=session
+    ):
         if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
             console.print(event.event.text, end="", markup=False)
         elif event.type == "tool_started":

@@ -118,6 +118,7 @@ class AgentLoop:
         model_override: str | None = None,
         extra_content: list[ContentBlock] | None = None,
         transcript_out: list[Message] | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """`extra_content` attaches non-text blocks (e.g. an ImageBlock) to
         the initiating user turn alongside `task`'s text — purely additive,
@@ -129,7 +130,14 @@ class AgentLoop:
         reaches any terminal state. This is the only way to recover a
         tool-using run's full history for session persistence without
         changing the frozen RunDoneEvent shape — `RunDoneEvent.final_message`
-        alone only ever carries the *last* assistant turn."""
+        alone only ever carries the *last* assistant turn.
+
+        `session_id`, if given, flows straight into `ToolContext` so
+        session-aware tools (memory recall/remember) can scope themselves
+        to the actual conversation this run belongs to — the CLI's
+        `--session` value / the server's `session` request field, not a
+        run-scoped identifier like `run_id` below (a fresh UUID every
+        call, unrelated to which saved conversation this is)."""
         run_id = uuid.uuid4().hex[:12]
         run_dir = Path(self._run_root) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +200,9 @@ class AgentLoop:
                     transcript_out.extend(messages)
                 return
         provider = self._providers[model.provider]
-        ctx = ToolContext(workdir=self._workdir, run_dir=str(run_dir), emit=emit)
+        ctx = ToolContext(
+            workdir=self._workdir, run_dir=str(run_dir), emit=emit, session_id=session_id
+        )
 
         def transition(to: AgentState) -> None:
             nonlocal state

@@ -86,7 +86,11 @@ def create_app() -> FastAPI:
         spend = Spend()
         transcript: list[Message] = []
         async for event in loop.run(
-            req.message, history=history, extra_content=extra_content, transcript_out=transcript
+            req.message,
+            history=history,
+            extra_content=extra_content,
+            transcript_out=transcript,
+            session_id=req.session,
         ):
             if event.type == "run_done":
                 state = event.state
@@ -152,7 +156,9 @@ def create_app() -> FastAPI:
             )
             state = AgentState.FAILED
             transcript: list[Message] = []
-            async for event in loop.run(message, history=history, transcript_out=transcript):
+            async for event in loop.run(
+                message, history=history, transcript_out=transcript, session_id=session
+            ):
                 await websocket.send_text(event.model_dump_json())
                 if event.type == "run_done":
                     state = event.state

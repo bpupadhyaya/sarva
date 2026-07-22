@@ -84,6 +84,52 @@ async def test_recall_with_no_memories_says_so(ctx, tmp_path):
     assert "No relevant memories found" in result.content[0].text
 
 
+@pytest.mark.asyncio
+async def test_remember_uses_ctx_session_id_when_present(tmp_path):
+    # ctx.session_id (threaded from AgentLoop.run(session_id=...), which
+    # in turn comes from the CLI's --session / the server's session
+    # field) must win over the tool's own constructor-time default --
+    # that default only exists for runs with no session identity at all.
+    store = VectorMemoryStore(tmp_path / "memory.db")
+    remember = RememberTool(store=store, session_id="fallback")
+    ctx = ToolContext(
+        workdir=str(tmp_path), run_dir=str(tmp_path / "run"), session_id="real-session"
+    )
+
+    await remember.run({"text": "a session-scoped note"}, ctx)
+
+    results = store.search("session-scoped note", session_id="real-session")
+    assert len(results) == 1
+    assert store.search("session-scoped note", session_id="fallback") == []
+
+
+@pytest.mark.asyncio
+async def test_remember_falls_back_to_constructor_session_id_when_ctx_has_none(tmp_path):
+    store = VectorMemoryStore(tmp_path / "memory.db")
+    remember = RememberTool(store=store, session_id="fallback")
+    ctx = ToolContext(
+        workdir=str(tmp_path), run_dir=str(tmp_path / "run")
+    )  # session_id defaults to None
+
+    await remember.run({"text": "an unscoped note"}, ctx)
+
+    results = store.search("unscoped note", session_id="fallback")
+    assert len(results) == 1
+
+
+@pytest.mark.asyncio
+async def test_recall_uses_ctx_session_id_when_present(tmp_path):
+    store = VectorMemoryStore(tmp_path / "memory.db")
+    store.add("session-a", "the launch code is blue")
+    store.add("session-b", "the launch code is blue")
+    recall = RecallMemoryTool(store=store, session_id="fallback")
+    ctx = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"), session_id="session-a")
+
+    result = await recall.run({"query": "launch code"}, ctx)
+
+    assert result.content[0].text.count("launch code") == 1  # only session-a's entry, not both
+
+
 def test_default_memory_tools_do_not_open_the_store_until_first_run():
     # BUILTIN_TOOLS constructs these with no store argument at module
     # import time -- eagerly opening the default store in __init__ would

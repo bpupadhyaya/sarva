@@ -57,9 +57,17 @@ module-level list, so eagerly opening a database connection in
 real file at `~/.sarva/memory.db` on every machine that imports it —
 caught and fixed before shipping, not after.
 
-**Known gap, named rather than hidden:** every default-store entry lands
-in one shared `"default"` bucket. Real per-session isolation needs the
-CLI's own `--session` flag threaded through `ToolContext`, which doesn't
-expose a session identifier to tools today — a real, separate design
-decision, not solved here. A caller that wants isolation now can
-construct its own `RememberTool(store=..., session_id=...)`.
+### Real per-session isolation
+
+`ToolContext` carries an optional `session_id`, threaded from
+`AgentLoop.run(session_id=...)` — which the CLI's `--session` flag and
+the server's `session` request field both populate directly.
+`RememberTool`/`RecallMemoryTool` prefer `ctx.session_id` over their own
+constructor-time default, so two different `sarva chat --session work`
+and `sarva chat --session personal` conversations get genuinely separate
+memories, not a shared `"default"` bucket — verified end to end with a
+tool that echoes `ctx.session_id` back through a real loop run, not just
+checked that the parameter exists. A run with no session at all
+(`sarva chat` with no `--session`) leaves `ctx.session_id` as `None` and
+falls back to the tool's own default, exactly as before this was wired
+in — every existing call site that never sets a session is unaffected.

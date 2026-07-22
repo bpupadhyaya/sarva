@@ -25,17 +25,25 @@ _MAX_FETCH_CHARS = 50_000
 
 class ToolContext:
     """Passed to every tool invocation. `emit` is wired by the AgentLoop for
-    transcript logging; tools never talk to the provider layer directly."""
+    transcript logging; tools never talk to the provider layer directly.
+    `session_id` is optional and `None` by default — most tools don't need
+    it; it exists so session-aware tools (e.g. `RememberTool`/`RecallMemoryTool`)
+    can scope themselves to the actual conversation session a run belongs
+    to, threaded from `AgentLoop.run(session_id=...)`, instead of falling
+    back to a tool-constructor-time default that has no idea which
+    conversation is actually running."""
 
     def __init__(
         self,
         workdir: str,
         run_dir: str,
         emit: Callable[[Any], Awaitable[None]] | None = None,
+        session_id: str | None = None,
     ):
         self.workdir = workdir
         self.run_dir = run_dir
         self.emit = emit or (lambda event: asyncio.sleep(0))
+        self.session_id = session_id
 
 
 class Tool(Protocol):
@@ -179,12 +187,13 @@ class RememberTool:
     """Non-destructive: appends to the memory store, never overwrites or
     deletes anything a user or the model already saved.
 
-    Known gap, not silently glossed over: every entry lands in the same
-    `"default"` bucket — this isn't yet threaded through the CLI's own
-    `--session` flag (which `AgentLoop`/`ToolContext` don't expose to
-    tools at all today). A caller that wants real per-session isolation
-    should construct its own `RememberTool(store=..., session_id=...)`
-    rather than rely on the shared default.
+    Session-scoped via `ctx.session_id` when the loop was run with one
+    (threaded from the CLI's `--session` flag / the server's `session`
+    request field, through `AgentLoop.run(session_id=...)`) — falls back
+    to `self._session_id` (default `"default"`) only when the run itself
+    has no session identity (e.g. a one-shot `sarva chat` with no
+    `--session`), so unrelated sessions' memories don't bleed together
+    by default once a real session is in play.
 
     The default store is opened lazily, on first `run()`, not in
     `__init__` — `BUILTIN_TOOLS` below is a module-level list, so eager
@@ -216,14 +225,16 @@ class RememberTool:
         return self._store
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
-        self._get_store().add(self._session_id, args["text"])
+        self._get_store().add(ctx.session_id or self._session_id, args["text"])
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text="Saved to memory.")])
 
 
 class RecallMemoryTool:
     """Non-destructive: read-only search over the memory store. See
-    `RememberTool`'s docstring for why the default store is opened
-    lazily rather than at `__init__`/module-import time."""
+    `RememberTool`'s docstring for both the session-scoping rule
+    (`ctx.session_id` preferred, `self._session_id` as fallback) and why
+    the default store is opened lazily rather than at
+    `__init__`/module-import time."""
 
     spec = ToolSpec(
         name="recall_memory",
@@ -251,7 +262,8 @@ class RecallMemoryTool:
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
         top_k = args.get("top_k", 5)
-        results = self._get_store().search(args["query"], top_k=top_k, session_id=self._session_id)
+        session_id = ctx.session_id or self._session_id
+        results = self._get_store().search(args["query"], top_k=top_k, session_id=session_id)
         if not results:
             text = "No relevant memories found."
         else:
