@@ -639,3 +639,65 @@ grandchild.
 
 **Next:** real branding/icons, then cross-platform release-bundle CI
 covering the full freeze → bundle → sign pipeline on all three OSes.
+
+## 2026-07-21 — F0: foundry track starts — a from-scratch BPE tokenizer
+
+Every prior entry was `core/sarva`, the engine that leans on frontier
+models. This one starts the other half of the mission — §3.6 of the
+design of record, "no black boxes": Sarva must also carry the model-level
+code, not just orchestrate someone else's model. First component: a
+trainable byte-level BPE tokenizer, no HuggingFace `tokenizers`, no
+`tiktoken`.
+
+**Built:**
+- `foundry/sarva_foundry/tokenizer/bpe.py` — `ByteLevelBPETokenizer`,
+  implemented from first principles: a reversible byte↔Unicode-symbol
+  mapping (the same trick GPT-2 uses) gives every possible byte value a
+  dedicated vocabulary entry, so encoding never produces `<unk>` — any
+  text, including scripts/emoji never seen during training, round-trips
+  losslessly. A stdlib-`re`-only pretokenizer approximates GPT-2's regex
+  (documented in the module docstring exactly where it diverges, rather
+  than claimed identical). Training repeatedly merges the most frequent
+  adjacent symbol pair until the requested vocab size is reached; encoding
+  replays those merges in learned order. Special tokens (e.g.
+  `<|endoftext|>`) are reserved ids, matched atomically before byte-level
+  splitting. JSON save/load for trained tokenizers.
+- `tests/foundry/test_tokenizer.py` — 10 conformance tests: round-trip on
+  ASCII and on unseen Unicode/emoji, empty-input edge case, vocab-size
+  budget respected, invalid vocab size rejected, merges actually compress
+  a training sentence, training is deterministic (same corpus → identical
+  merges/vocab), special tokens stay atomic and round-trip, save/load
+  round-trip. All passing.
+- `examples/02_train_a_tokenizer.py` — trains on a four-sentence toy
+  corpus and prints both the compression (`"the quick brown fox"`: 19
+  byte-level tokens → 4 trained tokens) and a round-trip proof on
+  `"héllo wörld —日本語 🎉🚀"`, text the tokenizer never saw.
+- `docs/foundry/tokenizer.md` — the matching docs chapter (design
+  principle: every module gets one), covering why byte-level, how
+  training works, and how to run the example. Wired into `mkdocs.yml`'s
+  nav (validated the YAML parses correctly; `mkdocs` itself isn't a
+  project dependency yet, so the actual site build is still unverified —
+  named honestly rather than assumed to work).
+
+**Real bug found and fixed while building (not just theorized):** the
+first draft of the merge step rebuilt the word-frequency table with a
+dict comprehension (`{merge(word): freq for word, freq in ...}`), which
+silently drops frequency mass whenever two distinct pre-merge words
+collide into the same tuple after a merge — the last one wins, the rest
+vanish, and training silently learns a slightly wrong distribution with
+no error or test failure to catch it. Fixed by accumulating into a
+`Counter` with `+=` before any test ran against it, so it never shipped.
+
+**Known gaps:**
+- Tokenizer only — no model architecture, pretraining loop, or anything
+  else from §3.6 yet. This is the first component of a large track.
+- `mkdocs` isn't installed/pinned as a project dependency, so the docs
+  site itself has never actually been built, only the YAML validated.
+- No data-pipeline code yet — training above used an inline toy corpus,
+  not the corpus-sourcing/cleaning/dedup pipeline §3.6(c) describes.
+
+**Next:** the from-scratch transformer architecture (attention, RoPE,
+RMSNorm, SwiGLU, GQA — the teaching-baseline dense decoder from §3.6a),
+or continue rounding out desktop (branding, release CI). Foundry is the
+harder, more novel work and was the natural next pick this iteration;
+either track can lead next.

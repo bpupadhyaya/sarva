@@ -19,6 +19,8 @@ theme:
 
 nav:
   - Home: index.md
+  - Foundry:
+      - The tokenizer, from scratch: foundry/tokenizer.md
 
 markdown_extensions:
   - admonition
