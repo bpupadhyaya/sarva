@@ -19,6 +19,7 @@ from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message
+from sarva.multimodal.degraders import default_degraders
 from sarva.providers.base import TextDeltaEvent
 from sarva.runtime import build_providers, build_router
 
@@ -63,7 +64,11 @@ async def _chat(message: str, image: Path | None, session: str | None) -> None:
     extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
 
     loop = AgentLoop(
-        router=_build_router(), providers=_build_providers(), tools=[], confirm=always_allow
+        router=_build_router(),
+        providers=_build_providers(),
+        tools=[],
+        confirm=always_allow,
+        degraders=default_degraders(),
     )
     final_state = None
     transcript: list[Message] = []
@@ -116,6 +121,7 @@ async def _run(task: str, workdir: str, auto: bool, session: str | None) -> None
         tools=BUILTIN_TOOLS,
         confirm=confirm,
         workdir=workdir,
+        degraders=default_degraders(),
     )
     final_state = None
     transcript: list[Message] = []

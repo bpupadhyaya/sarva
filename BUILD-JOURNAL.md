@@ -1136,3 +1136,63 @@ window title bar) before treating it as done.
 **Next:** continued foundry scale-up, an audio/video degrader, or
 cross-platform release-bundle CI (still the one T4 gap this session
 hasn't touched: `.dmg`/`.msi`/`.AppImage` artifacts + code signing).
+
+## 2026-07-22 — Core: an audio degrader, and closing the "actually reachable" gap
+
+Two pieces. The second turned out to matter more than the first.
+
+**Built:**
+- `core/sarva/multimodal/degraders/audio.py` — `AudioToTextDegrader`,
+  the second concrete `Degrader`. Same honesty principle as
+  `ImageToTextDegrader` (report only what's verifiably known, never
+  fabricate content), but a **deliberately different failure-handling
+  tradeoff**, documented directly in the module: Pillow reliably decodes
+  nearly every real-world image format, so the image degrader treats
+  undecodable bytes as a genuine error. Real-world audio is
+  overwhelmingly compressed (MP3/AAC/OGG/M4A) — stdlib `wave` only
+  parses uncompressed WAV, and pulling in ffmpeg/pydub isn't justified
+  for a metadata-only converter — so "not WAV" is the *expected* case
+  here, not an error: it falls back to whatever the block already
+  declares (`media_type`, `duration_s` if set, and the always-knowable
+  byte size) instead of raising.
+- `sarva.multimodal.degraders.default_degraders()` — the shared
+  `{IMAGE: ImageToTextDegrader(), AUDIO: AudioToTextDegrader()}` set
+  every skin now wires in, so "what does Sarva degrade out of the box"
+  lives in exactly one place.
+- **The gap that actually mattered:** grepped every `AgentLoop(...)`
+  construction site — `cli.py`'s `chat`/`run` commands, `app.py`'s
+  `/chat` and `/ws/chat` — and found **none of the four** passed
+  `degraders=`. Last entry's opt-in fallback was fully built, fully
+  tested, and completely unreachable by any real user; only custom code
+  calling `AgentLoop` directly could ever have used it. Wired
+  `degraders=default_degraders()` into all four.
+- 13 tests: the audio degrader's real-WAV-decode path (proves it
+  actually reads bytes, not just declared metadata, for the one format
+  it can), the undecodable-format fallback, the "nothing knowable at
+  all" case, the no-fabrication principle, an end-to-end test through
+  the real `degrade_message` dispatcher, and coverage for
+  `default_degraders()` itself (correct modality set, correct types,
+  no shared-mutable-dict surprise across callers).
+
+**Honest note on what "wired in" currently means in practice:** the
+fallback only ever *triggers* when the router can't find a model
+supporting every modality present — and today's default registry
+(`models.yaml`) gives the always-available `mock` provider full
+`[text, image, document]` support, so with zero configuration the
+fallback path is wired correctly but practically dormant; there's
+always a directly-capable model. It becomes live in any deployment
+whose actually-available models don't all cover every modality (e.g.
+only a text-only local model, or a future registry entry that's
+narrower) — confirmed correct by the loop-level tests using a
+purpose-built text-only router, not glossed over as "done" just because
+the plumbing compiles.
+
+**Known gaps:**
+- No video/document degraders yet.
+- No signal surfaced to callers that a request path actually is
+  running with degradation live vs. dormant (same known gap named in
+  the wiring entry, still unaddressed).
+
+**Next:** continued foundry scale-up, cross-platform release-bundle CI,
+or a video degrader (frame-sampling + the now-existing image degrader
+composed together, per §3.3's stated video->frames+text path).

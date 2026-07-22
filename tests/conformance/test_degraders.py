@@ -1,19 +1,39 @@
-"""Conformance tests for sarva.multimodal.degraders.image — the
-degradation registry's first real converter."""
+"""Conformance tests for sarva.multimodal.degraders — the degradation
+registry's concrete converters."""
 
 from __future__ import annotations
 
 import io
+import wave
 
 import pytest
 from PIL import Image
-from sarva.multimodal.content import ImageBlock, Message, Modality, TextBlock, degrade_message
+from sarva.multimodal.content import (
+    AudioBlock,
+    ImageBlock,
+    Message,
+    Modality,
+    TextBlock,
+    degrade_message,
+)
+from sarva.multimodal.degraders import AudioToTextDegrader, default_degraders
 from sarva.multimodal.degraders.image import ImageDecodeError, ImageToTextDegrader
 
 
 def _png_bytes(width: int, height: int) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (width, height), color=(255, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _wav_bytes(duration_s: float, framerate: int = 8000) -> bytes:
+    n_frames = int(duration_s * framerate)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(framerate)
+        wav_file.writeframes(b"\x00\x00" * n_frames)
     return buf.getvalue()
 
 
@@ -79,3 +99,80 @@ async def test_wired_into_degrade_message_end_to_end():
     assert len(result.content) == 1
     assert isinstance(result.content[0], TextBlock)
     assert "16x16" in result.content[0].text
+
+
+# ---------- AudioToTextDegrader ----------
+
+
+async def test_audio_degrade_decodes_real_wav_duration_from_bytes():
+    # Unlike the image degrader (which always decodes via Pillow), this
+    # is the one format AudioToTextDegrader *can* genuinely decode --
+    # proves it actually reads the bytes rather than only ever trusting
+    # declared metadata.
+    raw = _wav_bytes(duration_s=2.5, framerate=8000)
+    block = AudioBlock(media_type="audio/wav", data=raw)
+
+    out = await AudioToTextDegrader().degrade(block)
+
+    assert len(out) == 1
+    assert "2.5s" in out[0].text
+    assert "audio/wav" in out[0].text
+
+
+async def test_audio_degrade_falls_back_to_declared_duration_for_undecodable_formats():
+    # Real-world audio is overwhelmingly compressed (MP3/AAC/...), which
+    # stdlib `wave` cannot parse -- that must fall back to whatever the
+    # block already declares, not raise (the deliberate difference from
+    # ImageToTextDegrader's corrupt-bytes behavior).
+    block = AudioBlock(media_type="audio/mp3", data=b"ID3 not a real mp3 either", duration_s=42.0)
+
+    out = await AudioToTextDegrader().degrade(block)
+
+    assert "42.0s" in out[0].text
+    assert "audio/mp3" in out[0].text
+
+
+async def test_audio_degrade_reports_unknown_duration_when_nothing_is_knowable():
+    block = AudioBlock(media_type="audio/mp3", data=b"not real audio data at all")
+    out = await AudioToTextDegrader().degrade(block)
+    assert "unknown duration" in out[0].text
+
+
+async def test_audio_degrade_does_not_fabricate_content():
+    raw = _wav_bytes(duration_s=1.0)
+    block = AudioBlock(media_type="audio/wav", data=raw)
+    out = await AudioToTextDegrader().degrade(block)
+    assert "could not be transcribed" in out[0].text
+
+
+async def test_audio_wired_into_degrade_message_end_to_end():
+    raw = _wav_bytes(duration_s=3.0)
+    msg = Message(role="user", content=[AudioBlock(media_type="audio/wav", data=raw)])
+
+    result = await degrade_message(
+        msg,
+        supported={Modality.TEXT},
+        degraders={Modality.AUDIO: AudioToTextDegrader()},
+    )
+
+    assert len(result.content) == 1
+    assert "3.0s" in result.content[0].text
+
+
+# ---------- default_degraders ----------
+
+
+async def test_default_degraders_covers_image_and_audio():
+    degraders = default_degraders()
+    assert set(degraders) == {Modality.IMAGE, Modality.AUDIO}
+    assert isinstance(degraders[Modality.IMAGE], ImageToTextDegrader)
+    assert isinstance(degraders[Modality.AUDIO], AudioToTextDegrader)
+
+
+async def test_default_degraders_returns_fresh_instances_each_call():
+    # Stateless degraders, but the dict itself shouldn't be a shared
+    # mutable singleton a caller could accidentally corrupt across
+    # unrelated AgentLoop instances.
+    a = default_degraders()
+    b = default_degraders()
+    assert a is not b

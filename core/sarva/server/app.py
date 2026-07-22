@@ -31,6 +31,7 @@ from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message, ToolCallBlock
+from sarva.multimodal.degraders import default_degraders
 from sarva.runtime import build_providers, build_router
 from sarva.server.schemas import ChatRequest, ChatResponse, ModelInfoOut
 
@@ -73,7 +74,11 @@ def create_app() -> FastAPI:
         extra_content = _extra_content_from(req)
 
         loop = AgentLoop(
-            router=build_router(), providers=build_providers(), tools=[], confirm=always_allow
+            router=build_router(),
+            providers=build_providers(),
+            tools=[],
+            confirm=always_allow,
+            degraders=default_degraders(),
         )
 
         state = AgentState.FAILED
@@ -143,6 +148,7 @@ def create_app() -> FastAPI:
                 providers=build_providers(),
                 tools=BUILTIN_TOOLS,
                 confirm=always_allow if auto else ws_confirm,
+                degraders=default_degraders(),
             )
             state = AgentState.FAILED
             transcript: list[Message] = []
