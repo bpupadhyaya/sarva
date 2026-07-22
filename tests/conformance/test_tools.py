@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from sarva.agent.tools import ReadFileTool, ToolContext, WebFetchTool, WriteFileTool
+from sarva.agent.tools import (
+    ReadFileTool,
+    RecallMemoryTool,
+    RememberTool,
+    ToolContext,
+    WebFetchTool,
+    WriteFileTool,
+)
+from sarva.memory.vector import VectorMemoryStore
 
 
 @pytest.fixture
@@ -53,3 +61,42 @@ async def test_web_fetch_live(ctx):
     result = await tool.run({"url": "https://example.com"}, ctx)
     assert not result.is_error
     assert "Example Domain" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_remember_then_recall_round_trip(ctx, tmp_path):
+    store = VectorMemoryStore(tmp_path / "memory.db")
+    remember = RememberTool(store=store)
+    recall = RecallMemoryTool(store=store)
+
+    result = await remember.run({"text": "the launch code is in the blue folder"}, ctx)
+    assert not result.is_error
+
+    result = await recall.run({"query": "where is the launch code"}, ctx)
+    assert not result.is_error
+    assert "blue folder" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_recall_with_no_memories_says_so(ctx, tmp_path):
+    recall = RecallMemoryTool(store=VectorMemoryStore(tmp_path / "memory.db"))
+    result = await recall.run({"query": "anything"}, ctx)
+    assert "No relevant memories found" in result.content[0].text
+
+
+def test_default_memory_tools_do_not_open_the_store_until_first_run():
+    # BUILTIN_TOOLS constructs these with no store argument at module
+    # import time -- eagerly opening the default store in __init__ would
+    # make merely *importing* sarva.agent.tools open (and, via
+    # VectorMemoryStore's own mkdir, create) a real file at
+    # ~/.sarva/memory.db on every machine that imports it, including
+    # test/CI runs that never otherwise touch the filesystem. Checked
+    # directly against the internal _store attribute rather than the
+    # real filesystem: DEFAULT_MEMORY_DB_PATH is a module-level constant
+    # bound to the real Path.home() at import time, so patching Path.home
+    # afterwards wouldn't affect it anyway -- this is the precise,
+    # hermetic way to verify the laziness property.
+    remember = RememberTool()
+    recall = RecallMemoryTool()
+    assert remember._store is None
+    assert recall._store is None

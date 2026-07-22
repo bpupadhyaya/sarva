@@ -1621,3 +1621,69 @@ with genuinely mixed sources.
 frame-sampling video degradation, or scaling the toy pipeline examples
 up to a real small public-domain corpus now that the sourcing side is
 fully built out.
+
+## 2026-07-22 — Core: semantic memory (TF-IDF + cosine similarity), and wired in
+
+`sarva.memory`'s own module docstring named this as future work since
+T0: "a vector index or database-backed store can layer on top later
+without changing this contract." Built it — and, having learned the
+exact lesson from an earlier entry (a fully-tested feature that sat
+completely unreachable because nothing actually called it), wired it
+into the agent's real tool runtime in the same entry rather than as an
+afterthought.
+
+**Built:**
+- `core/sarva/memory/vector.py` — `VectorMemoryStore`: SQLite for
+  storage, TF-IDF + cosine similarity for retrieval, entirely from
+  scratch (no external ML/vector-search library). Deliberately not
+  neural embeddings: a real embedding pipeline needs a live
+  embedding-model API this project has no configured provider for, and
+  building against one now would be unverifiable without credentials —
+  the same trap a web-search tool would fall into, which is why this
+  entry is a memory store instead of that. TF-IDF is a genuine first
+  tier, not a toy stand-in: a real sparse vector representation scored
+  with the same cosine-similarity metric dense embeddings use, fully
+  local and fully testable today. Deliberately not `sqlite-vec` either
+  (the design doc's stated choice) — that extension indexes *dense*
+  vectors for approximate nearest-neighbor search at scale; these are
+  sparse, per-query-computed vectors scored exactly, which doesn't need
+  an ANN index at this project's memory-store size.
+- `RememberTool`/`RecallMemoryTool` (`core/sarva/agent/tools.py`), added
+  to `BUILTIN_TOOLS` — the model can explicitly save a note and later
+  search for it, both real tool calls, not a hidden background process.
+- 13 tests in `test_vector_memory.py`, including the one that actually
+  matters most: a real relevance-ranking test (topically related "fox"/
+  "dog" entries score above an unrelated "quarterly revenue" entry for
+  a fox/dog query) — proving the retrieval genuinely works, not just
+  that it runs without crashing.
+
+**A real bug caught before shipping, not after:** the first draft
+constructed each tool's default `VectorMemoryStore` eagerly in
+`__init__`. `BUILTIN_TOOLS` is a module-level list — `RememberTool()`
+and `RecallMemoryTool()` get constructed once, at *import* time. Eager
+construction would have made merely `import sarva.agent.tools` open (and,
+via the store's own `mkdir`), create a real file at `~/.sarva/memory.db`
+on every machine that ever imports the module — including test/CI runs
+that touch no filesystem otherwise. Fixed by deferring store construction
+into a `_get_store()` helper called from `run()`, not `__init__`.
+Verified two ways: a hermetic unit test asserting `tool._store is None`
+immediately after construction (checking the actual internal state, not
+a fragile `Path.home()`-monkeypatch proxy — `DEFAULT_MEMORY_DB_PATH` is
+a module-level constant already bound at import time, so patching
+`Path.home` afterward wouldn't have caught anything), and an empirical
+check: imported the real module fresh and confirmed
+`~/.sarva/memory.db` genuinely does not exist before or after.
+
+**Known gaps:**
+- No per-session isolation for the default store — every entry lands in
+  one shared `"default"` bucket. Needs the CLI's `--session` flag
+  threaded through `ToolContext`, which doesn't expose a session
+  identifier to tools at all today; a real, separate design decision.
+- No neural-embedding tier — see above for why, and what would need to
+  change to add one (a configured embeddings provider).
+- No automatic "remember this" — memory only grows via an explicit
+  `remember` tool call the model itself decides to make.
+
+**Next:** the actual first version tag (still the user's call), threading
+session identity through `ToolContext` so memory tools can be genuinely
+per-session, or real frame-sampling video degradation.

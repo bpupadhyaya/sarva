@@ -19,6 +19,8 @@ theme:
 
 nav:
   - Home: index.md
+  - Core Engine:
+      - Memory (sessions + semantic recall): memory.md
   - Foundry:
       - The tokenizer, from scratch: foundry/tokenizer.md
       - The transformer, from scratch: foundry/transformer.md

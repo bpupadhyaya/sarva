@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
 from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.providers.base import ToolSpec
 
@@ -174,9 +175,95 @@ class WebFetchTool:
             )
 
 
+class RememberTool:
+    """Non-destructive: appends to the memory store, never overwrites or
+    deletes anything a user or the model already saved.
+
+    Known gap, not silently glossed over: every entry lands in the same
+    `"default"` bucket — this isn't yet threaded through the CLI's own
+    `--session` flag (which `AgentLoop`/`ToolContext` don't expose to
+    tools at all today). A caller that wants real per-session isolation
+    should construct its own `RememberTool(store=..., session_id=...)`
+    rather than rely on the shared default.
+
+    The default store is opened lazily, on first `run()`, not in
+    `__init__` — `BUILTIN_TOOLS` below is a module-level list, so eager
+    construction here would open (and create, via `VectorMemoryStore`'s
+    own `mkdir`) a real SQLite file at `~/.sarva/memory.db` as a side
+    effect of merely *importing* this module, on every machine that ever
+    imports `sarva.agent.tools` — including test/CI runs that never
+    otherwise touch the filesystem."""
+
+    spec = ToolSpec(
+        name="remember",
+        description="Save a short note or fact to long-term memory for later recall.",
+        input_schema={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+        destructive=False,
+    )
+
+    def __init__(self, store: VectorMemoryStore | None = None, session_id: str = "default"):
+        self._store = store
+        self._session_id = session_id
+
+    def _get_store(self) -> VectorMemoryStore:
+        if self._store is None:
+            self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
+        return self._store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        self._get_store().add(self._session_id, args["text"])
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text="Saved to memory.")])
+
+
+class RecallMemoryTool:
+    """Non-destructive: read-only search over the memory store. See
+    `RememberTool`'s docstring for why the default store is opened
+    lazily rather than at `__init__`/module-import time."""
+
+    spec = ToolSpec(
+        name="recall_memory",
+        description="Search previously remembered notes/facts for ones relevant to a query.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        destructive=False,
+    )
+
+    def __init__(self, store: VectorMemoryStore | None = None, session_id: str = "default"):
+        self._store = store
+        self._session_id = session_id
+
+    def _get_store(self) -> VectorMemoryStore:
+        if self._store is None:
+            self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
+        return self._store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        top_k = args.get("top_k", 5)
+        results = self._get_store().search(args["query"], top_k=top_k, session_id=self._session_id)
+        if not results:
+            text = "No relevant memories found."
+        else:
+            text = "\n".join(f"- {entry.text} (relevance {score:.2f})" for entry, score in results)
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
+
+
 BUILTIN_TOOLS: list[Tool] = [
     ReadFileTool(),
     WriteFileTool(),
     RunShellTool(),
     WebFetchTool(),
+    RememberTool(),
+    RecallMemoryTool(),
 ]

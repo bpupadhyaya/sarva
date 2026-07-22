@@ -10,17 +10,21 @@ point as the tool itself.
 
 ## Status
 
-Early — the core engine (provider layer, agent loop, built-in tools,
-session persistence), the FastAPI server (REST + WebSocket, with real
-tool-confirmation over the socket), and a web UI with a working chat and
-tool-approval flow are scaffolded and tested; the CLI works end to end.
-The desktop app (Tauri) now bundles and auto-starts its own backend — see
-below for the real one-click flow and its known gaps. The from-scratch
-model-training track (`foundry/`) now has a runnable (toy-scale)
-pretraining pipeline: a byte-level BPE tokenizer, a dense decoder-only
-transformer (RoPE, RMSNorm, SwiGLU, GQA), a corpus-to-batches dataset, and
-a training loop with bit-identical checkpoint/resume — see
-`examples/04_pretrain_and_resume.py`. Real (non-toy) corpus sourcing and
+Early — the core engine (provider layer, agent loop, built-in tools
+including session persistence and semantic memory recall,
+image/audio/video degradation for models that can't handle a modality),
+the FastAPI server (REST + WebSocket, with real tool-confirmation over
+the socket), and a web UI with a working chat and tool-approval flow are
+scaffolded and tested; the CLI works end to end. The desktop app (Tauri)
+bundles and auto-starts its own backend, with real cross-platform
+release bundles (macOS/Linux/Windows) — see below for the one-click flow
+and its known gaps. The from-scratch model-training track (`foundry/`)
+has a runnable (toy-scale) pretraining pipeline: local-file corpus
+sourcing (exact + near-duplicate dedup, quality filtering, provenance/
+license tracking), a byte-level BPE tokenizer, a dense decoder-only
+transformer (RoPE, RMSNorm, SwiGLU, GQA), and a training loop with a
+warmup+cosine LR schedule and bit-identical checkpoint/resume — see
+`examples/04_pretrain_and_resume.py`. Web-scale corpus sourcing and
 distributed training aren't built yet. See `BUILD-JOURNAL.md` for
 progress.
 
