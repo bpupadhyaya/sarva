@@ -1416,3 +1416,62 @@ all now have real converters, and all three are wired into every real
 deepen the foundry pipeline (near-duplicate dedup, provenance tracking,
 scaling toy examples to a real small corpus), or real frame-sampling
 video degradation if a video-decoding dependency becomes justified.
+
+## 2026-07-22 — CI: version-tag releases, with a deliberate safety boundary
+
+`release-bundle.yml`'s own known-gaps list has said "manual trigger
+only, not wired to git tags/releases yet" since the entry that shipped
+it. Closed — with one deliberate line not crossed.
+
+**Built:**
+- `release-bundle.yml` now also triggers on `push: tags: ["v*"]`. A new
+  `publish-release` job (`needs: bundle`, so it only runs after all
+  three OSes bundle successfully) downloads every platform's artifacts,
+  flattens out just the real installer files (`.dmg`/`.msi`/`.exe`/
+  `.AppImage`/`.deb` — `actions/download-artifact` also recreates
+  non-file bundle output like the raw `.app` directory, which `gh
+  release` can't attach as an asset at all), and creates a GitHub
+  Release via `gh release create` (the CLI directly, not a third-party
+  action — consistent with using `gh` throughout this session already,
+  and one fewer external trust boundary for something that publishes to
+  the public repo).
+- **The deliberate safety boundary:** the release is created with
+  `--draft --prerelease`. A draft is invisible to the public and sends
+  no notification to watchers until a maintainer explicitly clicks
+  "Publish release" in the GitHub UI. Pushing a version tag — an action
+  that could happen accidentally, or during testing — must never be
+  enough, on its own, to make something publicly visible; only an
+  additional, deliberate human action does that. This matters
+  specifically because a real GitHub Release (unlike the `workflow_dispatch`
+  runs used to verify this pipeline all along) is genuinely public,
+  shared state — the same category of action this project's own working
+  practice treats as requiring explicit confirmation, not something to
+  automate all the way to "live" without a human in the loop.
+
+**What's verified vs. not, stated precisely rather than blurred
+together:** the `bundle` job itself (shared, unchanged code) was
+re-verified with a fresh `workflow_dispatch` run after this change,
+confirming the new trigger didn't regress anything already proven
+working. The new `publish-release` job's actual behavior — the `gh
+release create` step, the installer-flattening `find` — has **not**
+been live-tested against a real tag push, deliberately: doing so would
+create a real (if draft) Release object and push a real tag to the
+public repo, both real, visible actions on shared state that this
+session's own operating practice reserves for explicit user
+confirmation rather than autonomous action mid-loop. Verified instead by
+careful reading and by confirming `publish-release`'s `if:` condition
+correctly evaluates false (and the job is skipped) on the
+`workflow_dispatch` run just used to re-verify `bundle`.
+
+**Known gaps:**
+- The `publish-release` job's own logic is unverified against a real
+  tag push (see above) — the next real verification opportunity is
+  whenever a maintainer actually decides to cut a version and push a
+  tag, at which point the draft-release output should be checked before
+  publishing it.
+- Still unsigned (unchanged from prior entries).
+
+**Next:** the actual first version tag, whenever a maintainer decides
+it's time (that decision, and pushing the tag, is deliberately not this
+session's to make autonomously) — or continuing foundry depth /
+video frame-sampling in the meantime.

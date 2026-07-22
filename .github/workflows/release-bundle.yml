@@ -11,8 +11,19 @@ name: Release bundle (unsigned)
 # check for one. That's expected and correct to ship as-is until signing
 # is set up — an unsigned build a maintainer can actually download and
 # run is real progress over no release pipeline at all.
+#
+# Pushing a `v*` tag runs the same bundle job, then attaches the
+# installers to a GitHub Release — as a DRAFT, deliberately. A draft is
+# invisible to the public and doesn't notify watchers until a maintainer
+# explicitly clicks "Publish release" in the GitHub UI; pushing a tag
+# alone must never be enough, on its own, to make a release publicly
+# visible. workflow_dispatch runs (used all along to verify the bundle
+# job itself) never touch the release job at all — `github.ref` is a
+# branch ref, not a tag ref, so `publish-release`'s `if:` skips it.
 on:
   workflow_dispatch: {}
+  push:
+    tags: ["v*"]
 
 jobs:
   bundle:
@@ -71,3 +82,38 @@ jobs:
           name: sarva-${{ matrix.os }}
           path: apps/desktop/src-tauri/target/release/bundle/**
           if-no-files-found: error
+
+  publish-release:
+    # Only for an actual version-tag push, never for workflow_dispatch
+    # (github.ref is a branch ref there, not `refs/tags/v...`) — a manual
+    # run is for testing the bundle pipeline, not for shipping a release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Collect the actual installer files
+        # actions/download-artifact recreates each OS's full bundle
+        # directory tree under dist/, which includes non-file bundle
+        # outputs (e.g. the .app directory itself, which gh release
+        # can't attach — only real files can be release assets) mixed in
+        # with the real installers. Flatten to just the installer files.
+        run: |
+          mkdir -p release-assets
+          find dist -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" \) -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      - name: Create a draft GitHub Release with the installers attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --draft --prerelease --generate-notes \
+            release-assets/*
