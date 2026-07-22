@@ -1375,3 +1375,44 @@ test today: a local directory of text files, not Common Crawl.
 or continuing to deepen the foundry pipeline (near-duplicate dedup,
 provenance tracking, or scaling the toy examples up to a real small
 public-domain corpus).
+
+## 2026-07-22 — Core: `VideoToTextDegrader`, completing the degrader trio
+
+The third and, for now, final concrete `Degrader` — image, audio, video
+all now have real converters, and all three are wired into every real
+`AgentLoop` call site via `default_degraders()`.
+
+**Built:**
+- `core/sarva/multimodal/degraders/video.py` — `VideoToTextDegrader`.
+  Same honesty principle as the other two (report only what's verifiably
+  known, never fabricate content), but simpler than audio's: there's no
+  standard-library module that can decode *any* real-world video
+  container at all (unlike audio, where `wave` genuinely handles the one
+  common uncompressed case), so this degrader never attempts byte-level
+  decoding — it always reports the block's declared `media_type`,
+  `duration_s` if set, and the always-knowable byte size.
+- **Named, not silently skipped:** `Degrader`'s own docstring in
+  `content.py` uses "video -> [image frames + text transcript]" as its
+  motivating example — this degrader deliberately does *not* do that.
+  Real frame sampling into `ImageBlock`s needs a video-decoding
+  dependency (ffmpeg/opencv) this project doesn't carry yet, and adding
+  one wasn't justified for a metadata-only converter. Documented
+  directly in the module as real, deferred follow-up work, not quietly
+  declared "the video degrader" and left at that.
+- `default_degraders()` now includes `Modality.VIDEO`, so all four real
+  `AgentLoop` call sites (from the wiring entry two commits ago) pick it
+  up automatically with no further changes needed there.
+- 6 new tests, mirroring the audio degrader's structure: declared
+  duration reported, unknown-duration fallback, actual byte size (not a
+  guess), the no-fabrication principle, an end-to-end test through the
+  real `degrade_message` dispatcher, and `default_degraders()` coverage
+  updated to expect all three modalities.
+
+**Known gaps:**
+- No real frame extraction — the deferred scope named above.
+- No document degrader (`DocumentBlock` still has no converter).
+
+**Next:** wiring release-bundle.yml to version tags, continuing to
+deepen the foundry pipeline (near-duplicate dedup, provenance tracking,
+scaling toy examples to a real small corpus), or real frame-sampling
+video degradation if a video-decoding dependency becomes justified.

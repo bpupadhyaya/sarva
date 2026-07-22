@@ -14,9 +14,10 @@ from sarva.multimodal.content import (
     Message,
     Modality,
     TextBlock,
+    VideoBlock,
     degrade_message,
 )
-from sarva.multimodal.degraders import AudioToTextDegrader, default_degraders
+from sarva.multimodal.degraders import AudioToTextDegrader, VideoToTextDegrader, default_degraders
 from sarva.multimodal.degraders.image import ImageDecodeError, ImageToTextDegrader
 
 
@@ -159,14 +160,63 @@ async def test_audio_wired_into_degrade_message_end_to_end():
     assert "3.0s" in result.content[0].text
 
 
+# ---------- VideoToTextDegrader ----------
+
+
+async def test_video_degrade_reports_declared_duration():
+    # No stdlib module can decode a real video container at all (unlike
+    # audio's one WAV special case) -- this degrader always reports
+    # declared metadata, never attempts byte-level decoding.
+    block = VideoBlock(media_type="video/mp4", data=b"not real video data", duration_s=12.5)
+    out = await VideoToTextDegrader().degrade(block)
+    assert len(out) == 1
+    assert "12.5s" in out[0].text
+    assert "video/mp4" in out[0].text
+
+
+async def test_video_degrade_reports_unknown_duration_when_not_declared():
+    block = VideoBlock(media_type="video/mp4", data=b"not real video data")
+    out = await VideoToTextDegrader().degrade(block)
+    assert "unknown duration" in out[0].text
+
+
+async def test_video_degrade_reports_actual_byte_size():
+    raw = b"x" * 4096
+    block = VideoBlock(media_type="video/mp4", data=raw, duration_s=1.0)
+    out = await VideoToTextDegrader().degrade(block)
+    expected_kb = len(raw) / 1024
+    assert f"~{expected_kb:.0f}KB" in out[0].text
+
+
+async def test_video_degrade_does_not_fabricate_content():
+    block = VideoBlock(media_type="video/mp4", data=b"x", duration_s=1.0)
+    out = await VideoToTextDegrader().degrade(block)
+    assert "could not be described" in out[0].text
+
+
+async def test_video_wired_into_degrade_message_end_to_end():
+    block = VideoBlock(media_type="video/mp4", data=b"x", duration_s=7.0)
+    msg = Message(role="user", content=[block])
+
+    result = await degrade_message(
+        msg,
+        supported={Modality.TEXT},
+        degraders={Modality.VIDEO: VideoToTextDegrader()},
+    )
+
+    assert len(result.content) == 1
+    assert "7.0s" in result.content[0].text
+
+
 # ---------- default_degraders ----------
 
 
-async def test_default_degraders_covers_image_and_audio():
+async def test_default_degraders_covers_image_audio_and_video():
     degraders = default_degraders()
-    assert set(degraders) == {Modality.IMAGE, Modality.AUDIO}
+    assert set(degraders) == {Modality.IMAGE, Modality.AUDIO, Modality.VIDEO}
     assert isinstance(degraders[Modality.IMAGE], ImageToTextDegrader)
     assert isinstance(degraders[Modality.AUDIO], AudioToTextDegrader)
+    assert isinstance(degraders[Modality.VIDEO], VideoToTextDegrader)
 
 
 async def test_default_degraders_returns_fresh_instances_each_call():
