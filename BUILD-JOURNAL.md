@@ -434,3 +434,69 @@ server code path via ASGI transport, not a mock of it).
 **Next:** T4 — the Tauri desktop wrapper (the one-click app for
 non-developers), or extending `/chat` (REST) with a "define outcome"
 style async pattern if tool use is ever needed there too.
+
+## 2026-07-21 — T4 started: Tauri desktop wrapper (step 1 of 2)
+
+**Scope decision, stated up front:** the design doc's north-star is
+"double-click an icon, no terminal" for non-developers. Fully delivering
+that needs a Python runtime bundled *inside* the app (a Tauri sidecar) so
+the app can start its own backend — real, separate work (cross-platform
+Python packaging, code-signing, sidecar process management). Rather than
+half-build that under time pressure, this entry ships **step 1 only**: a
+real native window that loads the existing web UI from a `sarva serve`
+backend the user starts themselves. Honestly, this is *not yet* one-click
+for non-developers — it's a native shell around what already works,
+with the remaining gap named precisely (not implied away) so nobody
+mistakes "it runs" for "it's done."
+
+**Built:**
+- `apps/desktop/src-tauri/` — Tauri 2 (Rust) scaffold via `tauri init`,
+  then hand-cleaned: package/lib renamed from generic `app`/`app_lib` to
+  `sarva-desktop`/`sarva_desktop_lib`, a real identifier
+  (`io.github.bpupadhyaya.sarva`, not the generated placeholder), removed
+  `beforeDevCommand`/`beforeBuildCommand` (pointless here since
+  `frontendDist`/`devUrl` point directly at the FastAPI server, not a
+  locally-built or served asset — Tauri isn't serving anything itself in
+  this architecture, just displaying it).
+- `lib.rs` carries an explicit doc comment stating the step-1/step-2 split
+  above, so the gap is visible in the code itself, not just this journal.
+- CI gained a `desktop` job: `cargo check --locked` on every push (fast
+  compile/borrow-check regression coverage). Deliberately **not** a full
+  release build or cross-platform bundle — that's real infrastructure
+  (multi-OS runners, code signing, `.dmg`/`.msi`/`.AppImage` artifacts)
+  that belongs in step 2's own entry, not bolted on here to make this one
+  look more finished than it is.
+
+**Verified — this is the part that matters most for a desktop app:**
+not just `cargo check`. Ran a real `tauri build --no-bundle`, producing an
+actual 8.3MB arm64 Mach-O executable. Started a real `sarva serve` backend
+and then **launched the built binary as a real OS process** — confirmed
+it spawned genuine WebKit XPC helper processes (WebContent, GPU,
+Networking — exactly what happens when a native macOS app creates a real
+`WKWebView`), and confirmed in the backend's own access log that the
+webview actually requested and received `GET /`, the JS bundle, and the
+CSS bundle, all `200 OK`. That's the complete load pipeline, verified
+through a genuine native app process — not a browser, not a test client.
+
+**A real environment hiccup, handled correctly rather than worked around
+carelessly:** port 8000 (the default) was already occupied by an
+unrelated, pre-existing process in this environment (not something this
+session started). Rather than kill an unknown process I don't own, the
+verification above used a separately-confirmed-free port for the test,
+then restored the committed config to the correct, standard default
+(8000) afterward — the shipped config is correct; only the *verification
+run* used a different port to get a clean result.
+
+**Known gaps (the honest heart of this entry):**
+- No bundled Python backend — the biggest remaining piece of the
+  one-click promise. Tracked explicitly, not glossed over.
+- Icons are Tauri's generated placeholders, not real Sarva branding.
+- No code signing / notarization — an unsigned build will trigger
+  Gatekeper warnings on macOS and SmartScreen warnings on Windows.
+- CI checks compile correctness only, not that a real bundle builds on
+  every platform.
+
+**Next:** the Python sidecar (step 2 — the actual one-click unlock), or
+real branding/icons, or cross-platform bundle CI. Sidecar is the one that
+actually completes the mission's stated promise, so it's the natural next
+priority when picked up.

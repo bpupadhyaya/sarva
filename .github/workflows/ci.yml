@@ -66,3 +66,25 @@ jobs:
             echo "::error::core/sarva/server/static/ is stale — run ./scripts/build-web.sh and commit the result."
             exit 1
           fi
+
+  desktop:
+    # `cargo check` only — a fast compile/borrow-check pass, not a full
+    # release build or cross-platform bundle (.dmg/.msi/.AppImage). Real
+    # packaged installers for all platforms are T4 future work (see
+    # BUILD-JOURNAL.md); this job exists to catch Rust-side regressions
+    # cheaply on every push, not to produce release artifacts.
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: cargo check
+        run: cargo check --locked
