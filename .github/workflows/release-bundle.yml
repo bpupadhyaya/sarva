@@ -1,0 +1,73 @@
+name: Release bundle (unsigned)
+
+# Manual only, not on every push: unlike ci.yml's fast cargo-check job,
+# this does a full PyInstaller freeze + real Tauri bundle (.dmg/.msi or
+# .exe/.AppImage+.deb) across all three OSes — genuinely slow, and only
+# meaningful when actually cutting a release, not on every commit.
+#
+# Unsigned: no code-signing certificates exist for this project yet (a
+# real, separate, tracked gap — see BUILD-JOURNAL.md). These artifacts
+# will trigger Gatekeeper/SmartScreen warnings on the platforms that
+# check for one. That's expected and correct to ship as-is until signing
+# is set up — an unsigned build a maintainer can actually download and
+# run is real progress over no release pipeline at all.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync workspace (installs pyinstaller)
+        run: uv sync --all-packages --group dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install desktop npm dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Freeze the Python backend sidecar
+        shell: bash
+        run: ./scripts/freeze-server.sh
+
+      - name: Build the release bundle
+        working-directory: apps/desktop
+        run: npx tauri build
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarva-${{ matrix.os }}
+          path: apps/desktop/src-tauri/target/release/bundle/**
+          if-no-files-found: error

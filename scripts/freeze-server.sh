@@ -28,23 +28,38 @@ if [ -z "$TARGET_TRIPLE" ]; then
   exit 1
 fi
 
-echo "==> Freezing sarva-server ($TARGET_TRIPLE)"
-cd "$REPO_ROOT"
-if [ ! -x "$REPO_ROOT/.venv/bin/pyinstaller" ]; then
-  echo "error: .venv/bin/pyinstaller not found — run 'uv sync --all-packages --group dev' first" >&2
+# uv venvs use .venv/bin on macOS/Linux and .venv/Scripts on Windows, and
+# every executable in it — including the frozen binary PyInstaller itself
+# produces — gains a .exe suffix on Windows. PyInstaller's --add-data
+# separator is also platform-dependent (os.pathsep: ':' on POSIX, ';' on
+# Windows) — get any of these wrong and the freeze either can't find
+# pyinstaller at all, or silently mis-parses the --add-data paths.
+EXE_SUFFIX=""
+ADD_DATA_SEP=":"
+if [ -x "$REPO_ROOT/.venv/Scripts/pyinstaller.exe" ]; then
+  VENV_BIN="$REPO_ROOT/.venv/Scripts"
+  EXE_SUFFIX=".exe"
+  ADD_DATA_SEP=";"
+elif [ -x "$REPO_ROOT/.venv/bin/pyinstaller" ]; then
+  VENV_BIN="$REPO_ROOT/.venv/bin"
+else
+  echo "error: pyinstaller not found in .venv — run 'uv sync --all-packages --group dev' first" >&2
   exit 1
 fi
-"$REPO_ROOT/.venv/bin/pyinstaller" --onefile --name sarva-server \
+
+echo "==> Freezing sarva-server ($TARGET_TRIPLE)"
+cd "$REPO_ROOT"
+"$VENV_BIN/pyinstaller$EXE_SUFFIX" --onefile --name sarva-server \
   --distpath "$REPO_ROOT/build/freeze/dist" \
   --workpath "$REPO_ROOT/build/freeze/work" \
   --specpath "$REPO_ROOT/build/freeze" \
-  --add-data "$REPO_ROOT/core/sarva/providers/data:sarva/providers/data" \
-  --add-data "$REPO_ROOT/core/sarva/server/static:sarva/server/static" \
+  --add-data "$REPO_ROOT/core/sarva/providers/data${ADD_DATA_SEP}sarva/providers/data" \
+  --add-data "$REPO_ROOT/core/sarva/server/static${ADD_DATA_SEP}sarva/server/static" \
   --noconfirm \
-  .venv/bin/sarva
+  "$VENV_BIN/sarva$EXE_SUFFIX"
 
 mkdir -p "$DIST_DIR"
-cp "$REPO_ROOT/build/freeze/dist/sarva-server" "$DIST_DIR/sarva-server-$TARGET_TRIPLE"
-chmod +x "$DIST_DIR/sarva-server-$TARGET_TRIPLE"
+cp "$REPO_ROOT/build/freeze/dist/sarva-server$EXE_SUFFIX" "$DIST_DIR/sarva-server-$TARGET_TRIPLE$EXE_SUFFIX"
+chmod +x "$DIST_DIR/sarva-server-$TARGET_TRIPLE$EXE_SUFFIX"
 
-echo "==> Done. $DIST_DIR/sarva-server-$TARGET_TRIPLE is ready to bundle as a Tauri sidecar."
+echo "==> Done. $DIST_DIR/sarva-server-$TARGET_TRIPLE$EXE_SUFFIX is ready to bundle as a Tauri sidecar."
