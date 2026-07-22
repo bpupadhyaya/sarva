@@ -107,5 +107,27 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
+      - name: Create placeholder sidecar binary
+        # tauri-build's build script validates that every bundle.externalBin
+        # path actually exists on disk, and fails the whole compile --
+        # `cargo check` included, not just a real `tauri build` -- if it
+        # doesn't. The real sidecar (scripts/freeze-server.sh) is a
+        # PyInstaller-frozen Python binary correctly gitignored as a large,
+        # per-platform artifact this repo doesn't commit, which means CI
+        # never had one on disk and this job silently couldn't compile at
+        # all since the sidecar work landed — caught only by manually
+        # running `gh run list` after the fact, not by anything in this
+        # file. A placeholder is enough: this job checks compile
+        # correctness, not that the sidecar itself works (that's verified
+        # locally and recorded in BUILD-JOURNAL.md).
+        shell: bash
+        run: |
+          target_triple="$(rustc -vV | sed -n 's/host: //p')"
+          suffix=""
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then suffix=".exe"; fi
+          mkdir -p bin
+          touch "bin/sarva-server-${target_triple}${suffix}"
+          chmod +x "bin/sarva-server-${target_triple}${suffix}" || true
+
       - name: cargo check
         run: cargo check --locked
