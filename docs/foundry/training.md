@@ -172,6 +172,29 @@ corpus. The check validates the final *resolved* path against the
 manifest's directory, not the raw string, so it catches this case and
 plain `"../"` traversal alike.
 
+### Try it on real data
+
+Every example above trains on four hardcoded toy sentences — enough to
+prove the mechanics, not that the corpus-sourcing pipeline does anything
+useful on real text.
+
+```bash
+uv run python examples/06_real_corpus_pretraining.py
+```
+
+Fetches three short, genuinely public-domain texts from Project
+Gutenberg (*A Modest Proposal*, *The Hunting of the Snark*, *The Time
+Machine* — small on purpose, this is a laptop-scale demo, not a training
+run meant to produce a useful model), runs them through the real
+pipeline — `load_text_files_with_provenance` → exact-dedup → near-dedup
+→ length-filter — with a real, honestly-stated license
+(`"Public Domain (Project Gutenberg, US)"`) attached to every surviving
+document, then trains the same tokenizer/transformer/`Trainer` stack the
+toy example above exercises, now on ~90K real tokens instead of a
+few dozen. Requires network access for the download step only —
+everything after that (dedup, tokenizer training, model training) is
+fully offline, same as every other example.
+
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local

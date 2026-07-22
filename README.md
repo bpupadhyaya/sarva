@@ -24,9 +24,11 @@ sourcing (exact + near-duplicate dedup, quality filtering, provenance/
 license tracking), a byte-level BPE tokenizer, a dense decoder-only
 transformer (RoPE, RMSNorm, SwiGLU, GQA), and a training loop with a
 warmup+cosine LR schedule and bit-identical checkpoint/resume — see
-`examples/04_pretrain_and_resume.py`. Web-scale corpus sourcing and
-distributed training aren't built yet. See `BUILD-JOURNAL.md` for
-progress.
+`examples/04_pretrain_and_resume.py`, or
+`examples/06_real_corpus_pretraining.py` for the same pipeline run
+against real, sourced, licensed public-domain text instead of toy
+sentences. Web-scale corpus sourcing and distributed training aren't
+built yet. See `BUILD-JOURNAL.md` for progress.
 
 ## Quickstart
 
