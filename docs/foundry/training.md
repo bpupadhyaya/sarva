@@ -27,6 +27,30 @@ tokenize_corpus → TextChunkDataset`, verified as a real pipeline (not
 three functions that happen to share a module) in
 `tests/foundry/test_corpus.py`.
 
+### Near-duplicate detection: the scope `dedup_documents` deferred
+
+`dedup_documents` only catches byte-identical documents. Real corpora
+have near-duplicates too — a re-published article with one word edited,
+a scraped page with a different timestamp — and `sarva_foundry.data.near_dedup.dedup_near_duplicates`
+catches those via MinHash: each document's character-shingle set is
+reduced to a fixed-size signature (one minimum hash value per hash
+function), and the fraction of matching signature positions between two
+documents' signatures estimates their true Jaccard similarity without
+ever materializing and comparing full shingle sets pairwise. Implemented
+from the underlying hashing (`hashlib.sha256`, salted per hash
+function), not vendored from an external minhash library.
+
+Worth recording honestly: the first draft of this module's tests
+assumed a "near-duplicate" meant appending a whole extra sentence to a
+document. Empirically, that dilutes shingle-set Jaccard similarity far
+more than intuition suggests (~0.66 true similarity for a realistic
+document length — well below any reasonable dedup threshold). A real
+near-duplicate — a small in-place edit — scores much higher (~0.85).
+The *implementation* was correct throughout; the test's assumption about
+what "near-duplicate" looks like in shingle-similarity terms was wrong,
+caught by actually computing the true Jaccard similarity for the test
+documents chosen rather than assuming a threshold would obviously pass.
+
 ## The dataset: concatenate, then chunk
 
 `tokenize_corpus` encodes every document in a corpus and concatenates
@@ -108,7 +132,10 @@ count).
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
-files, dedup, and length filtering exist now — provenance/license
-tracking and larger-scale sourcing don't yet), and the distributed
-training slice of §3.6d (FSDP → 3D parallelism, loss-spike handling,
-scaling-law tooling) once a model worth training at that scale exists.
+files, exact + near-duplicate dedup, and length filtering exist now —
+provenance/license tracking and larger-scale sourcing don't yet; nor
+does an LSH banding index, which near-duplicate dedup would need to
+scale past the current O(kept²) pairwise comparison), and the
+distributed training slice of §3.6d (FSDP → 3D parallelism, loss-spike
+handling, scaling-law tooling) once a model worth training at that scale
+exists.

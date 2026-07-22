@@ -1475,3 +1475,59 @@ correctly evaluates false (and the job is skipped) on the
 it's time (that decision, and pushing the tag, is deliberately not this
 session's to make autonomously) — or continuing foundry depth /
 video frame-sampling in the meantime.
+
+## 2026-07-22 — F0 continued: near-duplicate detection via MinHash
+
+`dedup_documents`'s own docstring named the gap and deferred it: exact-hash
+dedup only catches byte-identical documents. Real corpora have
+near-duplicates too — a re-published article with one word edited, a
+scraped page with a different timestamp. Closed with MinHash.
+
+**Built:**
+- `foundry/sarva_foundry/data/near_dedup.py` — `dedup_near_duplicates`:
+  reduces each document's character-shingle set to a fixed-size MinHash
+  signature (one minimum hash value per hash function, `hashlib.sha256`
+  salted per function — no external minhash/datasketch dependency, the
+  algorithm is the contribution, not the hash primitive underneath it),
+  then estimates Jaccard similarity from the fraction of matching
+  signature positions between two documents, dropping anything at or
+  above `threshold` similarity to an earlier-kept document. Documented
+  as O(kept²) pairwise comparison — fine at this project's scale, named
+  honestly as needing an LSH banding index to go further, not silently
+  implied to scale to a web-sized corpus.
+- 13 tests in `tests/foundry/test_near_dedup.py`, including the actual
+  algorithmic properties (deterministic signatures, identical shingle
+  sets produce identical signatures, identical signatures estimate
+  similarity 1.0), the dedup behavior itself (drops a real near-dup,
+  keeps genuinely different documents, respects `threshold`, keeps
+  first-occurrence order, handles empty documents), and composition with
+  the existing exact-hash `dedup_documents`.
+
+**A test-calibration bug caught by actually computing ground truth, not
+shipped:** the first draft's "near-duplicate" test document was the
+original text with a whole extra sentence appended (modeling "an article
+republished with one more paragraph"). Empirically computing the *true*
+Jaccard similarity for that pair — not just assuming a threshold would
+obviously pass — showed only ~0.66 similarity, well below any reasonable
+dedup threshold: appending new content dilutes shingle-set Jaccard far
+more than intuition suggests, because Jaccard divides by the *union*,
+and a whole new sentence adds a large batch of shingles no version of
+the document shared before. The MinHash *implementation* was correct the
+whole time (its estimate tracked the true value closely, ~0.62 vs.
+~0.66); the test's mental model of "what counts as near-duplicate in
+shingle-similarity terms" was wrong. Fixed by using a small in-place
+edit (one word changed) instead, which is both a more realistic
+near-duplicate scenario and empirically scores ~0.85 — comfortably
+above threshold. Documented directly in `docs/foundry/training.md`, not
+quietly corrected and forgotten.
+
+**Known gaps:**
+- O(kept²) — no LSH banding index, so this doesn't scale to a web-sized
+  corpus as-is.
+- Character shingles only; word-level or sentence-level shingling (a
+  different tradeoff — more robust to word-order-preserving paraphrase,
+  less robust to typos) isn't implemented.
+
+**Next:** the actual first version tag (still the user's call), real
+frame-sampling video degradation, or provenance/license tracking for
+the corpus-sourcing pipeline.
