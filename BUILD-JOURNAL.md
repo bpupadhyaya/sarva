@@ -906,3 +906,62 @@ not just "compiled locally."
 
 **Next:** real branding/icons, or scaling the foundry pipeline up from
 toy-corpus to a real small dataset with an actual LR schedule.
+
+## 2026-07-22 — Core: url-sourced media blocks actually work now
+
+A gap in the type system's own stated design, not a new feature: since
+T0, `_MediaBlock.resolve_bytes()`'s docstring has said "url sources must
+be fetched via `sarva.multimodal.fetch` (not implemented here)" — that
+module never existed, so any `ImageBlock`/`AudioBlock`/etc. constructed
+with a `url` source (as opposed to `data` or `path`) was unusable
+end-to-end. Closed that gap.
+
+**Built:**
+- `core/sarva/multimodal/fetch.py` — `fetch_bytes(url)`: async, streams
+  the response rather than trusting `Content-Length` (a misbehaving or
+  malicious server can omit or lie about it), enforcing `max_bytes` from
+  actual bytes counted while streaming, and restricts schemes to
+  `http`/`https` (rejects `file://`, `ftp://`, etc. — this resolves URLs
+  that arrive as declared media sources, so scheme hygiene matters even
+  though there's no untrusted-user-input path to it yet). Accepts an
+  optional `client: httpx.AsyncClient` so production call sites can share
+  one client and tests can inject an `httpx.MockTransport` — no real
+  network I/O anywhere in this entry's test suite.
+  `resolve_media_bytes(block)` is the dispatcher: `data`/`path` sources
+  resolve exactly as the existing sync `resolve_bytes()` already does,
+  `url` sources go through `fetch_bytes`. Deliberately kept **out** of
+  `content.py` itself — that module is the dependency-light type
+  vocabulary every layer imports, and pulling `httpx` into it would
+  couple the universal content model to a network library it has no
+  other reason to need.
+- Wired into `sarva.providers.anthropic_provider`: `_to_anthropic_message`
+  is now `async def` and awaits `resolve_media_bytes` instead of calling
+  the block's own `resolve_bytes()` directly, so an `ImageBlock` with a
+  `url` source now actually reaches the Anthropic API instead of raising
+  at request-build time. The one caller (`generate()`) already ran inside
+  an async context, so this required no wrapper/anti-pattern — genuinely
+  awaiting network I/O where the code was already async throughout.
+- `tests/conformance/test_fetch.py` (7 tests) — response-body round-trip,
+  scheme rejection, HTTP-error-status handling, the streamed size-cap
+  (verified against a handler that doesn't even set `Content-Length`, so
+  the cap can't be passing by accident via header-trusting), and all
+  three `resolve_media_bytes` dispatch paths (data/path/url), all via
+  `httpx.MockTransport` — no real network call anywhere in this suite.
+- Updated `tests/conformance/test_anthropic_provider.py` for the new
+  `async def` signature (its own docstring already called out that these
+  tests use only in-memory `data` sources, so no I/O actually runs here
+  either — the `await` exists because the function's shape changed, not
+  because these particular tests exercise the network path).
+
+**Known gaps:**
+- No degrader implementations still ship (per the earlier codebase
+  survey that identified this gap) — `fetch.py` makes url-sourced bytes
+  loadable, it doesn't add image resizing/reformatting or audio
+  transcription. That's the next natural piece if this area gets picked
+  up again.
+- `fetch_bytes` has no retry/backoff — a transient network blip surfaces
+  as a `FetchError` immediately rather than retrying.
+
+**Next:** a concrete image degrader (resize/reformat via Pillow for
+provider context limits) to give the degradation registry its first real
+converter, or continue elsewhere (branding, foundry scale-up).

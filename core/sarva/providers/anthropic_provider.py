@@ -27,6 +27,7 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from sarva.multimodal.fetch import resolve_media_bytes
 from sarva.providers.base import (
     DoneEvent,
     GenerateRequest,
@@ -55,19 +56,23 @@ _PRICE = {
 }
 
 
-def _to_anthropic_message(m: Message) -> dict[str, Any]:
+async def _to_anthropic_message(m: Message) -> dict[str, Any]:
     blocks: list[dict[str, Any]] = []
     for b in m.content:
         if isinstance(b, TextBlock):
             blocks.append({"type": "text", "text": b.text})
         elif isinstance(b, ImageBlock):
+            # resolve_media_bytes (not b.resolve_bytes()) so url-sourced
+            # images work too, not just data/path — see
+            # sarva.multimodal.fetch's module docstring.
+            image_bytes = await resolve_media_bytes(b)
             blocks.append(
                 {
                     "type": "image",
                     "source": {
                         "type": "base64",
                         "media_type": b.media_type,
-                        "data": base64.standard_b64encode(b.resolve_bytes()).decode(),
+                        "data": base64.standard_b64encode(image_bytes).decode(),
                     },
                 }
             )
@@ -99,7 +104,7 @@ class AnthropicProvider:
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in request.tools
         ]
-        messages = [_to_anthropic_message(m) for m in request.messages]
+        messages = [await _to_anthropic_message(m) for m in request.messages]
         kwargs: dict[str, Any] = dict(
             model=request.model,
             max_tokens=request.config.max_tokens,
