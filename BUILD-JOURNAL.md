@@ -1579,3 +1579,45 @@ code first.
 **Next:** the actual first version tag (still the user's call), real
 frame-sampling video degradation, or a per-file license manifest for
 directories with mixed sources.
+
+## 2026-07-22 — F0 continued: per-file license manifest
+
+Closes the known gap the provenance entry named: `load_text_files_with_provenance`
+applies one license uniformly per call, which doesn't cover a directory
+with genuinely mixed sources.
+
+**Built:**
+- `load_text_files_from_manifest` (`provenance.py`) — reads a JSON
+  manifest mapping each document's path to its own license string, paths
+  resolved relative to the *manifest's own directory* so the manifest
+  travels with its corpus without path edits. Validates every entry
+  rather than trusting it: raises clearly on a malformed manifest (not a
+  JSON object), a missing file, or a path traversal attempt.
+- **Caught, not just handled defensively:** a real pathlib gotcha —
+  `Path("/safe/dir") / "/etc/passwd"` silently *discards* the base and
+  evaluates to `/etc/passwd` alone, since joining an absolute path onto
+  any base always wins. A manifest entry that's absolute (by accident,
+  or by injection if a manifest is ever untrusted input) would otherwise
+  read a file nowhere near the corpus with no error at all. The
+  traversal check validates the final *resolved* path against the
+  manifest's directory rather than pattern-matching the raw string
+  (e.g. checking for `".."`), so it catches this exact case — pinned by
+  a dedicated test (`test_load_from_manifest_rejects_an_absolute_path_entry`)
+  distinct from the plain `"../"` traversal test, since a naive
+  string-based guard would pass the absolute-path case while still
+  looking like it handles "path traversal."
+- 7 new tests in `tests/foundry/test_provenance.py`: per-file license
+  assignment, path resolution relative to the manifest, the missing-file
+  and malformed-manifest error paths, both traversal cases above, and
+  composition with the existing dedup/filter functions.
+
+**Known gaps:**
+- One manifest per directory tree, no glob patterns or wildcard license
+  assignment — every file needs an explicit manifest entry.
+- No manifest *generation* tooling (e.g. scaffolding one from a
+  directory listing) — authored by hand for now.
+
+**Next:** the actual first version tag (still the user's call), real
+frame-sampling video degradation, or scaling the toy pipeline examples
+up to a real small public-domain corpus now that the sourcing side is
+fully built out.

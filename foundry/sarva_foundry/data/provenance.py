@@ -15,6 +15,7 @@ source files happen to contain identical text.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,6 +50,52 @@ def load_text_files_with_provenance(
         SourcedDocument(text=p.read_text(encoding=encoding), source_path=str(p), license=license)
         for p in paths
     ]
+
+
+def load_text_files_from_manifest(
+    manifest_path: Path, encoding: str = "utf-8"
+) -> list[SourcedDocument]:
+    """Load exactly the files a provenance manifest names, each with its
+    own license — the real per-file license variation
+    `load_text_files_with_provenance`'s docstring named as needing a
+    manifest, not covered by that function's single uniform license.
+
+    The manifest is a JSON object mapping each file's path (relative to
+    the *manifest's own directory*, so the manifest travels with its
+    corpus without needing path edits) to that file's license string:
+
+        {"articles/a.txt": "CC-BY-4.0", "books/b.txt": "public-domain"}
+
+    Raises clearly — the same "loud, fixable, not silently wrong"
+    principle as `load_text_files` — on a malformed manifest, a missing
+    file, or a manifest entry that resolves outside the manifest's own
+    directory (guards against path traversal, e.g. `"../../etc/passwd"`
+    or an absolute path — `Path("/safe") / "/etc/passwd"` silently
+    discards the base and evaluates to `/etc/passwd` alone, a well-known
+    pathlib gotcha this check catches by validating the final resolved
+    path rather than the raw string)."""
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"manifest must be a JSON object mapping path -> license, got {type(raw).__name__}"
+        )
+
+    base_dir = manifest_path.parent.resolve()
+    docs: list[SourcedDocument] = []
+    for rel_path, license in raw.items():
+        file_path = (base_dir / rel_path).resolve()
+        if base_dir not in file_path.parents:
+            raise ValueError(f"manifest entry {rel_path!r} resolves outside {base_dir}")
+        if not file_path.is_file():
+            raise ValueError(f"manifest names {rel_path!r} but no such file exists at {file_path}")
+        docs.append(
+            SourcedDocument(
+                text=file_path.read_text(encoding=encoding),
+                source_path=str(file_path),
+                license=license,
+            )
+        )
+    return docs
 
 
 def dedup_sourced_documents(docs: list[SourcedDocument]) -> list[SourcedDocument]:

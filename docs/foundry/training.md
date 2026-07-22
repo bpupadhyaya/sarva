@@ -157,15 +157,27 @@ ambiguous or arbitrary choice).
 
 `load_text_files_with_provenance` applies one `license` string uniformly
 to every file loaded in a single call — real per-file license variation
-within one directory (a manifest mapping path → license) is real,
-separate scope, named rather than silently assumed covered.
+needed a manifest, which `load_text_files_from_manifest` now provides:
+a JSON file mapping each document's path to its own license string,
+paths resolved *relative to the manifest's own directory* so the
+manifest travels with its corpus without needing path edits. It
+validates every entry rather than trusting it: a missing file, a
+malformed manifest, or an entry that resolves outside the manifest's own
+directory all raise clearly. That last check matters for a reason beyond
+tidiness — `Path("/safe/dir") / "/etc/passwd"` is a genuine pathlib
+gotcha: joining an absolute path onto a base silently *discards* the
+base rather than erroring, so a manifest entry that's accidentally (or
+maliciously) absolute would otherwise read a file nowhere near the
+corpus. The check validates the final *resolved* path against the
+manifest's directory, not the raw string, so it catches this case and
+plain `"../"` traversal alike.
 
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
 files, exact + near-duplicate dedup, length filtering, and provenance/license
-tracking all exist now — larger-scale sourcing and per-file license
-manifests don't yet; nor does an LSH banding index, which near-duplicate
+tracking including per-file manifests all exist now — larger-scale
+sourcing doesn't yet; nor does an LSH banding index, which near-duplicate
 dedup would need to scale past the current O(kept²) pairwise
 comparison), and the distributed training slice of §3.6d (FSDP → 3D
 parallelism, loss-spike handling, scaling-law tooling) once a model

@@ -6,7 +6,8 @@ Status: F0 has a runnable (toy-scale) pretraining pipeline end to end —
 (dense decoder-only transformer: RoPE, RMSNorm, SwiGLU, GQA),
 `sarva_foundry.data` (local-file corpus sourcing, exact + MinHash
 near-duplicate dedup, length-filtering, source/license provenance
-tracking via `SourcedDocument`, and corpus-to-batches chunking), and
+tracking via `SourcedDocument` (including a per-file license manifest),
+and corpus-to-batches chunking), and
 `sarva_foundry.train.Trainer` (training loop with bit-identical
 checkpoint/resume, plus `WarmupCosineSchedule` for a real LR curve
 instead of a flat rate) all built and tested — see

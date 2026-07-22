@@ -3,12 +3,15 @@ tracking through the corpus pipeline."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sarva_foundry.data import (
     SourcedDocument,
     dedup_near_duplicate_sourced_documents,
     dedup_sourced_documents,
     filter_sourced_documents_by_length,
+    load_text_files_from_manifest,
     load_text_files_with_provenance,
 )
 
@@ -110,3 +113,75 @@ def test_sourced_document_is_frozen():
     doc = SourcedDocument(text="x", source_path="x.txt")
     with pytest.raises(AttributeError):
         doc.text = "y"
+
+
+def _write_manifest(tmp_path, mapping: dict) -> None:
+    (tmp_path / "manifest.json").write_text(json.dumps(mapping))
+
+
+def test_load_from_manifest_assigns_a_distinct_license_per_file(tmp_path):
+    (tmp_path / "a.txt").write_text("first document")
+    (tmp_path / "b.txt").write_text("second document")
+    _write_manifest(tmp_path, {"a.txt": "CC-BY-4.0", "b.txt": "public-domain"})
+
+    docs = load_text_files_from_manifest(tmp_path / "manifest.json")
+
+    by_license = {d.license: d.text for d in docs}
+    assert by_license["CC-BY-4.0"] == "first document"
+    assert by_license["public-domain"] == "second document"
+
+
+def test_load_from_manifest_resolves_paths_relative_to_the_manifest_directory(tmp_path):
+    (tmp_path / "articles").mkdir()
+    (tmp_path / "articles" / "a.txt").write_text("content")
+    _write_manifest(tmp_path, {"articles/a.txt": "MIT"})
+
+    docs = load_text_files_from_manifest(tmp_path / "manifest.json")
+
+    assert len(docs) == 1
+    assert docs[0].source_path.endswith("articles/a.txt")
+    assert docs[0].license == "MIT"
+
+
+def test_load_from_manifest_raises_on_a_missing_file(tmp_path):
+    _write_manifest(tmp_path, {"does_not_exist.txt": "MIT"})
+    with pytest.raises(ValueError, match="no such file"):
+        load_text_files_from_manifest(tmp_path / "manifest.json")
+
+
+def test_load_from_manifest_raises_when_manifest_is_not_a_json_object(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps(["not", "a", "dict"]))
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        load_text_files_from_manifest(tmp_path / "manifest.json")
+
+
+def test_load_from_manifest_rejects_path_traversal_outside_manifest_directory(tmp_path):
+    _write_manifest(tmp_path, {"../../etc/passwd": "MIT"})
+    with pytest.raises(ValueError, match="resolves outside"):
+        load_text_files_from_manifest(tmp_path / "manifest.json")
+
+
+def test_load_from_manifest_rejects_an_absolute_path_entry(tmp_path):
+    # Path("/safe/dir") / "/etc/passwd" silently discards the base and
+    # evaluates to "/etc/passwd" alone -- a well-known pathlib gotcha.
+    # The traversal check must catch this via the final resolved path,
+    # not just by looking for ".." in the raw string.
+    _write_manifest(tmp_path, {"/etc/passwd": "MIT"})
+    with pytest.raises(ValueError, match="resolves outside"):
+        load_text_files_from_manifest(tmp_path / "manifest.json")
+
+
+def test_load_from_manifest_composes_with_dedup_and_filter(tmp_path):
+    (tmp_path / "a.txt").write_text("the quick brown fox jumps over the lazy dog")
+    (tmp_path / "b.txt").write_text("the quick brown fox jumps over the lazy dog")  # exact dup
+    (tmp_path / "c.txt").write_text("hi")  # too short
+    _write_manifest(
+        tmp_path, {"a.txt": "CC-BY-4.0", "b.txt": "CC-BY-4.0", "c.txt": "public-domain"}
+    )
+
+    docs = load_text_files_from_manifest(tmp_path / "manifest.json")
+    docs = dedup_sourced_documents(docs)
+    docs = filter_sourced_documents_by_length(docs, min_chars=10)
+
+    assert len(docs) == 1
+    assert docs[0].license == "CC-BY-4.0"

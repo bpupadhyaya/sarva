@@ -8,6 +8,7 @@ from sarva_foundry.data.provenance import (
     dedup_near_duplicate_sourced_documents,
     dedup_sourced_documents,
     filter_sourced_documents_by_length,
+    load_text_files_from_manifest,
     load_text_files_with_provenance,
 )
 
@@ -22,6 +23,7 @@ __all__ = [
     "filter_by_length",
     "filter_sourced_documents_by_length",
     "load_text_files",
+    "load_text_files_from_manifest",
     "load_text_files_with_provenance",
     "tokenize_corpus",
 ]
