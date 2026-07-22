@@ -18,17 +18,27 @@
 # this script freezes whatever is currently in core/sarva/server/static/.
 set -euo pipefail
 
-# On Windows, this script runs under Git Bash (MSYS2), which
-# auto-converts argument-looking paths before the underlying Windows exe
-# ever sees them — and that conversion mis-fires specifically on
-# --add-data's Windows-style value (SRC;DEST), corrupting a real path
-# like D:/a/sarva/sarva/core/... into \\d\\a\\sarva\\sarva\\core\\... A
-# confirmed CI failure, not a guess: `MSYS_NO_PATHCONV=1` disables that
-# conversion; harmless on macOS/Linux where it's simply not MSYS.
+# On Windows, this script runs under Git Bash (MSYS2), whose automatic
+# POSIX<->Windows path conversion is inconsistent in a way two separate
+# confirmed CI failures exposed: left enabled, it mangles --add-data's
+# semicolon-joined SRC;DEST value (converts D:/a/sarva/sarva/core/... into
+# \\d\\a\\sarva\\sarva\\core\\...); disabled outright (MSYS_NO_PATHCONV=1),
+# plain single-path arguments like the script path stop being converted
+# at all, so PyInstaller — a native Windows program with no idea what
+# MSYS's internal /d/a/... paths mean — reports them as not existing.
+# Rather than fight that heuristic either way, disable it and resolve
+# every path PyInstaller receives to native Windows form ourselves via
+# `cygpath`, which only exists under Git Bash/MSYS in the first place —
+# harmless on macOS/Linux where $NATIVE_ROOT just equals $REPO_ROOT.
 export MSYS_NO_PATHCONV=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$REPO_ROOT/apps/desktop/src-tauri/bin"
+if command -v cygpath >/dev/null 2>&1; then
+  NATIVE_ROOT="$(cygpath -m "$REPO_ROOT")"
+else
+  NATIVE_ROOT="$REPO_ROOT"
+fi
 
 # Tauri sidecar binaries must be suffixed with the Rust target triple.
 TARGET_TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/host: //p')"
@@ -66,13 +76,13 @@ cd "$REPO_ROOT"
 # all). The wrapper is a real .py file on every platform, sidestepping
 # the difference entirely.
 "$VENV_BIN/pyinstaller$EXE_SUFFIX" --onefile --name sarva-server \
-  --distpath "$REPO_ROOT/build/freeze/dist" \
-  --workpath "$REPO_ROOT/build/freeze/work" \
-  --specpath "$REPO_ROOT/build/freeze" \
-  --add-data "$REPO_ROOT/core/sarva/providers/data${ADD_DATA_SEP}sarva/providers/data" \
-  --add-data "$REPO_ROOT/core/sarva/server/static${ADD_DATA_SEP}sarva/server/static" \
+  --distpath "$NATIVE_ROOT/build/freeze/dist" \
+  --workpath "$NATIVE_ROOT/build/freeze/work" \
+  --specpath "$NATIVE_ROOT/build/freeze" \
+  --add-data "$NATIVE_ROOT/core/sarva/providers/data${ADD_DATA_SEP}sarva/providers/data" \
+  --add-data "$NATIVE_ROOT/core/sarva/server/static${ADD_DATA_SEP}sarva/server/static" \
   --noconfirm \
-  "$REPO_ROOT/scripts/_freeze_entrypoint.py"
+  "$NATIVE_ROOT/scripts/_freeze_entrypoint.py"
 
 mkdir -p "$DIST_DIR"
 cp "$REPO_ROOT/build/freeze/dist/sarva-server$EXE_SUFFIX" "$DIST_DIR/sarva-server-$TARGET_TRIPLE$EXE_SUFFIX"
