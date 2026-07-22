@@ -18,6 +18,15 @@
 # this script freezes whatever is currently in core/sarva/server/static/.
 set -euo pipefail
 
+# On Windows, this script runs under Git Bash (MSYS2), which
+# auto-converts argument-looking paths before the underlying Windows exe
+# ever sees them — and that conversion mis-fires specifically on
+# --add-data's Windows-style value (SRC;DEST), corrupting a real path
+# like D:/a/sarva/sarva/core/... into \\d\\a\\sarva\\sarva\\core\\... A
+# confirmed CI failure, not a guess: `MSYS_NO_PATHCONV=1` disables that
+# conversion; harmless on macOS/Linux where it's simply not MSYS.
+export MSYS_NO_PATHCONV=1
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$REPO_ROOT/apps/desktop/src-tauri/bin"
 
