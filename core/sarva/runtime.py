@@ -17,6 +17,7 @@ import httpx
 from sarva.providers.anthropic_provider import AnthropicProvider
 from sarva.providers.mock import MockProvider
 from sarva.providers.ollama_provider import OllamaProvider
+from sarva.providers.openai_provider import OpenAIProvider
 from sarva.providers.registry import Registry, Router, load_routing
 
 _DATA_DIR = Path(__file__).parent / "providers" / "data"
@@ -38,6 +39,8 @@ def build_router() -> Router:
     available = {"mock"}
     if os.environ.get("ANTHROPIC_API_KEY"):
         available |= {m.id for m in registry.all() if m.provider == "anthropic"}
+    if os.environ.get("OPENAI_API_KEY"):
+        available |= {m.id for m in registry.all() if m.provider == "openai"}
     if ollama_reachable():
         available |= {m.id for m in registry.all() if m.provider == "ollama"}
     return Router(registry, routing, available)
@@ -47,6 +50,8 @@ def build_providers() -> dict[str, Any]:
     providers: dict[str, Any] = {"mock": MockProvider()}
     if os.environ.get("ANTHROPIC_API_KEY"):
         providers["anthropic"] = AnthropicProvider()
+    if os.environ.get("OPENAI_API_KEY"):
+        providers["openai"] = OpenAIProvider()
     if ollama_reachable():
         providers["ollama"] = OllamaProvider(host=OLLAMA_HOST)
     return providers

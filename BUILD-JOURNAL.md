@@ -1883,3 +1883,84 @@ real, larger, externally-sourced text, which a unit test with synthetic
 strings structurally can't prove.
 
 **Next:** the actual first version tag (still the user's call).
+
+## v0.1.0 tagged and released (draft) — first version tag, with explicit go-ahead
+
+Every earlier mention of this had deferred it as "the user's own
+decision, not mine to take autonomously" — the whole reason
+`publish-release`'s tag-triggered path existed but had never been live-
+tested. Asked directly whether to cut it now that every other named
+milestone was shipped; got an explicit go-ahead. Tagged the current
+commit as `v0.1.0` and pushed the tag, triggering `release-bundle.yml`'s
+real tag path for the first time (previously only exercised via
+`workflow_dispatch`, where `publish-release` correctly *skips*).
+
+**Verified the real thing, not just green checkmarks:** all three
+`bundle` jobs succeeded (windows 5m10s, ubuntu 8m18s, macos 2m9s), then
+`publish-release` ran for real and `gh release view v0.1.0 --json
+isDraft,isPrerelease,assets` confirmed `isDraft: true`, `isPrerelease:
+true` (the safety boundary held — invisible to the public until a
+maintainer explicitly publishes it) with all 5 real installer assets
+attached (macOS `.dmg` 53MB, Linux `.AppImage` 167MB + `.deb` 92.5MB,
+Windows `.exe` 71MB + `.msi` 71.8MB). One cosmetic detail, not a bug:
+the release's URL shows a placeholder `untagged-<hash>` slug rather than
+`v0.1.0` — normal GitHub behavior for an unpublished draft; the API's
+`tagName` field already correctly reports `v0.1.0`.
+
+**Still the maintainer's call, unchanged:** actually clicking "Publish
+release" in the GitHub UI.
+
+## OpenAI provider adapter — closing T1's other named provider gap
+
+T1's own roadmap line has always read "Provider layer (Anthropic+OpenAI+
+Google+Ollama)" — Anthropic, Ollama, and Mock existed; OpenAI didn't.
+`sarva.providers.openai_provider.OpenAIProvider` implements the same
+`Provider` protocol via OpenAI's Chat Completions streaming API, same
+"thin adapter, same contract" pattern as the other two.
+
+The one genuinely novel piece of logic, called out directly in the
+adapter's own docstring: OpenAI streams a tool call's `arguments` as
+string fragments across many chunks, keyed by `index` — unlike Anthropic
+(whose SDK hands back an already-assembled `get_final_message()`) or
+Ollama (whose chat API sends each tool call complete in one chunk). Got
+this wrong once in the sense of not trusting it enough on the first
+pass: wrote a hermetic test specifically interleaving *two concurrent*
+tool calls' argument fragments chunk-by-chunk to prove index-keyed
+accumulation doesn't cross-contaminate them — the one place a
+live-only test wouldn't reliably force the bug, since a live model might
+never happen to interleave two calls in exactly the order that would
+expose an index mistake. A separate test proves malformed/truncated
+argument JSON degrades to an empty dict rather than crashing the
+adapter.
+
+**A real, deliberate scope boundary, not an oversight:** no entries
+added to `providers/data/models.yaml`. That file's own header states
+it's "re-validated at every release," and this project's honesty
+principle — no fabricated content anywhere, the same rule the degraders
+live by — applies to a registry file exactly as much as to model output.
+A web search for "current OpenAI model + 2026 pricing" turned up nothing
+trustworthy enough to write into a file explicitly meant to be accurate
+(low-authority SEO aggregator sites naming implausible model variants,
+the pattern of AI-generated pricing-page spam, not OpenAI's own
+documentation) — writing that data in anyway would have been exactly
+the kind of fabrication this codebase explicitly refuses everywhere
+else. The adapter is real and complete; wiring a specific verified model
+in is the one-entry config change the registry design was built for, left
+for whoever has that data. `runtime.py`'s `build_providers`/`build_router`
+wire it in behind `OPENAI_API_KEY`, same guard shape as the Anthropic
+adapter — currently a no-op until a real `provider: openai` entry exists,
+by design.
+
+Following the established Anthropic/Ollama precedent (Ollama has zero
+unit tests, only a live-gated one; Anthropic unit-tests only its pure
+translation function): `test_openai_provider.py` covers
+`_to_openai_messages` hermetically (5 tests, including the one dedicated
+to something Anthropic doesn't need — OpenAI requires a *separate*
+role="tool" message per tool_call_id, unlike Anthropic's single
+content-array-with-multiple-tool-results shape), and a live-gated test
+was added to `tests/live/test_live_providers.py` (skipped without
+`OPENAI_API_KEY`, model id overridable via `OPENAI_TEST_MODEL` since no
+verified-current model id is hardcoded anywhere). 201 → 209 Python
+tests, all passing; `sarva.runtime.build_providers()` empirically
+confirmed to still return only `{"mock": ...}` with no keys set — no
+import-time side effects, no accidental client construction.

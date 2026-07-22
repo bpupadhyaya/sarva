@@ -21,6 +21,10 @@ def _has_anthropic_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def _has_openai_key() -> bool:
+    return bool(os.environ.get("OPENAI_API_KEY"))
+
+
 def _ollama_reachable() -> bool:
     import httpx
 
@@ -63,4 +67,27 @@ async def test_ollama_terminal_event_law():
     )
     events = [e async for e in provider.generate(req)]
     assert isinstance(events[-1], DoneEvent)
+    await provider.close()
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _has_openai_key(), reason="OPENAI_API_KEY not set")
+async def test_openai_terminal_event_law():
+    from sarva.providers.openai_provider import OpenAIProvider
+
+    # No verified-current OpenAI model id is wired into models.yaml yet
+    # (see openai_provider.py's module docstring) -- overridable via
+    # OPENAI_TEST_MODEL so this test stays runnable without editing code
+    # once a real model id is known at run time.
+    model = os.environ.get("OPENAI_TEST_MODEL", "gpt-4o-mini")
+    provider = OpenAIProvider()
+    req = GenerateRequest(
+        model=model,
+        messages=[Message(role="user", content=[TextBlock(text="Say 'hi' and nothing else.")])],
+    )
+    events = [e async for e in provider.generate(req)]
+    assert isinstance(events[-1], DoneEvent)
+    assert events[-1].stop_reason == StopReason.END_TURN
+    assert events[-1].usage.output_tokens > 0
     await provider.close()
