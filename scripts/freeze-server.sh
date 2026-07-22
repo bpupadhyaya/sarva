@@ -58,6 +58,13 @@ fi
 
 echo "==> Freezing sarva-server ($TARGET_TRIPLE)"
 cd "$REPO_ROOT"
+# Freezes scripts/_freeze_entrypoint.py, not the installed `sarva`
+# console-script launcher: that launcher is a plain readable .py file on
+# macOS/Linux but a *compiled* .exe stub on Windows (confirmed via a real
+# Windows CI failure: "Script file '...\\sarva.exe' does not exist" —
+# PyInstaller can't treat a compiled binary as an analyzable script at
+# all). The wrapper is a real .py file on every platform, sidestepping
+# the difference entirely.
 "$VENV_BIN/pyinstaller$EXE_SUFFIX" --onefile --name sarva-server \
   --distpath "$REPO_ROOT/build/freeze/dist" \
   --workpath "$REPO_ROOT/build/freeze/work" \
@@ -65,7 +72,7 @@ cd "$REPO_ROOT"
   --add-data "$REPO_ROOT/core/sarva/providers/data${ADD_DATA_SEP}sarva/providers/data" \
   --add-data "$REPO_ROOT/core/sarva/server/static${ADD_DATA_SEP}sarva/server/static" \
   --noconfirm \
-  "$VENV_BIN/sarva$EXE_SUFFIX"
+  "$REPO_ROOT/scripts/_freeze_entrypoint.py"
 
 mkdir -p "$DIST_DIR"
 cp "$REPO_ROOT/build/freeze/dist/sarva-server$EXE_SUFFIX" "$DIST_DIR/sarva-server-$TARGET_TRIPLE$EXE_SUFFIX"
