@@ -73,12 +73,33 @@ jobs:
     # packaged installers for all platforms are T4 future work (see
     # BUILD-JOURNAL.md); this job exists to catch Rust-side regressions
     # cheaply on every push, not to produce release artifacts.
-    runs-on: macos-latest
+    #
+    # Matrixed across all three target OSes: the sidecar spawn/kill code
+    # in lib.rs is `#[cfg(unix)]`-gated in one place (the SIGINT/SIGTERM
+    # handler) specifically because it was only ever verified on macOS —
+    # this matrix at least catches the far cheaper failure mode of the
+    # *rest* of the file not compiling on Linux/Windows at all, which
+    # cargo check on a single OS can never surface.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: apps/desktop/src-tauri
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        # Tauri 2's documented Linux prerequisites (webkit2gtk + friends) —
+        # cargo check fails at the linking stage without these, not with a
+        # clear "install this package" message, so they're listed here
+        # explicitly rather than discovered by a confusing CI failure.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
