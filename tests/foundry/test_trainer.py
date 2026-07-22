@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import torch
 from sarva_foundry.model import DecoderOnlyTransformer, TransformerConfig
-from sarva_foundry.train import Trainer
+from sarva_foundry.train import Trainer, TrainerConfig, WarmupCosineSchedule
 
 
 def _config() -> TransformerConfig:
@@ -95,3 +95,51 @@ def test_checkpoint_without_optimizer_state_would_diverge():
 
     mismatched = any(not torch.allclose(final_a[k], final_b[k], atol=1e-6) for k in final_a)
     assert mismatched
+
+
+def test_schedule_sets_the_optimizer_lr_at_each_step():
+    config = _config()
+    schedule = WarmupCosineSchedule(peak_lr=1e-2, min_lr=1e-4, warmup_steps=4, total_steps=20)
+    trainer = Trainer(_seeded_model(config), TrainerConfig(schedule=schedule))
+    x, y = _fixed_batch(config)
+
+    lrs = []
+    for _ in range(6):
+        trainer.train_step(x, y)
+        lrs.append(trainer.optimizer.param_groups[0]["lr"])
+
+    # Steps 0-3 are warmup (ramping up), step 4+ is past warmup_steps=4
+    # and should be decaying -- confirms train_step is actually pulling a
+    # fresh LR from the schedule every call, not just once at construction.
+    assert lrs[0] < lrs[3]
+    assert lrs[4] > lrs[5]
+
+
+def test_checkpoint_resume_is_bit_identical_with_a_schedule_active(tmp_path):
+    # The schedule-specific version of the bit-identical resume test
+    # above: resuming mid-schedule must continue the LR curve from
+    # exactly where it left off (driven by the checkpointed step count),
+    # not restart warmup or jump to some other point on the curve.
+    config = _config()
+    x, y = _fixed_batch(config)
+    schedule = WarmupCosineSchedule(peak_lr=1e-2, min_lr=1e-4, warmup_steps=3, total_steps=10)
+
+    trainer_a = Trainer(_seeded_model(config), TrainerConfig(schedule=schedule))
+    for _ in range(10):
+        trainer_a.train_step(x, y)
+    final_a = {k: v.clone() for k, v in trainer_a.model.state_dict().items()}
+
+    trainer_b = Trainer(_seeded_model(config), TrainerConfig(schedule=schedule))
+    for _ in range(5):
+        trainer_b.train_step(x, y)
+    ckpt_path = tmp_path / "checkpoint.pt"
+    trainer_b.save_checkpoint(ckpt_path)
+
+    trainer_c = Trainer(_seeded_model(config), TrainerConfig(schedule=schedule))
+    trainer_c.load_checkpoint(ckpt_path)
+    for _ in range(5):
+        trainer_c.train_step(x, y)
+    final_c = {k: v.clone() for k, v in trainer_c.model.state_dict().items()}
+
+    for key in final_a:
+        assert torch.allclose(final_a[key], final_c[key], atol=1e-6), f"mismatch at {key}"

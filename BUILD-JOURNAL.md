@@ -1271,3 +1271,61 @@ includes both `.AppImage` and `.deb`).
 
 **Next:** continued foundry scale-up, a video degrader, or wiring
 release-bundle.yml to version tags for real automated releases.
+
+## 2026-07-22 — F0 continued: a real learning-rate schedule
+
+`Trainer` used a flat LR — named honestly as a known gap in the entry
+that shipped it. Closed it with the standard shape essentially every
+real pretraining run uses: linear warmup, then cosine decay.
+
+**Built:**
+- `foundry/sarva_foundry/train/schedule.py` — `WarmupCosineSchedule`, a
+  pure function of step count (`lr_at(step)`), not mutable schedule
+  state. That design choice is the point: `Trainer.train_step` calls it
+  fresh on every step, so the *existing* checkpoint/resume machinery —
+  which already restores `self.step` — resumes the LR curve correctly
+  for free. There's no separate schedule state that could drift out of
+  sync with the checkpointed step count, because there's no separate
+  state at all.
+- `TrainerConfig` gained an optional `schedule` field (default `None` =
+  the original flat-LR behavior, unchanged) and `train_step` now sets
+  `optimizer.param_groups[...]["lr"]` from the schedule before each step
+  when one is configured.
+- `examples/04_pretrain_and_resume.py` now trains with a schedule and
+  prints the LR alongside loss — visibly ramping through warmup, then
+  decaying smoothly *through* the checkpoint boundary rather than
+  resetting, and loss converges noticeably faster than the flat-LR
+  version from the prior entry (reaches ~0.27 by step 51 here; the
+  flat-LR run took till step 199 to reach near-zero on a similar toy
+  task).
+- 12 new tests: `test_schedule.py` (10) covering the warmup ramp, cosine
+  decay shape, the post-`total_steps` floor (a run that overshoots its
+  planned length must degrade to `min_lr`, not have cosine's periodicity
+  ramp back up), and input validation; `test_trainer.py` (2) covering
+  that `train_step` actually pulls a fresh LR every call (not just once
+  at construction) and — the one that matters most —
+  `test_checkpoint_resume_is_bit_identical_with_a_schedule_active`,
+  proving resume continues the LR curve exactly rather than restarting
+  warmup or jumping to some other point on it.
+
+**A test bug found and fixed by the test suite itself, not shipped:**
+the first draft of `test_lr_never_exceeds_peak_or_drops_below_min`
+asserted `min_lr` bounds the *entire* schedule, including warmup — it
+failed immediately (LR of 0.1 when `min_lr=0.2`, during warmup). The
+implementation was correct; the test's assumption wasn't: `min_lr` is a
+floor for the post-warmup decay phase, not the whole curve — the
+standard convention (matching NanoGPT/Megatron-style schedules)
+deliberately ramps warmup from near-zero. Fixed by splitting the
+assertion into what's actually guaranteed during warmup (no negative
+LR, never exceeds peak) versus after it (bounded by `min_lr`/`peak_lr`
+both ways) — a real example of a failing test correctly catching a wrong
+assumption in the test itself, not a bug in the code under test.
+
+**Known gaps:**
+- No other schedule shapes (linear decay, constant-with-warmup) — only
+  warmup+cosine, the most common default.
+- Still no real corpus sourcing or distributed training (§3.6c/d) —
+  unchanged from prior entries.
+
+**Next:** continued foundry scale-up (real corpus sourcing), a video
+degrader, or wiring release-bundle.yml to version tags.

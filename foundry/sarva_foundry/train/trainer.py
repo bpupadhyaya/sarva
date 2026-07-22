@@ -22,12 +22,18 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from sarva_foundry.train.schedule import WarmupCosineSchedule
+
 
 @dataclass
 class TrainerConfig:
     lr: float = 3e-4
     weight_decay: float = 0.01
     grad_clip: float | None = 1.0
+    # None = flat LR (the original behavior, still the default — a
+    # schedule is an opt-in choice tied to a specific planned run length,
+    # not something to impose silently on every caller).
+    schedule: WarmupCosineSchedule | None = None
 
 
 class Trainer:
@@ -41,6 +47,10 @@ class Trainer:
 
     def train_step(self, x: Tensor, y: Tensor) -> float:
         self.model.train()
+        if self.config.schedule is not None:
+            lr = self.config.schedule.lr_at(self.step)
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
         logits = self.model(x)
         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
         self.optimizer.zero_grad()

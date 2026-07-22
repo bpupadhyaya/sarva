@@ -44,6 +44,28 @@ paired tests:
    point regardless of optimizer state. The negative control is what
    makes the positive test meaningful.
 
+## The learning-rate schedule: warmup, then cosine decay
+
+`WarmupCosineSchedule` replaces what was originally a flat learning
+rate — a real limitation named honestly in an earlier entry, not
+silently left in place. A flat LR risks instability right at the
+model's random initialization (no warmup) and leaves quality on the
+table by never converging into a sharper minimum at the end of training
+(no decay). Warmup + cosine decay is the shape essentially every real
+pretraining run uses, from GPT-2 onward.
+
+The implementation is a pure function of step count — `lr_at(step)` —
+rather than mutable schedule state. `Trainer.train_step` calls it fresh
+on every step, which means the existing checkpoint/resume machinery
+(which already restores `self.step`) resumes the LR curve correctly
+*for free*: there's no separate schedule state that could drift out of
+sync with the checkpointed step count, because there's no separate
+state at all. `tests/foundry/test_trainer.py`'s
+`test_checkpoint_resume_is_bit_identical_with_a_schedule_active` verifies
+this directly — resuming mid-schedule must continue the LR curve from
+exactly where it left off, not restart warmup or jump to some other
+point on it.
+
 ## Try it
 
 ```bash
@@ -51,11 +73,14 @@ uv run python examples/04_pretrain_and_resume.py
 ```
 
 Runs the full pipeline built so far — tokenizer → dataset →
-transformer → trainer — on a toy corpus: 30 training steps, a checkpoint
-save, then a *fresh* model and trainer resuming from that checkpoint for
-30 more steps. Watch the printed loss: it keeps descending smoothly
-across the checkpoint boundary instead of spiking back up, which is the
-visible sign that momentum survived the round-trip.
+transformer → trainer, with a warmup+cosine LR schedule — on a toy
+corpus: 30 training steps, a checkpoint save, then a *fresh* model and
+trainer resuming from that checkpoint for 30 more steps. Watch the
+printed loss and LR columns: loss keeps descending smoothly across the
+checkpoint boundary instead of spiking back up (momentum survived the
+round-trip), and the LR keeps decaying smoothly too instead of resetting
+to the warmup value (the schedule resumed from the checkpointed step
+count).
 
 ## What's next
 
