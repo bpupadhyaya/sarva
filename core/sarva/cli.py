@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import shlex
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,8 @@ from rich.console import Console
 from rich.markup import escape
 
 from sarva.agent.loop import AgentLoop
-from sarva.agent.tools import BUILTIN_TOOLS, always_allow
+from sarva.agent.tools import BUILTIN_TOOLS, Tool, always_allow
+from sarva.mcp_client import connect_stdio_mcp_server, list_mcp_tools
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message
 from sarva.multimodal.degraders import default_degraders
@@ -106,49 +109,72 @@ def run(
         help="Remember this conversation under a name, including tool-use rounds "
         "(loads prior history, saves after the turn). Omit for a one-shot run.",
     ),
+    mcp_server: list[str] = typer.Option(
+        [],
+        "--mcp-server",
+        help="Connect an MCP server over stdio and add its tools to this run, e.g. "
+        '--mcp-server "npx -y @modelcontextprotocol/server-filesystem /tmp" '
+        "(repeatable).",
+    ),
 ) -> None:
-    """Run the agent loop with built-in tools (files, shell)."""
-    asyncio.run(_run(task, workdir, auto, session))
+    """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
+    asyncio.run(_run(task, workdir, auto, session, mcp_server))
 
 
 async def _confirm_prompt(call: Any) -> bool:
     return typer.confirm(f"Allow {call.name}({call.arguments})?")
 
 
-async def _run(task: str, workdir: str, auto: bool, session: str | None) -> None:
+async def _run(
+    task: str, workdir: str, auto: bool, session: str | None, mcp_servers: list[str]
+) -> None:
     store = SessionStore()
     history = store.load(session) if session else []
     confirm = always_allow if auto else _confirm_prompt
-    loop = AgentLoop(
-        router=_build_router(),
-        providers=_build_providers(),
-        tools=BUILTIN_TOOLS,
-        confirm=confirm,
-        workdir=workdir,
-        degraders=default_degraders(),
-    )
-    final_state = None
-    transcript: list[Message] = []
-    async for event in loop.run(
-        task, history=history, transcript_out=transcript, session_id=session
-    ):
-        if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
-            console.print(event.event.text, end="", markup=False)
-        elif event.type == "tool_started":
-            name = escape(event.call.name)
-            args = escape(str(event.call.arguments))
-            console.print(f"\n[cyan]-> {name}({args})[/cyan]")
-        elif event.type == "tool_finished":
-            status = "[red]error[/red]" if event.result.is_error else "[green]ok[/green]"
-            console.print(f"  {status}")
-        elif event.type == "run_done":
-            console.print()
-            final_state = event.state
-            if event.state != "done":
-                console.print(f"[red]run ended: {event.state}[/red]")
 
-    if session and final_state == "done":
-        store.save(session, transcript)
+    async with AsyncExitStack() as stack:
+        tools: list[Tool] = list(BUILTIN_TOOLS)
+        for server_cmd in mcp_servers:
+            command, *args = shlex.split(server_cmd)
+            mcp_session = await stack.enter_async_context(
+                connect_stdio_mcp_server(command, args=args)
+            )
+            mcp_tools = await list_mcp_tools(mcp_session)
+            console.print(
+                f"[dim]mcp: {server_cmd!r} -> {', '.join(t.spec.name for t in mcp_tools)}[/dim]"
+            )
+            tools.extend(mcp_tools)
+
+        loop = AgentLoop(
+            router=_build_router(),
+            providers=_build_providers(),
+            tools=tools,
+            confirm=confirm,
+            workdir=workdir,
+            degraders=default_degraders(),
+        )
+        final_state = None
+        transcript: list[Message] = []
+        async for event in loop.run(
+            task, history=history, transcript_out=transcript, session_id=session
+        ):
+            if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
+                console.print(event.event.text, end="", markup=False)
+            elif event.type == "tool_started":
+                name = escape(event.call.name)
+                args = escape(str(event.call.arguments))
+                console.print(f"\n[cyan]-> {name}({args})[/cyan]")
+            elif event.type == "tool_finished":
+                status = "[red]error[/red]" if event.result.is_error else "[green]ok[/green]"
+                console.print(f"  {status}")
+            elif event.type == "run_done":
+                console.print()
+                final_state = event.state
+                if event.state != "done":
+                    console.print(f"[red]run ended: {event.state}[/red]")
+
+        if session and final_state == "done":
+            store.save(session, transcript)
 
 
 @app.command("models")

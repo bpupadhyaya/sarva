@@ -1733,3 +1733,61 @@ field) down into a tool's `ToolContext` at all.
 **Next:** the actual first version tag (still the user's call), real
 frame-sampling video degradation, or scaling the foundry pipeline
 examples to a real small public-domain corpus.
+
+## MCP client — the ecosystem's tools plug in with no Sarva-specific glue
+
+§3.5's tool runtime list named this from the start ("MCP client support
+so the ecosystem's tools plug in without Sarva-specific glue") and it
+had been unaddressed until now — confirmed by grep, not assumed, same
+discipline as the earlier degrader-registry entry.
+
+`sarva.mcp_client` uses the official `mcp` Python SDK's `ClientSession`
+— the same "official SDK, not hand-rolled protocol" pattern the
+provider adapters already follow for anthropic/openai/google-genai, not
+a from-scratch JSON-RPC client (that's reserved for the foundry's model
+math, a different tier of "from scratch" entirely).
+
+Only the stdio transport is wired up, deliberately: it's what the
+majority of real MCP servers speak today (`npx`/`uvx`-launched local
+processes), and it's the one transport genuinely verifiable offline —
+spawn a real local subprocess, speak real MCP over its stdin/stdout, no
+network call anywhere. HTTP/SSE transports are real, named, deferred
+scope, not silently assumed covered.
+
+`McpToolAdapter` wraps a single remote tool as an ordinary Sarva `Tool`
+(same `spec` + `async def run(args, ctx)` shape every built-in uses), so
+the agent loop, confirmation policy, and transcript logging don't need
+to know or care that a given tool call is actually a subprocess round
+trip. `list_mcp_tools(session)` lists everything a connected server
+exposes, each already wrapped and ready to hand to `AgentLoop(tools=...)`.
+Content conversion follows the same honesty principle as the degraders:
+text/image content converts directly, anything else (audio, resource
+links, embedded resources) reports its own declared MCP content type
+rather than being silently dropped.
+
+Wired into `sarva run --mcp-server "command args..."` (repeatable,
+`shlex`-split, connected via an `AsyncExitStack` so every server's
+subprocess is torn down cleanly at the end of the run) — merged into
+the same flat tool list as the built-ins, so the model sees one
+registry with no way to tell which tools came from where.
+
+**Verified with a real server, not a mock of the protocol:**
+`tests/fixtures/mcp_echo_server.py` is a genuine MCP server built with
+the SDK's own `FastMCP`, launched as a real subprocess over real stdio
+by `tests/conformance/test_mcp_client.py`. Covers: tool listing against
+the real server, a successful call, a failing call (proving MCP error
+propagation reaches `ToolResultBlock.is_error` — confirmed empirically
+first that FastMCP turns a raised exception into `isError=True` with the
+exception message in the content, not a protocol-level error), and —
+the test that actually proves the integration rather than just the
+wrapper in isolation — a real `AgentLoop.run()` driven by a
+`MockProvider` script that calls the MCP-backed tool and gets back the
+exact text the real subprocess produced. Also smoke-tested through the
+actual CLI (`sarva run ... --mcp-server "..."`, real connect + tool
+listing + clean shutdown, no source repo shortcuts). 196 Python tests
+total now (192 → 196), all real, no protocol mocking anywhere in this
+feature.
+
+**Next:** the actual first version tag (still the user's call), real
+frame-sampling video degradation, or scaling the foundry pipeline
+examples to a real small public-domain corpus.
