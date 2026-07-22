@@ -4,6 +4,29 @@
 pipeline and a training loop with checkpoint/resume (design of record
 §3.6c/§3.6d, the single-process slice of both).
 
+## Sourcing: load, dedup, filter
+
+`sarva_foundry.data.corpus` is the sourcing/cleaning/dedup slice of
+§3.6c, at the scale this project can actually run and test today: a
+local directory of text files, not a Common Crawl-scale pipeline.
+`load_text_files` reads a directory's files as one document each
+(sorted, for deterministic ordering, and raising rather than silently
+skipping a file it can't decode). `dedup_documents` drops exact
+duplicates by content hash, keeping first-occurrence order —
+near-duplicate detection (minhash/simhash, catching two documents that
+differ by a sentence or a timestamp) is real, separate scope, named
+rather than silently assumed covered. `filter_by_length` drops documents
+outside a `[min_chars, max_chars]` range — the crudest real quality
+filter (too-short is usually navigation/boilerplate junk, too-long is
+often scrape garbage), and the one every larger pipeline layers richer
+heuristics on top of, not a replacement for them.
+
+These three stages compose directly into the tokenize/chunk pipeline
+below: `load_text_files → dedup_documents → filter_by_length →
+tokenize_corpus → TextChunkDataset`, verified as a real pipeline (not
+three functions that happen to share a module) in
+`tests/foundry/test_corpus.py`.
+
 ## The dataset: concatenate, then chunk
 
 `tokenize_corpus` encodes every document in a corpus and concatenates
@@ -84,8 +107,8 @@ count).
 
 ## What's next
 
-Real corpus sourcing (web/code/books/math, cleaning, dedup, quality
-filtering, mixing recipes — the actual content of §3.6c beyond the
-chunking mechanism here), and the distributed-training slice of §3.6d
-(FSDP → 3D parallelism, loss-spike handling, scaling-law tooling) once a
-model worth training at that scale exists.
+Web/code/books/math-scale corpus sourcing and mixing recipes (local
+files, dedup, and length filtering exist now — provenance/license
+tracking and larger-scale sourcing don't yet), and the distributed
+training slice of §3.6d (FSDP → 3D parallelism, loss-spike handling,
+scaling-law tooling) once a model worth training at that scale exists.

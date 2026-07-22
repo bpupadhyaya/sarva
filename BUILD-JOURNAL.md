@@ -1329,3 +1329,49 @@ assumption in the test itself, not a bug in the code under test.
 
 **Next:** continued foundry scale-up (real corpus sourcing), a video
 degrader, or wiring release-bundle.yml to version tags.
+
+## 2026-07-22 — F0 continued: real corpus sourcing (load, dedup, filter)
+
+Every training run so far used an inline Python list of toy sentences —
+honest as a proof-of-concept, but not the sourcing/cleaning/dedup slice
+of §3.6c the design of record actually calls for. This entry closes the
+first real piece of that gap, at the scale this project can run and
+test today: a local directory of text files, not Common Crawl.
+
+**Built:**
+- `foundry/sarva_foundry/data/corpus.py` — three composable stages:
+  `load_text_files` (reads a directory's files as one document each,
+  sorted for deterministic ordering, **raises** rather than silently
+  skipping a file it can't decode — a bad file should be a loud, fixable
+  problem, not quietly missing data no one notices until the model
+  trained on it behaves strangely); `dedup_documents` (exact-duplicate
+  removal by content hash, first-occurrence order preserved —
+  near-duplicate detection via minhash/simhash is real, separate scope,
+  named rather than silently assumed covered); `filter_by_length` (drops
+  documents outside a `[min_chars, max_chars]` range — the crudest real
+  quality filter, and the one every larger pipeline layers richer
+  heuristics on top of, not a replacement for them).
+- 11 tests in `tests/foundry/test_corpus.py`, including one that proves
+  the three new stages compose into the *existing* tokenize/chunk
+  pipeline as a real end-to-end flow — two files that are exact
+  duplicates of each other collapse to one document, a too-short file
+  gets filtered before it ever reaches the tokenizer, and what survives
+  successfully trains a tokenizer and produces a real `TextChunkDataset`
+  — not three functions that merely happen to share a module.
+- `docs/foundry/training.md` — a new "Sourcing" section ahead of the
+  existing chunking section, and the "What's next" list updated to stop
+  claiming corpus sourcing doesn't exist at all (it does now, at local
+  scale — provenance/license tracking and web/code/books/math-scale
+  sourcing still don't).
+
+**Known gaps:**
+- Still local-files-only — no web/code/books/math crawling, no
+  provenance or license tracking, no mixing recipes across sources.
+- Near-duplicate detection (minhash/simhash) not implemented — only
+  exact-match dedup.
+- No distributed training (§3.6d) — unchanged from prior entries.
+
+**Next:** a video degrader, wiring release-bundle.yml to version tags,
+or continuing to deepen the foundry pipeline (near-duplicate dedup,
+provenance tracking, or scaling the toy examples up to a real small
+public-domain corpus).
