@@ -1196,3 +1196,78 @@ the plumbing compiles.
 **Next:** continued foundry scale-up, cross-platform release-bundle CI,
 or a video degrader (frame-sampling + the now-existing image degrader
 composed together, per §3.3's stated video->frames+text path).
+
+## 2026-07-22 — Cross-platform release-bundle CI: real installers, all three OSes
+
+The T4 gap named in nearly every desktop entry since it started: `cargo
+check` proved the Rust compiles everywhere, but nothing had ever produced
+an actual installable artifact on Linux or Windows — only ever a real
+macOS `.app`/`.dmg`, built and verified by hand.
+
+**Built:**
+- `.github/workflows/release-bundle.yml` — manual-trigger
+  (`workflow_dispatch`) workflow, matrixed across macOS/Linux/Windows:
+  freeze the Python sidecar (`scripts/freeze-server.sh`), run a real
+  `tauri build` (not `--no-bundle`), upload whatever installer format
+  each OS produces as a build artifact. Deliberately not on every push —
+  a full PyInstaller freeze + real bundle per OS is genuinely slow,
+  meaningful only when actually cutting a release. Unsigned by design (no
+  signing certificates exist yet, a separate tracked gap); an unsigned
+  build a maintainer can download and run is real progress over no
+  release pipeline at all.
+
+**Three real, previously-undiscovered cross-platform bugs found and
+fixed in `scripts/freeze-server.sh` — each one only surfaced by actually
+running a Windows GitHub Actions job, not by local reasoning alone (this
+script had only ever executed on macOS since it was written):**
+1. uv venvs use `.venv/Scripts` on Windows, not `.venv/bin`, and every
+   executable in it (including PyInstaller's own frozen output) gains a
+   `.exe` suffix; PyInstaller's `--add-data` separator is also
+   platform-dependent (`os.pathsep`: `:` on POSIX, `;` on Windows).
+2. The `sarva` console-script entry point `uv sync` installs is a plain
+   readable `.py` file with a shebang on macOS/Linux — PyInstaller can
+   analyze that directly — but a *compiled* `.exe` launcher stub on
+   Windows, which isn't an analyzable script at all
+   (`Script file '...\sarva.exe' does not exist`). Fixed by freezing a
+   new, tiny, repo-owned wrapper (`scripts/_freeze_entrypoint.py`) that's
+   a real `.py` file on every platform, instead of the installed,
+   platform-varying launcher.
+3. Git Bash's (MSYS2) automatic POSIX↔Windows path conversion turned out
+   to be actively harmful either way it was set: left enabled, it mangled
+   `--add-data`'s semicolon-joined `SRC;DEST` value into garbage
+   (`D:/a/sarva/...` → `\\d\\a\\sarva\\...`); disabled outright
+   (`MSYS_NO_PATHCONV=1`, the first fix attempted), plain single-path
+   arguments like the script path stopped being converted at all, so
+   PyInstaller — a native Windows program with no idea what MSYS's
+   internal `/d/a/...` paths mean — reported them as not existing either.
+   Fixed by not relying on MSYS's heuristic at all: resolve every path
+   PyInstaller receives to native Windows form explicitly via `cygpath
+   -m` (a no-op passthrough on macOS/Linux, where the command doesn't
+   exist).
+
+**Verified, iteratively, against real CI — not fixed once and assumed
+correct:** each of the three fixes above was diagnosed from an actual
+failed Windows Actions run's log, fixed, re-verified on macOS locally
+(confirming the fix didn't regress the platform that already worked),
+pushed, and re-triggered via `gh workflow run` + `gh run watch` until the
+Windows job genuinely passed. One of those verification passes also
+caught a false alarm worth recording rather than mis-diagnosing: a
+`--help` invocation that appeared to hang for several seconds during
+local re-testing turned out to be the same PyInstaller onefile
+re-extraction latency under system load already documented earlier in
+this journal — waited it out and confirmed correct output instead of
+"fixing" a nonexistent regression. Final result, confirmed by inspecting
+the actual uploaded artifacts (not just green checkmarks): all three OSes
+produced real, substantial bundle artifacts in one workflow run —
+`sarva-macos-latest` (65MB), `sarva-windows-latest` (80MB),
+`sarva-ubuntu-latest` (478MB, larger because Linux's bundle target
+includes both `.AppImage` and `.deb`).
+
+**Known gaps:**
+- No code signing/notarization — artifacts trigger Gatekeeper/SmartScreen
+  warnings, expected and documented, not silently glossed over.
+- Manual trigger only, not wired to git tags/releases yet — that's the
+  natural next step once the project actually wants to cut a v0.1.0.
+
+**Next:** continued foundry scale-up, a video degrader, or wiring
+release-bundle.yml to version tags for real automated releases.
