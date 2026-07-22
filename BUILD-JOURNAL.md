@@ -1091,3 +1091,48 @@ escalation.
 
 **Next:** real desktop branding/icons, continued foundry scale-up, or an
 audio/video degrader now that the loop actually knows what to do with one.
+
+## 2026-07-22 — Desktop: real app branding, replacing Tauri's placeholders
+
+Closes the branding gap named honestly since T4 step 1's very first
+entry ("Icons are Tauri's generated placeholders, not real Sarva
+branding") and repeated as a known gap in every desktop entry since.
+
+**Built:**
+- `scripts/generate-icon.py` — generates the 1024x1024 source icon with
+  pure Pillow shape-drawing (no font/system dependency, so it's
+  reproducible on any platform with the project's own dependencies
+  installed): a solid off-white circle — *sarva* (सर्व) meaning "all /
+  whole" — centered on a solid indigo rounded square. Deliberately the
+  simplest possible design: one shape, one contrast, nothing that gets
+  lost at 16x16. Framed honestly in the script's own docstring as a
+  first real, deliberate mark, not professional final branding.
+- Ran Tauri's own `tauri icon` CLI against that source to regenerate the
+  entire platform icon set (32x32 through the Windows Store tile sizes,
+  `.icns`, `.ico`) — the officially supported path, far more reliable
+  than hand-building multi-resolution container formats. Its default
+  output also included iOS/Android asset sets; removed those since
+  neither platform is in scope yet (design doc: mobile is explicitly
+  "later phase," not v1) — regenerable from the same source icon when
+  that phase actually starts, not needed as speculative scope now.
+
+**Verified, not just generated:** `cargo check` still passes, and — the
+part that actually proves the icon is wired in, since `--no-bundle`
+skips macOS's bundling step entirely — ran a real `tauri build` (with
+bundling) and confirmed `icon.icns` is genuinely embedded in the
+resulting `Sarva.app/Contents/Resources/` and referenced correctly by
+`Info.plist`'s `CFBundleIconFile`, not just sitting in the source tree
+unused. Visually checked the icon at both 128x128 and 32x32 to confirm
+it stays legible at the sizes that actually matter (Dock/taskbar,
+window title bar) before treating it as done.
+
+**Known gaps:**
+- A simple geometric mark, not professional graphic design — a real
+  brand identity (typography, color system, app-store assets) is
+  future work if/when the project wants one.
+- No app-store screenshots/marketing assets — out of scope for this
+  entry, which only closes the "the icon itself is a placeholder" gap.
+
+**Next:** continued foundry scale-up, an audio/video degrader, or
+cross-platform release-bundle CI (still the one T4 gap this session
+hasn't touched: `.dmg`/`.msi`/`.AppImage` artifacts + code signing).
