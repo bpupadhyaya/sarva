@@ -581,3 +581,61 @@ entry; tracked as a known gap rather than silently shipped.
 handler on the main process that also kills the sidecar), then real
 branding/icons, then cross-platform release-bundle CI covering the full
 freeze → bundle → sign pipeline on all three OSes.
+
+## 2026-07-21 — T4 step 2 follow-up: fix the orphaned sidecar
+
+Closed the gap named at the end of the previous entry, and found a
+second, deeper bug while verifying the fix.
+
+**Built:**
+- `#[cfg(unix)]` `SIGINT`/`SIGTERM` handler (`signal-hook`, a dedicated
+  OS thread blocking on `Signals::forever()`) that kills the sidecar and
+  exits before the process dies from the signal. Covers force-quit,
+  `pkill`, and `kill` — not just the graceful window-close path.
+
+**Real bug found while verifying the fix (not just theorized):** after
+wiring the signal handler, `kill $APP_PID` still left a `sarva-server`
+process holding the port. Root cause, confirmed with
+`ps -o pid,ppid,pgid`: PyInstaller's `--onefile` bootloader — the process
+Tauri actually spawns and tracks as the sidecar `CommandChild` — forks a
+**second** process to run the real frozen app and waits on it.
+`child.kill()` only ever reaped the bootloader; the grandchild (the
+actual running `uvicorn` server) was untouched and kept the port bound.
+This affected **both** shutdown paths equally (window-close and the new
+signal handler use the same `child.kill()` call) — it was latent in the
+sidecar work shipped in the previous entry, not introduced by this one;
+it only surfaced now because this entry specifically tested the
+shutdown path end-to-end instead of assuming it worked. Fixed with a
+`kill_sidecar()` helper that `pgrep -P`s the sidecar's own children and
+kills them before killing the sidecar itself, called from both shutdown
+paths.
+
+**A red herring, run down and ruled out rather than assumed:** midway
+through this fix, the sidecar appeared to stop binding its port at all,
+even with the fix reverted — looked like a real regression. Root-caused
+by polling with a fixed sleep instead of retrying: PyInstaller
+`--onefile` re-extracts its payload to a temp directory on *every*
+launch (no cache across runs), and under the machine's load at the time
+(load average ~4.1) that extraction occasionally took longer than the
+few seconds the earlier tests happened to wait. Confirmed by polling
+with a longer timeout, which showed the exact same binary succeeding
+consistently once given enough time. No code change was needed for this
+part — worth recording so a future session doesn't chase the same ghost.
+
+**Verified:** rebuilt, waited for the sidecar to bind (polling, not a
+fixed sleep, after the above), confirmed `/health` responds, captured the
+full process tree (bootloader + grandchild), sent `kill` to the app
+process, and confirmed via `pgrep` that **no** `sarva-server` process
+survives — the fix closes the gap for both the direct child and the
+grandchild.
+
+**Known gaps carried forward:**
+- Windows has no equivalent signal handling yet (untested platform).
+- `kill_sidecar` shells out to `pgrep`/`kill` rather than using a Rust
+  process-group API — pragmatic given `tauri-plugin-shell` doesn't expose
+  the underlying `std::process::Command` needed to set up a real process
+  group at spawn time, but worth revisiting if that changes.
+- Still no CI coverage for the freeze → sidecar → shutdown path.
+
+**Next:** real branding/icons, then cross-platform release-bundle CI
+covering the full freeze → bundle → sign pipeline on all three OSes.

@@ -2537,6 +2537,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "signal-hook",
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
