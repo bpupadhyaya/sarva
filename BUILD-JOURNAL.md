@@ -965,3 +965,65 @@ end-to-end. Closed that gap.
 **Next:** a concrete image degrader (resize/reformat via Pillow for
 provider context limits) to give the degradation registry its first real
 converter, or continue elsewhere (branding, foundry scale-up).
+
+## 2026-07-22 — Core: the degradation registry's first real converter
+
+`sarva.multimodal.content.Degrader` has been a proven, tested framework
+since T0 (`degrade_message`, recursive dispatch, depth-capped, never
+silently drops content) — but zero concrete implementations shipped
+anywhere until this entry, confirmed by grepping the whole `core/`
+tree: `Degrader`/`degrade_message` were referenced only inside
+`content.py` itself and its own tests (which use a fake `_EchoDegrader`).
+Closed that gap with the first real one.
+
+**Built:**
+- `core/sarva/multimodal/degraders/image.py` — `ImageToTextDegrader`:
+  turns an `ImageBlock` a text-only model can't consume into a
+  `TextBlock`. Deliberately does **not** attempt to describe the image's
+  actual visual content — that would require a vision-capable model call,
+  which is a decision for the router/agent loop to make explicitly (route
+  to a vision model, or don't), not something that should happen as an
+  implicit side effect buried inside content-degradation plumbing.
+  Instead it reports only objectively verifiable metadata decoded
+  directly from the bytes (dimensions, format, size) via Pillow — new
+  dependency, added to `core/pyproject.toml`, used here purely as a
+  commodity image-decoding library (same tier as `httpx` for network
+  I/O), not model logic. This keeps "content is never silently dropped"
+  honest in the specific way that matters: the target model learns an
+  image was present and what it technically was, with nothing fabricated
+  about what it contains.
+  Uses `resolve_media_bytes` (last entry's `sarva.multimodal.fetch`), so
+  it handles url-sourced images too, not just data/path — the first real
+  caller of that module.
+- `tests/conformance/test_degraders.py` (6 tests) — correct
+  dimensions/format extraction, correct byte-size reporting, a test that
+  directly pins the "no fabrication" design principle (asserts the
+  honesty disclaimer is present, not just that *some* text came out), a
+  corrupt-bytes case that must raise clearly rather than degrade into
+  something wrong-but-plausible, the path-source dispatch path, and —
+  the one that matters most — an end-to-end test through the *real*
+  `degrade_message` recursive dispatcher (not just calling `.degrade()`
+  directly), proving the concrete implementation actually satisfies the
+  `Degrader` protocol and works through the framework, not just in
+  isolation.
+
+**Known gaps:**
+- Still the only concrete degrader — audio, video, and document have no
+  converters yet.
+- Not wired into the agent loop's model-selection fallback path. The
+  loop's own docstring already states this scope boundary explicitly
+  ("T2 wires *routing*, not yet *degradation*") — today, `router.pick()`
+  requires a model that already supports every modality present and
+  raises if none exists; teaching the loop to fall back to the
+  best-available model plus degradation is a real, separate design
+  decision (when to prefer "wait/fail" vs. "silently degrade and
+  continue") deliberately left out of this entry rather than folded in
+  as a side effect.
+- No image resizing/reformatting for provider size/dimension limits
+  (the original framing for this entry) — decoding+reporting metadata
+  turned out to be the correctly-scoped first piece; resizing is a
+  reasonable next one.
+
+**Next:** wire `ImageToTextDegrader` into the agent loop's fallback path
+(the real remaining design decision named above), or continue elsewhere
+(branding, foundry scale-up, audio/video degraders).
