@@ -500,3 +500,84 @@ run* used a different port to get a clean result.
 real branding/icons, or cross-platform bundle CI. Sidecar is the one that
 actually completes the mission's stated promise, so it's the natural next
 priority when picked up.
+
+## 2026-07-21 — T4 step 2: Python sidecar — the one-click unlock
+
+The gap named at the end of step 1: bundle the Python backend itself so
+launching the desktop app is the entire install, no terminal, no manual
+`sarva serve`. This entry closes it.
+
+**Built:**
+- `scripts/freeze-server.sh` — PyInstaller `--onefile` freeze of the
+  `sarva` CLI into a standalone executable, named per Tauri's sidecar
+  convention (`sarva-server-<rust-target-triple>`) and dropped into
+  `apps/desktop/src-tauri/bin/` (gitignored — a rebuilt-on-demand native
+  binary, not source, so it isn't committed, unlike `core/sarva/server/static/`
+  which is committed because it lets the app run with zero Node at
+  install time; a frozen native binary has no equivalent "just works from
+  source" fallback, so committing it would only bloat the repo with
+  something CI/release should produce instead).
+- Two `--add-data` flags bundle the non-Python files the backend reads at
+  runtime — `core/sarva/providers/data/*.yaml` (the model registry) and
+  `core/sarva/server/static/` (the web UI) — into the frozen archive at
+  the same relative path `Path(__file__).parent / ...` already expects.
+  PyInstaller's import analysis only follows Python imports; it does not
+  discover data files a module reads at runtime, so without this the
+  frozen binary starts but 500s on first real request.
+- `apps/desktop/src-tauri/Cargo.toml` — added `tauri-plugin-shell`.
+  `tauri.conf.json` — declared `bundle.externalBin: ["bin/sarva-server"]`.
+  `capabilities/default.json` — scoped `shell:allow-execute` permission to
+  exactly the `sarva-server` sidecar with a fixed `serve` arg (not a
+  general shell-exec grant).
+- `lib.rs` — `run()` now spawns the sidecar in `setup()`, logs its
+  stdout/stderr through the app's own logger (so a startup failure is
+  visible, not silently eaten), and kills it on the window's
+  `CloseRequested` event.
+
+**Real bug found and fixed while building (not just theorized):** the
+first frozen-binary test (`--help` only) looked clean, but a full `serve`
+run 500'd on `/models` and `/chat` with
+`FileNotFoundError: .../_MEI.../sarva/providers/data/models.yaml` — exactly
+the data-file risk named as a known unknown in the prior planning. Fixed
+with the `--add-data` flags above; re-verified `/health`, `/models`, `/`,
+and a real `/chat` round-trip all succeed from the frozen binary alone.
+
+**Verified — the actual one-click path, not just the freeze:** ran a real
+`tauri build --no-bundle`, then launched the resulting
+`sarva-desktop` binary as a standalone OS process with **no `sarva serve`
+running and no source repo on the loader's `sys.path`**. Confirmed via
+`pgrep` that the app itself spawned `sarva-server serve` as a child
+process, and confirmed over HTTP that `/health`, `/models`, and `/chat`
+(a real mock completion) all responded correctly through it — the
+complete one-click path, from double-click to a working chat response,
+with zero manual steps.
+
+**A real gap found, not papered over:** killing the app process directly
+with `kill` (SIGTERM) — as opposed to closing its window — does **not**
+run the `CloseRequested` handler, so the sidecar is orphaned and keeps
+running. This was caught by testing the shutdown path explicitly (`kill
+$APP_PID` then `pgrep sarva-server`), not assumed to work because the
+happy path did. This matches the standard, documented caveat for Tauri's
+sidecar pattern generally (window-close events don't fire on external
+signals to any GUI app, not a bug specific to this code) — normal users
+quitting via the window or Cmd+Q are unaffected, but a force-quit,
+`pkill`, or crash leaves an orphaned backend process. Not fixed in this
+entry; tracked as a known gap rather than silently shipped.
+
+**Known gaps:**
+- Orphaned sidecar on ungraceful app termination (above) — a real fix
+  needs OS-level process-group or signal-handler work, not a quick patch.
+- Still no code signing/notarization on the sidecar binary itself, in
+  addition to the app bundle gap noted in step 1.
+- `freeze-server.sh` and the sidecar wiring are verified on macOS
+  arm64 only; Linux/Windows freezing and the `.exe` sidecar suffix
+  convention are untested.
+- The `desktop` CI job still only runs `cargo check` — it doesn't freeze
+  the Python backend or build a real bundle, so this entire path has no
+  CI coverage yet. A real release pipeline needs a job that runs
+  `freeze-server.sh` before `tauri build`.
+
+**Next:** fix the orphaned-sidecar gap (likely a `SIGTERM`/`SIGINT`
+handler on the main process that also kills the sidecar), then real
+branding/icons, then cross-platform release-bundle CI covering the full
+freeze → bundle → sign pipeline on all three OSes.

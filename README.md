@@ -13,10 +13,11 @@ point as the tool itself.
 Early — the core engine (provider layer, agent loop, built-in tools,
 session persistence), the FastAPI server (REST + WebSocket, with real
 tool-confirmation over the socket), and a web UI with a working chat and
-tool-approval flow are scaffolded and tested; the CLI works end to end. A
-first native desktop wrapper (Tauri) runs, but isn't one-click yet — see
-below. The from-scratch model-training track (`foundry/`) is ahead. See
-`BUILD-JOURNAL.md` for progress.
+tool-approval flow are scaffolded and tested; the CLI works end to end.
+The desktop app (Tauri) now bundles and auto-starts its own backend — see
+below for the real one-click flow and its known gaps. The from-scratch
+model-training track (`foundry/`) is ahead. See `BUILD-JOURNAL.md` for
+progress.
 
 ## Quickstart
 
@@ -46,19 +47,22 @@ Sarva. If you change the UI's source, rebuild and re-copy it:
 ./scripts/build-web.sh
 ```
 
-### Desktop app (early)
+### Desktop app
 
 ```bash
-uv run sarva serve                      # start the backend first
+uv sync --all-packages --group dev      # once, to get pyinstaller
+./scripts/freeze-server.sh              # freeze the backend into a sidecar binary
 cd apps/desktop && npx tauri build --no-bundle
 ./src-tauri/target/release/sarva-desktop
 ```
 
-This is a native window wrapper around the same web UI — it does **not**
-yet bundle or start the Python backend itself, so it's not the one-click,
-no-terminal experience the project is aiming for. That needs a Python
-sidecar bundled into the app, which is real, separate work tracked in
-`BUILD-JOURNAL.md`, not implied by "it runs."
+Launching `sarva-desktop` is now the whole experience: it starts its own
+bundled backend as a sidecar process and stops it when you close the
+window — no terminal, no manual `sarva serve` step. Known gaps: a
+force-quit or crash (as opposed to closing the window) can leave the
+sidecar process running; there's no code signing yet, so an unsigned
+build will trigger Gatekeeper/SmartScreen warnings; and only macOS arm64
+is verified so far. See `BUILD-JOURNAL.md` for the full picture.
 
 ## Repository layout
 
