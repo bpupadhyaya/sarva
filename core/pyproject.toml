@@ -17,6 +17,7 @@ dependencies = [
     "mcp>=1.28.1",
     "av>=18.0.0",
     "openai>=2.47.0",
+    "google-genai>=2.14.0",
 ]
 
 [project.scripts]

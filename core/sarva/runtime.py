@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from sarva.providers.anthropic_provider import AnthropicProvider
+from sarva.providers.google_provider import GoogleProvider
 from sarva.providers.mock import MockProvider
 from sarva.providers.ollama_provider import OllamaProvider
 from sarva.providers.openai_provider import OpenAIProvider
@@ -33,6 +34,10 @@ def ollama_reachable(host: str = OLLAMA_HOST) -> bool:
         return False
 
 
+def _has_google_key() -> bool:
+    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+
+
 def build_router() -> Router:
     registry = Registry.load(_DATA_DIR / "models.yaml")
     routing = load_routing(_DATA_DIR / "routing.yaml")
@@ -41,6 +46,8 @@ def build_router() -> Router:
         available |= {m.id for m in registry.all() if m.provider == "anthropic"}
     if os.environ.get("OPENAI_API_KEY"):
         available |= {m.id for m in registry.all() if m.provider == "openai"}
+    if _has_google_key():
+        available |= {m.id for m in registry.all() if m.provider == "google"}
     if ollama_reachable():
         available |= {m.id for m in registry.all() if m.provider == "ollama"}
     return Router(registry, routing, available)
@@ -52,6 +59,8 @@ def build_providers() -> dict[str, Any]:
         providers["anthropic"] = AnthropicProvider()
     if os.environ.get("OPENAI_API_KEY"):
         providers["openai"] = OpenAIProvider()
+    if _has_google_key():
+        providers["google"] = GoogleProvider()
     if ollama_reachable():
         providers["ollama"] = OllamaProvider(host=OLLAMA_HOST)
     return providers

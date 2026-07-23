@@ -25,6 +25,10 @@ def _has_openai_key() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY"))
 
 
+def _has_google_key() -> bool:
+    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+
+
 def _ollama_reachable() -> bool:
     import httpx
 
@@ -82,6 +86,29 @@ async def test_openai_terminal_event_law():
     # once a real model id is known at run time.
     model = os.environ.get("OPENAI_TEST_MODEL", "gpt-4o-mini")
     provider = OpenAIProvider()
+    req = GenerateRequest(
+        model=model,
+        messages=[Message(role="user", content=[TextBlock(text="Say 'hi' and nothing else.")])],
+    )
+    events = [e async for e in provider.generate(req)]
+    assert isinstance(events[-1], DoneEvent)
+    assert events[-1].stop_reason == StopReason.END_TURN
+    assert events[-1].usage.output_tokens > 0
+    await provider.close()
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _has_google_key(), reason="GEMINI_API_KEY/GOOGLE_API_KEY not set")
+async def test_google_terminal_event_law():
+    from sarva.providers.google_provider import GoogleProvider
+
+    # No verified-current Gemini model id is wired into models.yaml yet
+    # (see google_provider.py's module docstring) -- overridable via
+    # GOOGLE_TEST_MODEL so this test stays runnable without editing code
+    # once a real model id is known at run time.
+    model = os.environ.get("GOOGLE_TEST_MODEL", "gemini-2.0-flash")
+    provider = GoogleProvider()
     req = GenerateRequest(
         model=model,
         messages=[Message(role="user", content=[TextBlock(text="Say 'hi' and nothing else.")])],

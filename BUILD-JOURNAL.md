@@ -1964,3 +1964,53 @@ verified-current model id is hardcoded anywhere). 201 → 209 Python
 tests, all passing; `sarva.runtime.build_providers()` empirically
 confirmed to still return only `{"mock": ...}` with no keys set — no
 import-time side effects, no accidental client construction.
+
+## Google Gemini provider adapter — T1's provider layer now complete
+
+Closes the last of T1's four named providers (Anthropic+OpenAI+Google+
+Ollama). `sarva.providers.google_provider.GoogleProvider` implements the
+`Provider` protocol via `google-genai`'s async streaming API, same thin-
+adapter contract as the other three.
+
+The one genuinely novel, adapter-specific piece — and a real bug caught
+and fixed before shipping, not hypothetical: Gemini reports
+`finish_reason=STOP` even when the response includes `function_call`
+parts. There is no distinct "made a tool call" finish reason at all,
+unlike Anthropic's `tool_use` or OpenAI's `tool_calls`. The first draft
+trusted `finish_reason` the same way the other two adapters correctly
+do, which would have silently misreported *every* Gemini tool-use turn
+as `END_TURN` — a structural bug that would make the agent loop treat a
+tool-call request as if the model were simply done. Caught by writing a
+hermetic test first (`test_tool_call_infers_tool_use_despite_stop_finish_reason`)
+using duck-typed fake chunks with `finish_reason="STOP"` *and* a
+function_call part together — the exact shape Gemini actually sends —
+rather than trusting it would come up in a live run. Fixed by inferring
+`TOOL_USE` from the presence of a tool-call block first, falling back to
+the raw `finish_reason` mapping only when there isn't one.
+
+A second real shape difference required its own translation logic:
+Gemini's `FunctionResponse` requires a `name` field, but Sarva's
+`ToolResultBlock` (like every other provider's tool-result shape) only
+carries `tool_call_id` — resolved via `_tool_call_names()`, which scans
+every `ToolCallBlock` across the whole request once per `generate()`
+call to build an id→name map, rather than assuming the caller supplies
+it.
+
+Same deliberate scope boundaries as the OpenAI adapter, for the same
+reasons: no `models.yaml` entries (no verified-current Gemini model
+catalog/pricing to add responsibly), and `GenerateConfig.effort`/
+`.thinking` left unmapped (Gemini's `thinking_config` shape is
+unverified against a live model in this session). Also named honestly,
+not silently assumed handled: no dedicated network-connection-failure
+exception type was found documented for `google-genai` the way
+`anthropic`/`openai` both document `APIConnectionError` — only HTTP-level
+`ClientError`/`ServerError` are caught; a real connection failure
+surfaces uncaught until verified live.
+
+Wired into `runtime.py` behind `GEMINI_API_KEY`/`GOOGLE_API_KEY`, a
+no-op until a real `provider: google` registry entry exists, same shape
+as the other two additions. `test_google_provider.py` covers
+`_to_gemini_content`/`_tool_call_names` hermetically (7 tests), a live-
+gated test was added to `tests/live/test_live_providers.py` (model id
+overridable via `GOOGLE_TEST_MODEL`). 209 → 219 Python tests, all
+passing.
