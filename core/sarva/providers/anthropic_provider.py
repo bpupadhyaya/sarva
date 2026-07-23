@@ -9,6 +9,16 @@ NOTE: this adapter is written to the documented Anthropic Python SDK
 streaming pattern but has not yet been exercised against a live API key in
 this environment — mark its conformance tests `@pytest.mark.live` (skipped
 without ANTHROPIC_API_KEY) until a real run validates it. See BUILD-JOURNAL.md.
+
+Round-trips extended-thinking blocks back to the API when a real
+signature is present (Anthropic's anti-tampering check on reused
+thinking history) — `generate()` below stores the SDK's own signature
+in `ThinkingBlock.provider_data` the moment one is produced, and
+`AgentLoop` already threads that exact `Message` into the next turn's
+history unmodified, so no further plumbing was needed to make this
+work once `provider_data` existed on the block itself. A block with no
+signature (never passed through this adapter) still drops rather than
+sending a fabricated one Anthropic would reject.
 """
 
 from __future__ import annotations
@@ -88,15 +98,24 @@ async def _to_anthropic_message(m: Message) -> dict[str, Any]:
                 }
             )
         elif isinstance(b, ThinkingBlock):
-            # Deliberately, explicitly dropped -- not silently: round-trip
-            # (required to continue thinking on the same model) lands when
-            # the agent loop starts threading provider_data back through
-            # GenerateRequest, tracked as real deferred work, not yet
-            # built. Explicit here so it's an intentional, named skip
-            # rather than an unhandled type falling through with no case
-            # at all -- see the `else` below for what happens to a block
-            # type that has no such justification.
-            continue
+            # Round-tripped when possible, not unconditionally dropped:
+            # Anthropic requires the ORIGINAL signature back (an
+            # anti-tampering check) to accept a thinking block as
+            # genuine history rather than reject the turn -- generate()
+            # below already stores it in provider_data the moment a
+            # ThinkingBlock is produced, and AgentLoop already threads
+            # the same Message object straight into the next turn's
+            # history (`messages.append(done.message)` in agent/loop.py)
+            # with nothing stripped along the way, so no further
+            # plumbing was actually needed once provider_data existed on
+            # the block itself. A block with no signature (never passed
+            # through this adapter -- e.g. a hand-built session, or one
+            # predating this field) can't be reconstructed safely, so it
+            # still drops exactly as before rather than sending a
+            # fabricated one Anthropic would reject anyway.
+            signature = (b.provider_data or {}).get("signature")
+            if signature:
+                blocks.append({"type": "thinking", "thinking": b.text, "signature": signature})
         else:
             # A block type this adapter has no translation for at all
             # (e.g. DocumentBlock reaching this adapter directly,

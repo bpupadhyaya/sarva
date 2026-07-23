@@ -66,9 +66,34 @@ async def test_tool_call_and_result_translation():
     }
 
 
-async def test_thinking_block_is_explicitly_dropped_not_translated():
-    # Deliberate, named skip -- not yet round-tripped back to the API.
-    # Verifies it doesn't appear in translated output and doesn't raise.
+async def test_thinking_block_with_a_signature_round_trips_to_the_wire_shape():
+    # Anthropic requires the ORIGINAL signature back to accept a
+    # thinking block as genuine history (an anti-tampering check) --
+    # generate() already stores it in provider_data the moment a
+    # ThinkingBlock is produced (see the "signature" key below), and
+    # AgentLoop already threads the same Message straight into the next
+    # turn's history unmodified, so a real signature reaching here is
+    # the normal case for any thinking turn this adapter itself produced.
+    m = Message(
+        role="assistant",
+        content=[
+            ThinkingBlock(text="pondering", provider_data={"signature": "sig-abc123"}),
+            TextBlock(text="hi"),
+        ],
+    )
+    out = await _to_anthropic_message(m)
+    assert out["content"] == [
+        {"type": "thinking", "thinking": "pondering", "signature": "sig-abc123"},
+        {"type": "text", "text": "hi"},
+    ]
+
+
+async def test_thinking_block_with_no_signature_is_dropped_not_fabricated():
+    # A ThinkingBlock with no signature (never passed through this
+    # adapter -- e.g. hand-built, or from before this field existed)
+    # can't be reconstructed safely: sending a fabricated signature
+    # would be rejected by Anthropic anyway, so this stays a named,
+    # explicit skip rather than an invented value.
     m = Message(role="assistant", content=[ThinkingBlock(text="pondering"), TextBlock(text="hi")])
     out = await _to_anthropic_message(m)
     assert out["content"] == [{"type": "text", "text": "hi"}]

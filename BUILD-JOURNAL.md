@@ -3801,3 +3801,63 @@ confirmed by direct execution here), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Extended-thinking round trip — a comment that was more pessimistic than the code
+
+`anthropic_provider.py`'s own `_to_anthropic_message` had a comment
+saying `ThinkingBlock` round-tripping "lands when the agent loop starts
+threading provider_data back through GenerateRequest, tracked as real
+deferred work, not yet built." Reading it closely before treating it as
+settled: `ThinkingBlock.provider_data` already existed as a real field,
+`generate()` already populated it with the SDK's own signature the
+moment a thinking block was produced, and `agent/loop.py` already
+threads that exact `Message` object into the next turn's history
+unmodified (`messages.append(done.message)`) — no stripping, no
+reconstruction, nothing lossy in between. The "agent loop plumbing"
+the comment worried about had already landed by the time this was
+looked at; the only genuinely missing piece was this one function
+actively throwing the block away instead of reconstructing it. A stale
+comment describing a bigger gap than the code actually had — this
+project's own recurring theme of checking a claim against current
+source rather than trusting an old note, just found in a comment this
+time instead of a docstring or a README line.
+
+**Why this matters, not just tidiness:** Anthropic requires the
+*original* signature back on a reused thinking block — an
+anti-tampering check — when continuing a conversation after a tool
+call made during extended thinking. Dropping it unconditionally, as
+the code did, meant every multi-turn tool-using conversation with
+thinking enabled lost its reasoning continuity on the very next turn,
+silently, no error, just a strictly-worse continuation. Fixed:
+`_to_anthropic_message` now reconstructs `{"type": "thinking",
+"thinking": ..., "signature": ...}` whenever `provider_data` actually
+carries a signature, and still drops the block exactly as before when
+it doesn't (a hand-built session, or one from before this field
+existed) — no fabricated signature ever sent, since Anthropic would
+reject one anyway.
+
+**Verified beyond the single-block translation unit test:** a new
+hermetic, end-to-end test drives `AnthropicProvider.generate()` twice
+against a fake SDK client — turn one returns a thinking+tool_use
+response, the test builds history the *exact* way `AgentLoop` itself
+does (not a shortcut), and turn two's actual captured request payload
+is inspected to confirm the reconstructed thinking block matches
+byte-for-byte, including ordering (thinking block before the tool_use
+block, matching the order Anthropic originally returned them). Proves
+the real pipeline works, not just that the translation function
+returns the right dict in isolation.
+
+3 test changes (1 updated to reflect the new signature-present
+behavior, 1 new no-signature-drop test, 1 new end-to-end round-trip
+test), 422 → 424 Python tests. `ruff check`/`format --check` clean.
+`docs/providers.md` gained a new bullet in the "every backend
+disagrees" section.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Linux `espeak`-path real-runtime
+verification (written against documented CLI behavior but only macOS
+confirmed by direct execution here), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

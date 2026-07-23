@@ -76,6 +76,16 @@ knowing if you're adding a fifth:
   correlated back to the original call by an `id` your adapter has to
   track yourself since `ToolResultBlock` (Sarva's own type) doesn't
   carry the function's name — only its call id.
+- **Only Anthropic requires a signed round trip for reasoning content.**
+  When extended thinking makes a tool call, Anthropic expects the exact
+  same `thinking` block — including its original `signature`, an
+  anti-tampering check — back in history when the tool result is sent.
+  `ThinkingBlock.provider_data` carries that signature (set the moment
+  `AnthropicProvider.generate()` produces one); `anthropic_provider.py`
+  reconstructs the wire-format block from it on the way back in, and
+  drops it (as before) only when no signature is present. Neither
+  OpenAI's nor Gemini's reasoning content has an equivalent requirement
+  to translate.
 
 None of this is exposed to callers. `AgentLoop`, `run_benchmark`, and
 `distill()` all just call `provider.generate(request)` and get back the
