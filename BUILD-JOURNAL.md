@@ -2981,3 +2981,47 @@ numbers. 7 new tests, 323 → 330 Python tests. New docs chapter:
 inference-server gap), F1's real distributed training infrastructure
 (needs real multi-node compute this environment doesn't have), or
 continuing the book (Chapter 6: packaging for humans).
+
+## Packaging verification — a real `pip install`, not just the dev workspace, wired into CI
+
+Every check in CI up to this point ran through `uv run`, which uses this
+repo's own dev workspace venv directly — never actually exercising the
+path a real end user takes (`pip install sarva`), and never proving the
+published package *metadata* (entry points, dependency list, which files
+get bundled) is even correct. The README's own "CLI works end to end"
+claim had never been checked against an actual built wheel outside this
+workspace. Verified by hand first, the way every CI addition this
+session has been: built both wheels (`uv build --all-packages`), created
+a genuinely separate venv, installed them, and ran `sarva chat` and a
+`sarva[foundry]` import check — all worked, but not instantly.
+
+**A real environmental finding along the way, not a bug:** the very
+first attempt appeared to hang and hit a 2-minute timeout. Bisected
+systematically rather than assumed broken: isolated it down to `import
+torch` alone, in a brand-new venv, taking ~19 seconds on its own — a
+SECOND `import torch` in the same venv dropped to well under a second.
+This is macOS Gatekeeper verifying the code-signing of freshly-extracted
+dylibs on their first load, a known real cost of installing torch fresh,
+not a hang and not anything wrong with this project's code. Documented
+directly in the new CI step's own comment so a future cold-runner CI run
+taking a couple of minutes on this step doesn't look like a regression.
+
+Added a new step to the existing `core` CI job (reusing its already-warm
+`uv` cache rather than a separate job that would re-download torch from
+scratch): build both wheels, install into a clean venv, run a real
+`sarva chat` smoke test, and confirm the `sarva[foundry]` extra imports
+cleanly. Also fixed the stale bits this surfaced: the README's Status
+section hadn't been touched since before SFT/DPO/GRPO/the agentic RL
+harness/the foundry provider adapter/KV-cache/recipes shipped — updated
+to describe what's actually built now, plus a new Quickstart snippet
+showing the verified `pip install`-from-wheel path directly (not just
+the dev-workspace `uv sync` flow). No test count change (a CI/docs
+milestone, not new library code) — the packaging step itself is the new
+verification. `docs/foundry/inference.md`'s `sarva[foundry]` framing and
+the wheel-based install path now agree with each other in practice, not
+just on paper.
+
+**Next:** batching multiple concurrent requests (§3.6f's remaining
+inference-server gap), F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have), or
+continuing the book (Chapter 6: packaging for humans).

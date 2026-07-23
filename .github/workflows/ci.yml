@@ -31,6 +31,33 @@ jobs:
       - name: Test (mock provider only — no API keys in CI)
         run: uv run pytest tests/ -v
 
+      - name: Verify installable wheels (a real pip install, not the dev workspace)
+        # Every check above runs against `uv run`, which uses this repo's own
+        # dev workspace venv directly -- it never actually proves the
+        # published package METADATA is correct (entry points, dependency
+        # list, which files get bundled). A real end user runs `pip install
+        # sarva`, not `uv sync` inside a clone of this repo; this step is the
+        # one place that actually exercises that path; a genuine, previously
+        # unverified gap, confirmed once by hand before adding this step
+        # (see BUILD-JOURNAL.md). This step can take a couple of minutes on a
+        # cold runner -- torch's FIRST import after a fresh install spends
+        # ~15-20s on macOS's Gatekeeper verifying the newly-extracted dylibs
+        # are signed, confirmed directly while building this (a second
+        # import in the same venv drops to well under a second) -- not a
+        # hang, just a real one-time cost worth not being surprised by.
+        run: |
+          uv build --all-packages --out-dir dist
+          uv venv /tmp/sarva-clean-venv --python 3.12
+          uv pip install --python /tmp/sarva-clean-venv/bin/python dist/sarva-*.whl
+          uv pip install --python /tmp/sarva-clean-venv/bin/python dist/sarva_foundry-*.whl
+          output="$(/tmp/sarva-clean-venv/bin/sarva chat 'packaging smoke test')"
+          echo "$output"
+          if [[ "$output" != *"packaging smoke test"* ]]; then
+            echo "::error::sarva chat, run from a clean wheel install, didn't echo the prompt back"
+            exit 1
+          fi
+          /tmp/sarva-clean-venv/bin/python -c "from sarva.providers.foundry_provider import FoundryProvider; from sarva_foundry.model import DecoderOnlyTransformer; print('foundry extra imports cleanly from a clean wheel install')"
+
   web:
     runs-on: macos-latest
     defaults:

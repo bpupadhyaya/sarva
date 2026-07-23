@@ -11,18 +11,23 @@ point as the tool itself.
 ## Status
 
 v0.1.0 (draft release) — the core engine (provider layer with real
-Anthropic/OpenAI/Google/Ollama adapters, agent loop, built-in tools
-including session persistence and semantic memory recall,
-image/audio/video degradation for models that can't handle a modality,
-an MCP client so the ecosystem's tools plug in with `sarva run
---mcp-server`, and a benchmark harness that grades every model with the
-same yardstick via `sarva eval`), the FastAPI server (REST + WebSocket,
-with real tool-confirmation over the socket), and a web UI with a
-working chat and tool-approval flow are scaffolded and tested; the CLI
-works end to end. The desktop app (Tauri) bundles and auto-starts its
+Anthropic/OpenAI/Google/Ollama adapters plus a **foundry adapter** that
+plugs a from-scratch-trained checkpoint in as a real, routable model
+(`sarva[foundry]`, optional), agent loop, built-in tools including
+session persistence and semantic memory recall, image/audio/video
+degradation for models that can't handle a modality, an MCP client so
+the ecosystem's tools plug in with `sarva run --mcp-server`, and a
+benchmark harness that grades every model with the same yardstick via
+`sarva eval`), the FastAPI server (REST + WebSocket, with real
+tool-confirmation over the socket), and a web UI with a working chat and
+tool-approval flow are scaffolded and tested; the CLI works end to end,
+verified via a real `pip install` of the built wheels in CI, not just
+the dev workspace. The desktop app (Tauri) bundles and auto-starts its
 own backend, with real cross-platform release bundles
 (macOS/Linux/Windows) — see below for the one-click flow and its known
-gaps. The from-scratch model-training track (`foundry/`) has a runnable
+gaps.
+
+The from-scratch model-training track (`foundry/`) has a runnable
 (toy-scale) pretraining pipeline: local-file corpus sourcing (exact +
 near-duplicate dedup, quality filtering, provenance/license tracking), a
 byte-level BPE tokenizer, a dense decoder-only transformer (RoPE,
@@ -31,15 +36,24 @@ experts, a shared expert, aux-loss-free load balancing), long-context
 RoPE scaling (linear interpolation + NTK-aware), and native multimodal
 input (vision encoder + projector) — every frontier-class architecture
 extension in the design doc's §3.6a list is built, each composable and
-opt-in. A training loop with a warmup+cosine LR schedule, bit-identical
-checkpoint/resume, and supervised fine-tuning (a masked loss that trains
-only on responses, never prompts) rounds out F0/F2's first slice — see
-`examples/04_pretrain_and_resume.py`, `examples/06_real_corpus_pretraining.py`
-(the same pipeline on real, sourced, licensed public-domain text),
-`examples/09_multimodal_vision_transformer.py`, or
-`examples/10_sft_toy_assistant.py`. Web-scale corpus sourcing and
-distributed training aren't built yet. See `BUILD-JOURNAL.md` for
-progress.
+opt-in. Post-training is fully built too: SFT (masked loss, trains only
+on responses), DPO (preference tuning, no reward model or rollouts), and
+agentic RL (a sandboxed, subprocess-isolated coding-task environment
+with real verifiable rewards, plus a GRPO policy-gradient training loop
+that actually consumes them) — §3.6e has no remaining deferred piece at
+laptop scale. Inference got real KV-cache incremental decoding (no more
+recomputing every prior token on each generation step). Four named,
+costed recipes (`sarva_foundry.recipes`: laptop-125M, 1B, 7B, 70B) give
+real parameter counts and a FLOPs-based compute estimate for each scale.
+See `examples/04_pretrain_and_resume.py`,
+`examples/06_real_corpus_pretraining.py` (the same pipeline on real,
+sourced, licensed public-domain text),
+`examples/09_multimodal_vision_transformer.py`,
+`examples/10_sft_toy_assistant.py`,
+`examples/14_grpo_rl_training.py`, `examples/15_kv_cache_inference.py`,
+or `examples/16_foundry_recipes.py`. Web-scale corpus sourcing and
+distributed multi-GPU training aren't built yet. See `BUILD-JOURNAL.md`
+for the full progress log.
 
 ## Quickstart
 
@@ -57,6 +71,16 @@ uv run sarva run "list the files in this directory"
 
 # Or run the server (REST + WebSocket + a web UI at http://127.0.0.1:8000):
 uv run sarva serve
+```
+
+Not contributing, just want the CLI? Build and install the wheel directly
+(no dev workspace needed) — this is the exact path CI verifies on every
+push:
+
+```bash
+uv build --all-packages --out-dir dist
+uv pip install dist/sarva-*.whl                 # add dist/sarva_foundry-*.whl too for `sarva[foundry]`
+sarva chat "hello"
 ```
 
 ### Building the web UI
