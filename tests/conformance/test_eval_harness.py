@@ -39,10 +39,51 @@ def test_contains_match_grader():
     assert not contains_match("the answer is 43", case)
 
 
+def test_contains_match_does_not_false_positive_on_a_longer_wrong_number():
+    # A real bug this pins: naive substring matching graded a genuinely
+    # WRONG answer ("89") as correct for an expected answer of "9",
+    # since "9" is a literal substring of "89". Word-boundary matching
+    # fixes it. Found by actually running `sarva eval --model mock` and
+    # getting a measured 30% instead of the honest 0% every prior claim
+    # in this project had assumed without re-checking the real number.
+    case = BenchmarkCase(id="c1", prompt="p", expected="9")
+    assert not contains_match("The answer is 89", case)
+    assert not contains_match("19 apples", case)
+    assert contains_match("The answer is 9.", case)
+    assert contains_match("9", case)
+
+
 def test_arithmetic_benchmark_is_bundled_and_has_real_cases():
     assert ARITHMETIC.name == "arithmetic"
     assert len(ARITHMETIC.cases) == 10
     assert len({c.id for c in ARITHMETIC.cases}) == 10  # every id unique
+
+
+def test_arithmetic_case_expected_answers_never_appear_in_their_own_prompt():
+    # A real, previously-undetected flaw: div-1/div-2 used a perfect
+    # square as the dividend with its own square root as the divisor
+    # (144 / 12, 81 / 9), so the correct answer was already sitting in
+    # the prompt text verbatim -- MockProvider's own prompt echo passed
+    # grading without computing anything. This is the structural
+    # invariant that flaw violated; pinned directly so no future case
+    # can reintroduce it silently.
+    import re
+
+    for case in ARITHMETIC.cases:
+        pattern = r"\b" + re.escape(case.expected) + r"\b"
+        assert not re.search(pattern, case.prompt), (
+            f"{case.id}: expected answer {case.expected!r} appears in its own prompt"
+        )
+
+
+async def test_mock_provider_scores_zero_on_the_real_bundled_arithmetic_benchmark():
+    # The actual honest-0%-for-mock claim this project has repeated
+    # throughout, verified for real at the integration level (not just
+    # the grader in isolation) -- this genuinely failed with a measured
+    # 30% before contains_match's word-boundary fix and the div-1/div-2
+    # case fix above.
+    report = await run_benchmark(ARITHMETIC, MockProvider(), model="mock")
+    assert report.accuracy == 0.0
 
 
 async def test_run_benchmark_scores_correct_and_incorrect_cases():

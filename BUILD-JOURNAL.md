@@ -4338,3 +4338,59 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## The eval harness's own core grading logic was wrong — Mock scored 30%, not the honest 0% every prior claim assumed
+
+This project's docs and journal have repeated "Mock scores 0%, the
+honest result" many times this session — always asserted, never
+re-verified against the actual number. Re-checked it directly: `sarva
+eval --model mock` genuinely reported **30%** accuracy, not 0%. Two
+independent, real bugs compounded into that number:
+
+1. `contains_match`'s naive `expected in output` substring check graded
+   a genuinely wrong numeric answer as correct whenever the right
+   digits happened to appear inside a longer wrong number — e.g.
+   `"9" in "The answer is 89"` is `True`, even though 89 is not 9.
+2. `ARITHMETIC`'s own `div-1`/`div-2` cases used a perfect square as
+   the dividend with its own square root as the divisor (`144 / 12`,
+   `81 / 9`) — so the correct answer (`12`, `9`) was already sitting in
+   the prompt text verbatim, and Mock's own prompt echo passed grading
+   on those two cases without computing anything at all.
+
+Fixed both: `contains_match` now matches on a real word boundary
+(`re.search(r"\bexpected\b", ...)`, not a raw substring); `div-1`/
+`div-2` replaced with `84 / 7` and `45 / 5`, chosen so the quotient
+never appears anywhere in the prompt. `sarva eval --model mock` now
+genuinely reports `0% (0/10)`, verified directly through the real CLI,
+not just a unit test.
+
+**A related test bug this surfaced, explaining why nothing caught it
+sooner:** the CLI conformance test meant to guard exactly this claim
+asserted `"0%" in result.stdout` — and `"30%"` also contains `"0%"` as
+its own trailing substring, the identical class of bug as the grader
+itself, just one layer up. That assertion would have silently passed
+at 10%, 20%, 30%, or 100% just as easily as at the honest 0%. Fixed to
+check the precise `"0/10"` correct/total marker the CLI already prints,
+which no wrong accuracy percentage could satisfy by coincidence.
+
+**Also pinned as a structural invariant, not just a one-time fix:** a
+new test walks every `ARITHMETIC` case and asserts its expected answer
+never appears (word-boundary-matched) in its own prompt text, so a
+future case can't silently reintroduce the same flaw.
+
+3 new tests (`contains_match`'s substring-false-positive regression,
+the prompt-doesn't-leak-the-answer invariant, and a real integration
+level check that Mock scores exactly 0.0 against the real bundled
+benchmark), 1 existing test corrected (`test_eval_grades_the_mock_
+provider_against_the_arithmetic_benchmark`, `"0%"` → `"0/10"`). 443 →
+446 Python tests. `ruff check`/`format --check` clean. `docs/eval.md`
+gained a new section on this bug; `sarva.eval.benchmarks`'s own module
+docstring documents the `div-1`/`div-2` fix directly.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

@@ -50,6 +50,31 @@ print(report.accuracy)  # 0.0-1.0
   filter and the multimodal degraders apply elsewhere in this project.
   Not a claim to GSM8K-scale coverage.
 
+## A real grading bug found by re-checking a repeated claim
+
+This project's own docs and journal have repeatedly said "Mock scores
+0%, the honest result" — restated without ever re-running the actual
+number. Doing exactly that (running `sarva eval --model mock` for real
+and looking at the printed accuracy) found it was measurably **30%**,
+not 0%: `contains_match`'s naive substring check graded a genuinely
+wrong numeric answer as correct whenever the right digits happened to
+appear inside a longer wrong number (expected `"9"` matched inside a
+wrong `"89"`), and two of `ARITHMETIC`'s own cases (`div-1`, `div-2`)
+had used a perfect square as the dividend with its own square root as
+the divisor (`144 / 12`, `81 / 9`) — so the correct answer was already
+sitting in the prompt text verbatim, and Mock's own prompt echo passed
+grading without computing anything.
+
+Fixed both halves: `contains_match` now matches on a word boundary
+(`\bexpected\b`, not a raw substring), and `div-1`/`div-2` were
+replaced with `84 / 7` and `45 / 5`, where the quotient never appears
+in the prompt. `sarva eval --model mock` now genuinely reports `0%
+(0/10)`. A related test bug this surfaced too: the CLI conformance
+test meant to catch this asserted `"0%" in result.stdout` — which
+"30%" also contains as a trailing substring, so that test had been
+silently passing throughout, whatever the real number was. Fixed to
+check the precise `"0/10"` marker instead.
+
 ## A `ProviderError` on one case doesn't sink the whole run
 
 If a case's request fails (rate limit, auth, any `ProviderError`), that

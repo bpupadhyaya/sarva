@@ -16,6 +16,7 @@ the DoneEvent" helper) rather than re-implementing stream draining.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from pydantic import BaseModel
@@ -73,8 +74,23 @@ def contains_match(output: str, case: BenchmarkCase) -> bool:
     exact-match grader would mostly measure formatting luck rather than
     correctness. Substring matching against the expected answer is the
     same forgiving-but-still-objective yardstick most small benchmark
-    harnesses use for short factual/numeric answers."""
-    return case.expected.strip().lower() in output.strip().lower()
+    harnesses use for short factual/numeric answers.
+
+    Word-boundary matched (`\\b...\\b`), not a raw substring check — a
+    real bug found by actually running this against `sarva eval --model
+    mock`, not a hypothetical: naive `in` matching graded wrong numeric
+    answers as correct purely because the right digits happened to
+    appear inside a longer wrong number (e.g. expected `"9"` matched
+    inside a wrong `"89"`), and — worse — this project's own bundled
+    `ARITHMETIC` cases have prompts whose numbers already contain the
+    expected digit as a substring (`"What is 81 / 9?"` contains `"9"`;
+    `"...24 apples..."` contains `"4"`), so MockProvider's own prompt
+    echo was silently graded "correct" on several cases. This wasn't a
+    hypothetical risk: `sarva eval --model mock` measurably reported
+    30% accuracy before this fix, not the honest 0% every prior claim
+    in this project assumed without re-checking the real number."""
+    pattern = r"\b" + re.escape(case.expected.strip()) + r"\b"
+    return re.search(pattern, output.strip(), re.IGNORECASE) is not None
 
 
 async def run_benchmark(

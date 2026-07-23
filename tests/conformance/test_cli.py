@@ -125,8 +125,13 @@ def test_eval_grades_the_mock_provider_against_the_arithmetic_benchmark(monkeypa
     assert "mock" in result.stdout
     # Mock's echo response is never a correct arithmetic answer -- the
     # honest result is 0%, same no-fabrication discipline the eval
-    # harness chapter established elsewhere in this project.
-    assert "0%" in result.stdout
+    # harness chapter established elsewhere in this project. Checking
+    # "0/10" (the printed correct/total count), not "0%" -- a real bug
+    # found while fixing the harness's own grading logic: "0%" is a
+    # substring of "30%", "10%", "100%", so this assertion would have
+    # silently passed even if the real accuracy weren't 0%, which for a
+    # while it genuinely wasn't (see contains_match's own docstring).
+    assert "0/10" in result.stdout
 
 
 def test_distill_writes_a_real_jsonl_file_from_mock_completions(monkeypatch, tmp_path):

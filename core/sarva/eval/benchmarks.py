@@ -5,6 +5,18 @@ placeholder" honesty this project applies everywhere (the corpus
 pipeline's length filter, the degraders' metadata-only reports): ten
 genuinely correct arithmetic problems, each answer computed and checked
 by hand, not generated and assumed right.
+
+A real, previously-undetected flaw in the original `div-1`/`div-2`
+cases, found by actually running `sarva eval --model mock` and
+questioning why it reported 30% instead of the honest 0% every prior
+claim in this project assumed without re-checking: both used a perfect
+square as the dividend with its own square root as the divisor
+(`144 / 12` and `81 / 9`), so the correct answer was numerically
+identical to the divisor already sitting in the prompt text — any
+grader doing substring/word matching against the model's own echoed
+prompt would "pass" without the model computing anything. Replaced
+with `84 / 7` and `45 / 5`, where the quotient (`12`/`9`) never appears
+anywhere in the prompt.
 """
 
 from __future__ import annotations
@@ -33,10 +45,10 @@ ARITHMETIC = Benchmark(
             id="mul-2", prompt="What is 9 * 8? Answer with just the number.", expected="72"
         ),
         BenchmarkCase(
-            id="div-1", prompt="What is 144 / 12? Answer with just the number.", expected="12"
+            id="div-1", prompt="What is 84 / 7? Answer with just the number.", expected="12"
         ),
         BenchmarkCase(
-            id="div-2", prompt="What is 81 / 9? Answer with just the number.", expected="9"
+            id="div-2", prompt="What is 45 / 5? Answer with just the number.", expected="9"
         ),
         BenchmarkCase(
             id="word-1",
