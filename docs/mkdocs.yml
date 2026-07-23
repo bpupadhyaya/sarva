@@ -31,6 +31,7 @@ nav:
       - The tokenizer, from scratch: foundry/tokenizer.md
       - The transformer, from scratch: foundry/transformer.md
       - Pretraining with real resume: foundry/training.md
+      - Serving a trained checkpoint (the foundry Provider adapter): foundry/inference.md
 
 markdown_extensions:
   - admonition

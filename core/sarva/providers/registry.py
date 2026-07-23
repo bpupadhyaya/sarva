@@ -41,6 +41,14 @@ class Registry:
     def all(self) -> list[ModelInfo]:
         return list(self._models.values())
 
+    def register(self, model: ModelInfo) -> None:
+        """Adds (or replaces) one entry at runtime -- used for models
+        discovered dynamically rather than declared in `models.yaml`, e.g.
+        a user's own locally-trained foundry checkpoints (see
+        `sarva.runtime`), which can't have a fixed static entry since the
+        set of checkpoints varies per install."""
+        self._models[model.id] = model
+
 
 def load_routing(path: Path) -> dict[TaskClass, list[str]]:
     raw = yaml.safe_load(path.read_text())

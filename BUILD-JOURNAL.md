@@ -2775,3 +2775,77 @@ scale a laptop can actually run and verify.
 **Next:** F1's real (non-toy) training infrastructure (needs real
 multi-GPU compute this environment doesn't have), or continuing the
 book (Chapter 6: packaging for humans).
+
+## The foundry provider adapter — a trained checkpoint becomes a real, routable model
+
+Closes a gap named explicitly in two earlier entries, not invented fresh:
+the design doc's own repo-structure diagram lists `providers/foundry.py`
+alongside `anthropic.py`/`openai.py`/etc., and the eval-harness entry
+said outright "the moment §3.1's planned foundry adapter exists... it
+becomes gradable by this same harness with zero changes — not built
+yet, named as real deferred work." Every other foundry chapter (SFT,
+DPO, GRPO) trains checkpoints that had nowhere to go afterward; this is
+where one comes back.
+
+`sarva.providers.foundry_provider.FoundryProvider` implements the same
+`Provider` protocol every frontier adapter implements. A checkpoint
+"bundle" is a directory with `model.pt` (a real `Trainer.save_checkpoint`
+output), `tokenizer.json`, and `config.json` (the flat `TransformerConfig`
+fields needed to reconstruct the model's shape before loading weights).
+**Honestly scoped, not silently incomplete:** MoE and long-context
+RoPE-scaling configs aren't serialized yet — `save_checkpoint_bundle`
+raises `NotImplementedError` rather than writing a bundle that would
+silently reload as a plain dense/unscaled model mismatched from what was
+actually trained.
+
+**The dependency boundary this had to respect, not just work around:**
+`core` and `sarva_foundry` have been deliberately dependency-disjoint
+since the distillation glue script — `core`'s dependencies are
+lightweight API clients, `sarva_foundry`'s are `torch`/`numpy`, and most
+Sarva installs shouldn't need to pull in torch. `foundry_provider.py`
+imports torch/`sarva_foundry` lazily, function by function, so importing
+the *module* always succeeds even on a plain-core install; only actually
+loading or running a checkpoint needs the new optional `sarva[foundry]`
+extra (added to `core/pyproject.toml`), and does so with a clear,
+actionable `ImportError` naming the install command, not a confusing
+failure somewhere inside torch's own import machinery.
+
+**Wired into `sarva.runtime` the same way Ollama already is, not as a
+special case:** a new `_foundry_extra_installed()` cheap probe (mirroring
+`ollama_reachable()`) gates both `build_router()` (registry availability)
+and `build_providers()` (actual provider construction) from one source of
+truth, so a foundry checkpoint is never marked available with no provider
+able to serve it. Unlike frontier models, checkpoints aren't declared
+statically in `models.yaml` — the set is entirely per-install, so they're
+discovered from `SARVA_FOUNDRY_CHECKPOINTS` and added to the registry at
+runtime via a new `Registry.register()` method, never a default routing
+candidate, reachable only through an explicit `--model foundry/<name>`
+override.
+
+**A real, named limitation the docs state plainly rather than gloss
+over:** no chat template is applied — the prompt is just the concatenated
+text of system + every message, no role tags — because that's exactly how
+`examples/10_sft_toy_assistant.py` and the SFT chapter's own tests train
+(raw prompt text, no role tags); a checkpoint trained some other way
+would need this adapter to match it. Streaming is coarse (one
+`TextDeltaEvent` for the whole completion, not per-token) since there's
+no wire protocol to translate for a fully local synchronous model, and
+there's no batching/KV-cache reuse — precisely the gap a real foundry
+inference server (§3.6f, separate deferred scope) would close.
+
+**Verified beyond the conformance suite:** built a real toy bundle by
+hand and ran it through the actual CLI, not just pytest — `sarva models`
+correctly lists `foundry/toy` as `[x]` available, and `sarva eval --model
+foundry/toy` runs the real arithmetic benchmark against it and scores
+0%, the honest result for an untrained toy checkpoint (same
+no-fabrication discipline the eval harness itself established for the
+zero-config Mock provider). 10 new tests in `test_foundry_provider.py`
+(save/load round-trip on real weights, the MoE-config refusal, bundle
+discovery, `Registry.register`, a real end-to-end `generate()` call, an
+unknown-model-id error path, and the full `runtime.py` wiring). 305 →
+315 Python tests. New docs chapter: `docs/foundry/inference.md`.
+
+**Next:** the foundry inference server (§3.6f: batched inference +
+KV-cache reuse around `DecoderOnlyTransformer`), the foundry recipes
+directory (§3.6h: named/costed configs starting at the 125M laptop
+scale), or continuing the book (Chapter 6: packaging for humans).

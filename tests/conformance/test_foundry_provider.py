@@ -1,0 +1,188 @@
+"""Conformance tests for sarva.providers.foundry_provider -- the adapter
+that plugs a `sarva_foundry`-trained checkpoint into the same `Provider`
+registry every frontier backend uses. Runs a real checkpoint through the
+real adapter end to end (train tiny -> save bundle -> discover -> load ->
+generate), not a mocked stand-in, matching this project's "verify it
+actually works, don't assume the shapes line up" discipline throughout."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import torch
+from sarva.multimodal.content import Message, Modality, TextBlock
+from sarva.providers.base import GenerateConfig, GenerateRequest, ModelNotFoundError, StopReason
+from sarva.providers.foundry_provider import (
+    FoundryProvider,
+    discover_checkpoint_bundles,
+    load_checkpoint_bundle,
+    model_info_for_bundle,
+    save_checkpoint_bundle,
+)
+from sarva.providers.registry import Registry
+from sarva_foundry.data.dataset import DOCUMENT_SEPARATOR
+from sarva_foundry.model import DecoderOnlyTransformer, MoEConfig, TransformerConfig
+from sarva_foundry.tokenizer import ByteLevelBPETokenizer
+from sarva_foundry.train import Trainer
+
+CORPUS = [
+    "the quick brown fox jumps over the lazy dog",
+    "the sky is blue and the grass is green",
+]
+
+
+def _tiny_tokenizer() -> ByteLevelBPETokenizer:
+    tok = ByteLevelBPETokenizer()
+    tok.train(CORPUS, vocab_size=300, special_tokens=[DOCUMENT_SEPARATOR])
+    return tok
+
+
+def _tiny_config(tokenizer: ByteLevelBPETokenizer) -> TransformerConfig:
+    return TransformerConfig(
+        vocab_size=tokenizer.vocab_size, dim=16, n_layers=2, n_heads=2, n_kv_heads=1, max_seq_len=32
+    )
+
+
+def _make_bundle(directory: Path) -> None:
+    torch.manual_seed(0)
+    tokenizer = _tiny_tokenizer()
+    config = _tiny_config(tokenizer)
+    model = DecoderOnlyTransformer(config)
+    trainer = Trainer(model)
+    save_checkpoint_bundle(directory, trainer, tokenizer, config)
+
+
+def test_save_and_load_checkpoint_bundle_round_trips_real_weights(tmp_path: Path):
+    torch.manual_seed(0)
+    tokenizer = _tiny_tokenizer()
+    config = _tiny_config(tokenizer)
+    model = DecoderOnlyTransformer(config)
+    trainer = Trainer(model)
+    bundle_dir = tmp_path / "toy"
+    save_checkpoint_bundle(bundle_dir, trainer, tokenizer, config)
+
+    loaded_model, loaded_tokenizer, loaded_config = load_checkpoint_bundle(bundle_dir)
+
+    assert loaded_config.vocab_size == config.vocab_size
+    assert loaded_config.dim == config.dim
+    assert loaded_tokenizer.encode("the sky is blue") == tokenizer.encode("the sky is blue")
+    for key, original in model.state_dict().items():
+        assert torch.equal(original, loaded_model.state_dict()[key]), f"weights diverged at {key}"
+
+
+def test_save_checkpoint_bundle_refuses_moe_configs_not_yet_serializable(tmp_path: Path):
+    tokenizer = _tiny_tokenizer()
+    config = TransformerConfig(
+        vocab_size=tokenizer.vocab_size,
+        dim=16,
+        n_layers=2,
+        n_heads=2,
+        n_kv_heads=1,
+        max_seq_len=32,
+        moe=MoEConfig(n_experts=4, n_experts_per_tok=2),
+    )
+    model = DecoderOnlyTransformer(config)
+    trainer = Trainer(model)
+    with pytest.raises(NotImplementedError, match="MoE"):
+        save_checkpoint_bundle(tmp_path / "moe", trainer, tokenizer, config)
+
+
+def test_discover_checkpoint_bundles_finds_only_complete_bundles(tmp_path: Path):
+    _make_bundle(tmp_path / "real")
+    (tmp_path / "incomplete").mkdir()
+    (tmp_path / "incomplete" / "config.json").write_text("{}")  # missing tokenizer.json/model.pt
+
+    found = discover_checkpoint_bundles(tmp_path)
+
+    assert set(found) == {"real"}
+    assert found["real"] == tmp_path / "real"
+
+
+def test_discover_checkpoint_bundles_on_missing_directory_returns_empty(tmp_path: Path):
+    assert discover_checkpoint_bundles(tmp_path / "does-not-exist") == {}
+
+
+def test_model_info_for_bundle_reads_config_without_touching_torch(tmp_path: Path):
+    _make_bundle(tmp_path / "toy")
+    info = model_info_for_bundle("toy", tmp_path / "toy")
+
+    assert info.id == "foundry/toy"
+    assert info.provider == "foundry"
+    assert info.local is True
+    assert info.capabilities.modalities_in == {Modality.TEXT}
+    assert info.capabilities.context_window == 32  # max_seq_len from _tiny_config
+    assert info.cost.input_per_mtok == 0.0
+
+
+def test_foundry_provider_construction_fails_clearly_on_an_empty_directory(tmp_path: Path):
+    with pytest.raises(ValueError, match="no valid foundry checkpoint bundles"):
+        FoundryProvider(tmp_path)
+
+
+async def test_foundry_provider_generate_produces_a_real_completion(tmp_path: Path):
+    _make_bundle(tmp_path / "toy")
+    provider = FoundryProvider(tmp_path)
+
+    request = GenerateRequest(
+        model="foundry/toy",
+        messages=[Message(role="user", content=[TextBlock(text="the quick brown")])],
+        config=GenerateConfig(max_tokens=8),
+    )
+
+    events = [event async for event in provider.generate(request)]
+    done = events[-1]
+
+    assert done.type == "done"
+    assert done.stop_reason in (StopReason.END_TURN, StopReason.MAX_TOKENS)
+    assert done.usage.input_tokens > 0
+    # The DoneEvent's own message text must match whatever text deltas
+    # were actually streamed -- not just internally consistent shapes.
+    streamed_text = "".join(e.text for e in events if e.type == "text_delta")
+    assert done.message.text() == streamed_text
+    await provider.close()
+
+
+async def test_foundry_provider_generate_rejects_an_unknown_model_id(tmp_path: Path):
+    _make_bundle(tmp_path / "toy")
+    provider = FoundryProvider(tmp_path)
+    request = GenerateRequest(
+        model="foundry/nonexistent",
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+    )
+    with pytest.raises(ModelNotFoundError):
+        async for _ in provider.generate(request):
+            pass
+
+
+def test_registry_register_adds_a_dynamic_entry_without_touching_static_ones(tmp_path: Path):
+    _make_bundle(tmp_path / "toy")
+    static_info = model_info_for_bundle("static", tmp_path / "toy")
+    registry = Registry({static_info.id: static_info})
+
+    dynamic_info = model_info_for_bundle("toy", tmp_path / "toy")
+    registry.register(dynamic_info)
+
+    assert {m.id for m in registry.all()} == {static_info.id, dynamic_info.id}
+    assert registry.get(dynamic_info.id) == dynamic_info
+    assert registry.get(static_info.id) == static_info
+
+
+def test_runtime_wires_a_foundry_checkpoint_into_router_and_providers(tmp_path, monkeypatch):
+    _make_bundle(tmp_path / "toy")
+    monkeypatch.setenv("SARVA_FOUNDRY_CHECKPOINTS", str(tmp_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    import sarva.runtime as runtime
+
+    monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: False)
+
+    router = runtime.build_router()
+    providers = runtime.build_providers()
+
+    assert "foundry/toy" in router.available
+    assert router.registry.get("foundry/toy").provider == "foundry"
+    assert "foundry" in providers

@@ -20,6 +20,18 @@ dependencies = [
     "google-genai>=2.14.0",
 ]
 
+[project.optional-dependencies]
+# `sarva_foundry` (torch + this project's own from-scratch training code)
+# stays out of the hard dependency list on purpose -- most Sarva installs
+# never train or run a local checkpoint and shouldn't need to pull in
+# torch. See core/sarva/providers/foundry_provider.py for the adapter this
+# unlocks. Within this repo's own uv workspace, `sarva-foundry` resolves
+# via the root pyproject's [tool.uv.sources] (a local workspace member,
+# not (yet) published to PyPI) -- a real PyPI release of `sarva` would
+# need `sarva-foundry` published there too, deferred packaging work not
+# yet needed since this project isn't on PyPI yet.
+foundry = ["sarva-foundry"]
+
 [project.scripts]
 sarva = "sarva.cli:app"
 
