@@ -32,6 +32,16 @@ dependencies = [
 # need `sarva-foundry` published there too, deferred packaging work not
 # yet needed since this project isn't on PyPI yet.
 foundry = ["sarva-foundry"]
+# Local speech-to-text (see sarva/audio.py). Text-to-speech needs no new
+# dependency -- it shells out to the operating system's own bundled
+# engine (macOS `say`, Linux `espeak`/`espeak-ng`) -- but real local STT
+# has no OS-native equivalent to shell out to, so `faster-whisper` earns
+# its place as a genuinely optional extra the same way sarva-foundry
+# does. Its own hard dependencies pull in no torch (confirmed via
+# `importlib.metadata.requires("faster-whisper")` before adding this),
+# so this stays a lightweight extra, not a second heavy ML stack next to
+# sarva[foundry].
+audio = ["faster-whisper>=1.0"]
 
 [project.scripts]
 sarva = "sarva.cli:app"

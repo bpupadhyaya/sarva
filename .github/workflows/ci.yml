@@ -21,7 +21,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Sync workspace
-        run: uv sync --all-packages --group dev
+        run: uv sync --all-packages --all-extras --group dev
 
       - name: Lint
         run: |
@@ -57,6 +57,8 @@ jobs:
             exit 1
           fi
           /tmp/sarva-clean-venv/bin/python -c "from sarva.providers.foundry_provider import FoundryProvider; from sarva_foundry.model import DecoderOnlyTransformer; print('foundry extra imports cleanly from a clean wheel install')"
+          uv pip install --python /tmp/sarva-clean-venv/bin/python faster-whisper
+          /tmp/sarva-clean-venv/bin/python -c "from sarva.audio import transcribe; print('audio extra imports cleanly from a clean wheel install')"
 
   web:
     runs-on: macos-latest

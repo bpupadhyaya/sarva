@@ -15,12 +15,14 @@ Anthropic/OpenAI/Google/Ollama adapters plus a **foundry adapter** that
 plugs a from-scratch-trained checkpoint in as a real, routable model
 (`sarva[foundry]`, optional), agent loop, built-in tools including
 session persistence and semantic memory recall, image/audio/video
-degradation for models that can't handle a modality, an MCP client so
-the ecosystem's tools plug in with `sarva run --mcp-server`, and a
-benchmark harness that grades every model with the same yardstick via
-`sarva eval`), the FastAPI server (REST + WebSocket, with real
-tool-confirmation over the socket), and a web UI with a working chat and
-tool-approval flow are scaffolded and tested; the CLI works end to end,
+degradation for models that can't handle a modality (including real
+local speech transcription via `sarva[audio]`), local text-to-speech
+(`sarva speak`, no API key), an MCP client so the ecosystem's tools plug
+in with `sarva run --mcp-server`, and a benchmark harness that grades
+every model with the same yardstick via `sarva eval`), the FastAPI
+server (REST + WebSocket, with real tool-confirmation over the socket),
+and a web UI with a working chat and tool-approval flow are scaffolded
+and tested; the CLI works end to end,
 verified via a real `pip install` of the built wheels in CI, not just
 the dev workspace. The desktop app (Tauri) bundles and auto-starts its
 own backend, with real cross-platform release bundles

@@ -13,6 +13,17 @@ audio, not an error. It falls back to whatever the block itself already
 declares (`media_type`, `duration_s` if the caller set it, and the
 actual byte size, which is always knowable) rather than treating
 "couldn't decode" as exceptional.
+
+**Real transcription, not just metadata, when `sarva[audio]` is
+installed.** Until now this degrader never actually transcribed
+anything — it always said "could not be transcribed," even though
+nothing about the *architecture* prevented real transcription, only a
+missing implementation. `sarva.audio.transcribe` (real local
+`faster-whisper` STT, see that module's docstring) is now attempted
+first; only when the extra isn't installed, or transcription genuinely
+fails on this specific audio, does this degrader fall back to the
+original honest metadata-only message — never a fabricated transcript
+standing in for one that couldn't actually be produced.
 """
 
 from __future__ import annotations
@@ -41,6 +52,23 @@ class AudioToTextDegrader:
 
     async def degrade(self, block: AudioBlock) -> list[TextBlock]:
         raw = await resolve_media_bytes(block)
+
+        from sarva.audio import stt_extra_installed, transcribe
+
+        if stt_extra_installed():
+            # Broad except deliberately: a transcription failure on THIS
+            # audio (corrupt bytes, an unsupported codec, a model
+            # loading error) should degrade to the honest metadata
+            # fallback below, not crash the whole agent turn -- the same
+            # "never let a best-effort enrichment take down the request"
+            # posture the rest of this degrader already has.
+            try:
+                text = transcribe(raw)
+                if text:
+                    return [TextBlock(text=f"[Audio transcript: {text}]")]
+            except Exception:
+                pass
+
         duration_s = _decode_wav_duration(raw) or block.duration_s
 
         size_kb = len(raw) / 1024

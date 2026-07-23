@@ -15,7 +15,7 @@ means or how local providers get detected.
 `sarva chat "hello"` works with no configuration at all — the module's
 own docstring states the design goal directly: "Zero-config by default:
 with no `ANTHROPIC_API_KEY` set, everything routes to the offline
-`MockProvider` so `sarva chat "hello"` always works." Eight commands,
+`MockProvider` so `sarva chat "hello"` always works." Nine commands,
 each doing one thing:
 
 - **`chat MESSAGE [--image PATH] [--session NAME]`** — one-shot,
@@ -48,6 +48,8 @@ each doing one thing:
   chapters.
 - **`sessions list`** / **`sessions clear NAME`** — inspect or delete
   persisted chat sessions.
+- **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
+  text-to-speech, no API key, no network. See "Local speech" below.
 - **`serve [--host 127.0.0.1] [--port 8000]`** — starts the same server
   described below; its own docstring calls it "the surface a web UI or
   desktop app uses."
@@ -205,6 +207,44 @@ genuinely existed on disk with the right content afterward (then
 cleaned up), and the following `GET /doctor` call reflecting it as
 configured. `apps/desktop`'s full production build (`npm run build`,
 `tsc -b`) was run for real, not assumed to still pass.
+
+## Local speech: `sarva.audio`
+
+T2's own definition of done has promised "audio in/out (local
+Whisper/TTS)" since T2 — `AudioToTextDegrader` (the multimodal chapter)
+always reported "could not be transcribed" regardless of input until
+now, and there was no TTS anywhere. `sarva.audio` closes both
+directions, with two deliberately different substrate choices:
+
+- **TTS shells out to the OS's own bundled engine** (macOS `say`,
+  Linux `espeak`/`espeak-ng`) rather than a Python library. `pyttsx3`,
+  the common cross-platform wrapper, was tried and rejected: it pulled
+  in the entire `pyobjc` framework suite (100+ packages) on macOS just
+  to reach the same `say` command this module now calls directly.
+- **STT uses `faster-whisper`** (a new, genuinely optional
+  `sarva[audio]` extra) — no OS-native local speech recognizer exists
+  to shell out to the way TTS has one. Its own hard dependencies pull
+  in no `torch`, so this stays a lightweight extra alongside
+  `sarva[foundry]`, not a second heavy ML stack.
+
+**A real bug found empirically while building this:** macOS `say`'s own
+DEFAULT voice (invoked with no `-v`) produced near-silent,
+sub-10-millisecond output for real text in this environment — confirmed
+directly with `afinfo`, not assumed — while an explicitly named,
+always-bundled voice (`Samantha`) produced correct, full-length audio
+for identical text. `synthesize()` always passes an explicit voice for
+exactly this reason.
+
+`AudioToTextDegrader` now attempts real transcription first when
+`sarva[audio]` is installed, falling back to the original honest
+metadata-only message only when the extra is missing or transcription
+genuinely fails on that specific audio — never a fabricated transcript.
+`sarva doctor`/`GET /doctor` gained two checks ("Speech-to-text (local
+Whisper)", "Text-to-speech (local)") from the same `sarva.audio`
+functions this module uses, so they can never drift from what's
+actually available. `sarva speak` is the CLI's own reachable surface
+for TTS — closing the same "fully built but unreachable by any real
+user" gap this project has named and fixed before.
 
 ## CLI conformance tests
 

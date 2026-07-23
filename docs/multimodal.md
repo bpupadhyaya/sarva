@@ -63,11 +63,16 @@ its own worth trusting differently:
   *shows* — that needs an actual vision-capable model call, a decision
   for the router/agent loop to make explicitly, not an implicit side
   effect of "degrade this content."
-- **`AudioToTextDegrader`** — the stdlib `wave` module can decode
-  exactly one real-world format (uncompressed WAV); every other format
-  (the overwhelming majority of real audio) falls back to whatever the
-  block itself declares (`media_type`, `duration_s` if set, and the
-  always-knowable byte size).
+- **`AudioToTextDegrader`** — attempts a real local transcription first
+  via `sarva.audio.transcribe` (`faster-whisper`, the `sarva[audio]`
+  extra — see the packaging chapter's "Local speech" section) when it's
+  installed. Only when the extra is missing, or transcription genuinely
+  fails on that specific audio, does it fall back to declared metadata:
+  the stdlib `wave` module can decode exactly one real-world format
+  (uncompressed WAV) for a real duration; every other format falls back
+  to whatever the block itself declares (`media_type`, `duration_s` if
+  set, and the always-knowable byte size). Never a fabricated
+  transcript standing in for one that couldn't actually be produced.
 - **`VideoToTextDegrader`** — the one with real decoding muscle: uses
   PyAV (statically-bundled decoder libraries, no system `ffmpeg`
   dependency) to sample up to 4 evenly-spaced real frames as

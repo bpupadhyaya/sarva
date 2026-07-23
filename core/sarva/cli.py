@@ -318,6 +318,27 @@ def sessions_clear(name: str = typer.Argument(..., help="Session name to delete.
 
 
 @app.command()
+def speak(
+    text: str = typer.Argument(..., help="Text to synthesize as speech."),
+    out: Path = typer.Option(Path("speech.wav"), "--out", help="Output WAV file path."),
+    voice: str | None = typer.Option(
+        None, "--voice", help="Voice name (engine-specific; default: a bundled voice)."
+    ),
+) -> None:
+    """Local text-to-speech (macOS `say` / Linux `espeak`) -- no API key,
+    no network."""
+    from sarva.audio import synthesize
+
+    try:
+        audio_bytes = synthesize(text, voice=voice)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+    out.write_bytes(audio_bytes)
+    console.print(f"wrote {len(audio_bytes)} bytes to {out}")
+
+
+@app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", help="Host to bind."),
     port: int = typer.Option(8000, help="Port to bind."),

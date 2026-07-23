@@ -9,6 +9,7 @@ vars and calls the exact same helpers."""
 
 from __future__ import annotations
 
+import sarva.audio as audio
 import sarva.runtime as runtime
 from sarva.cli import app
 from sarva.runtime import DiagnosticCheck, run_diagnostics
@@ -27,6 +28,8 @@ def _clear_provider_env(monkeypatch) -> None:
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: False)
+    monkeypatch.setattr(audio, "stt_extra_installed", lambda: False)
+    monkeypatch.setattr(audio, "tts_engine_available", lambda: False)
 
 
 def test_run_diagnostics_reports_every_provider_as_unavailable_with_nothing_configured(
@@ -43,6 +46,8 @@ def test_run_diagnostics_reports_every_provider_as_unavailable_with_nothing_conf
         "Google API key",
         "Ollama (local models)",
         "Foundry (local from-scratch models)",
+        "Speech-to-text (local Whisper)",
+        "Text-to-speech (local)",
     }
     assert all(isinstance(c, DiagnosticCheck) for c in checks)
     assert all(c.ok is False for c in checks)
@@ -78,6 +83,24 @@ def test_run_diagnostics_reflects_ollama_reachability(monkeypatch):
 
     assert checks["Ollama (local models)"].ok is True
     assert "reachable" in checks["Ollama (local models)"].detail
+
+
+def test_run_diagnostics_reflects_stt_extra_installed(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(audio, "stt_extra_installed", lambda: True)
+
+    checks = {c.name: c for c in run_diagnostics()}
+
+    assert checks["Speech-to-text (local Whisper)"].ok is True
+
+
+def test_run_diagnostics_reflects_tts_engine_available(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(audio, "tts_engine_available", lambda: True)
+
+    checks = {c.name: c for c in run_diagnostics()}
+
+    assert checks["Text-to-speech (local)"].ok is True
 
 
 def test_run_diagnostics_reports_foundry_extra_not_installed(monkeypatch):

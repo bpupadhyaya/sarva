@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import sarva.memory.session as session_module
+from sarva.audio import tts_engine_available
 from sarva.cli import app
 from sarva.memory.session import SessionStore
 from typer.testing import CliRunner
@@ -182,3 +184,31 @@ def test_sessions_list_and_clear_reflect_a_real_saved_session(monkeypatch, tmp_p
 
     final_list = runner.invoke(app, ["sessions", "list"])
     assert "keepsake" not in final_list.stdout
+
+
+@pytest.mark.skipif(not tts_engine_available(), reason="no local TTS engine detected")
+def test_speak_writes_a_real_audio_file(tmp_path):
+    out_path = tmp_path / "out.wav"
+
+    result = runner.invoke(app, ["speak", "hello from the command line", "--out", str(out_path)])
+
+    assert result.exit_code == 0
+    assert out_path.exists()
+    assert out_path.read_bytes().startswith(b"RIFF")
+    # Rich line-wraps long paths in the captured terminal output, so
+    # check the pieces rather than one exact string.
+    assert f"wrote {out_path.stat().st_size} bytes to" in result.stdout
+    assert out_path.name in result.stdout
+
+
+def test_speak_fails_cleanly_with_no_engine_available(tmp_path, monkeypatch):
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module.platform, "system", lambda: "Nonexistent")
+    monkeypatch.setattr(audio_module.shutil, "which", lambda *_: None)
+
+    result = runner.invoke(app, ["speak", "hello", "--out", str(tmp_path / "out.wav")])
+
+    assert result.exit_code == 1
+    assert "no local text-to-speech engine detected" in result.stdout
+    assert not (tmp_path / "out.wav").exists()

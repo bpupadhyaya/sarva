@@ -183,6 +183,31 @@ def run_diagnostics() -> list[DiagnosticCheck]:
         DiagnosticCheck("Foundry (local from-scratch models)", foundry_ok, foundry_detail)
     )
 
+    from sarva.audio import stt_extra_installed, tts_engine_available
+
+    stt_ok = stt_extra_installed()
+    checks.append(
+        DiagnosticCheck(
+            "Speech-to-text (local Whisper)",
+            stt_ok,
+            "sarva[audio] installed"
+            if stt_ok
+            else "sarva[audio] extra not installed -- pip install sarva[audio] for local "
+            "audio transcription",
+        )
+    )
+
+    tts_ok = tts_engine_available()
+    checks.append(
+        DiagnosticCheck(
+            "Text-to-speech (local)",
+            tts_ok,
+            "a local engine (say/espeak) is available"
+            if tts_ok
+            else "no local text-to-speech engine detected -- `sarva speak` will fail",
+        )
+    )
+
     return checks
 
 

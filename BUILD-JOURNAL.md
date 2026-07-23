@@ -3653,3 +3653,99 @@ pipeline (T2's other still-unmet promise), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Local speech — closing T2's other still-unmet promise (Whisper/TTS)
+
+T2's own definition of done has said "audio in/out (local Whisper/TTS)"
+since T2; `AudioToTextDegrader` existed but never actually transcribed
+anything (always "could not be transcribed," confirmed by reading its
+own body before starting), and there was no TTS anywhere at all —
+confirmed by `grep -rln "whisper\|Whisper\|TTS" core/sarva` returning
+nothing.
+
+New `sarva.audio` closes both directions, with two deliberately
+different substrate choices, each picked to avoid a heavy dependency
+where a real, lighter option already existed:
+
+- **TTS shells out to the OS's own bundled engine** (macOS `say`,
+  Linux `espeak`/`espeak-ng`) instead of a Python TTS library.
+  `pyttsx3` (the standard cross-platform wrapper) was tried first and
+  rejected once installed: it pulled in the ENTIRE `pyobjc` framework
+  suite on macOS — 100+ separate packages — just to reach the exact
+  same `say` command this module now calls directly via `subprocess`,
+  for a fraction of the footprint.
+- **STT uses `faster-whisper`**, a new, genuinely optional
+  `sarva[audio]` extra (there's no OS-native local speech recognizer to
+  shell out to the way TTS has one). Checked before adding it via
+  `importlib.metadata.requires("faster-whisper")`: its hard
+  dependencies (`ctranslate2`, `huggingface-hub`, `tokenizers`,
+  `onnxruntime`, `av`, `tqdm`) pull in no `torch` — `av` is already a
+  `core` hard dependency (the video degrader) — so this stays a
+  lightweight extra alongside `sarva[foundry]`, not a second heavy ML
+  stack.
+
+**A real bug found empirically, not a hypothetical:** the first version
+called `say -o file.wav "text"` with no explicit voice and it appeared
+to work (exit code 0, a file got written) — but `afinfo` on the result
+showed 0.005 seconds of real audio for a six-word sentence, real
+near-silence, not a parsing artifact. Explicitly naming a bundled voice
+(`-v Samantha`) on the identical text produced correct, full-length
+audio. `say`'s own DEFAULT voice resolution was silently producing
+broken output in this environment — the kind of bug that would have
+looked like a working feature (a file gets written, no error) until
+someone actually listened to one. `synthesize()` always passes an
+explicit voice now, and a dedicated regression test
+(`test_synthesize_with_default_macos_voice_produces_full_length_audio`)
+pins that longer text produces proportionally more audio bytes.
+
+**A second real, honest finding, caught while writing the tests, not
+swept under a passing assertion:** the "tiny" Whisper model
+occasionally mishears the word "Sarva" itself as "Serve a" — a
+plausible phonetic near-miss for an uncommon proper noun a small model
+was never going to be perfectly tuned for. Rather than picking a lucky
+seed or retrying until a test happened to pass, every test was written
+against common, unambiguous words instead — an honest choice about what
+a real round-trip test can reliably prove, documented directly in the
+test's own comment.
+
+`AudioToTextDegrader` now attempts real transcription first when the
+extra is installed, falling back to the original honest metadata-only
+message only when it's missing or transcription genuinely fails on
+that specific audio — proven with a real, no-mocking round trip:
+`sarva.audio.synthesize()` generates genuine speech locally, the
+resulting WAV goes straight through the degrader, and the words that
+come back are checked against the words that were spoken. New `sarva
+speak TEXT [--out PATH] [--voice NAME]` CLI command is the reachable
+surface for TTS — the same "fully built but unreachable by any real
+user" gap this project has named and fixed before (the MCP HTTP
+transport milestone). `sarva doctor`/`GET /doctor` gained two checks
+("Speech-to-text (local Whisper)", "Text-to-speech (local)") sourced
+from the same `sarva.audio` functions everything else uses, so they can
+never drift from real availability.
+
+**CI now actually exercises the `sarva[audio]` extra, not just
+declares it:** `uv sync --all-packages --group dev` never included
+optional extras (only workspace members like `sarva-foundry`, which is
+why `foundry` was always present without asking) — added
+`--all-extras` so `faster-whisper` installs for real in CI, plus a new
+clean-wheel-install smoke check (`from sarva.audio import transcribe`)
+mirroring the existing foundry-extra check. `core`'s CI job runs on
+`macos-latest`, so the macOS `say` path (the primary, verified
+implementation) genuinely executes there — not just locally.
+
+12 new tests across `test_audio.py`, `test_cli.py` (`sarva speak`),
+`test_degraders.py` (real end-to-end transcription), and `test_doctor.py`
+(2 new diagnostic checks) — plus a `test_server.py` fixture update for
+the same 2 new checks. 412 → 421 Python tests (1 environment-gated
+skip). `ruff check`/`format --check` clean. `docs/packaging.md` gained
+a new "Local speech" section, `docs/multimodal.md`'s audio-degrader
+description updated, `README.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Linux `espeak`-path real-runtime
+verification (written against documented CLI behavior but only macOS
+confirmed by direct execution here), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
