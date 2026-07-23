@@ -19,7 +19,7 @@ from sarva.config import get_env
 from sarva.providers.anthropic_provider import AnthropicProvider
 from sarva.providers.google_provider import GoogleProvider
 from sarva.providers.mock import MockProvider
-from sarva.providers.ollama_provider import OllamaProvider
+from sarva.providers.ollama_provider import OllamaProvider, _strip_local_prefix
 from sarva.providers.openai_provider import OpenAIProvider
 from sarva.providers.registry import Registry, Router, load_routing
 
@@ -34,6 +34,29 @@ def ollama_reachable(host: str = OLLAMA_HOST) -> bool:
         return True
     except httpx.HTTPError:
         return False
+
+
+def ollama_pulled_models(host: str = OLLAMA_HOST) -> set[str]:
+    """The real set of locally-pulled model tags (e.g. `{"qwen2.5:0.5b"}`),
+    queried from the same `/api/tags` endpoint `ollama_reachable()` already
+    hits -- empty if unreachable or nothing is pulled yet.
+
+    A real bug this closes, found by actually running Sarva against a
+    real local Ollama server with a small model pulled instead of the
+    registry's own default `qwen3:8b`: `build_router()` used to mark
+    EVERY registered `ollama/*` model as "available" the instant the
+    server was merely reachable, regardless of whether that specific
+    model tag was actually present -- a real `sarva run`/`sarva chat`
+    request routed straight to an unpulled model and failed outright,
+    with the zero-config Mock fallback never getting a chance. This
+    powers the fix: availability now means "this exact tag is really
+    there," not just "some Ollama server answered." """
+    try:
+        response = httpx.get(f"{host}/api/tags", timeout=0.3)
+        response.raise_for_status()
+        return {m["name"] for m in response.json().get("models", [])}
+    except httpx.HTTPError:
+        return set()
 
 
 def _google_key() -> str | None:
@@ -77,7 +100,12 @@ def build_router() -> Router:
     if _google_key():
         available |= {m.id for m in registry.all() if m.provider == "google"}
     if ollama_reachable():
-        available |= {m.id for m in registry.all() if m.provider == "ollama"}
+        pulled = ollama_pulled_models()
+        available |= {
+            m.id
+            for m in registry.all()
+            if m.provider == "ollama" and _strip_local_prefix(m.id) in pulled
+        }
     fdir = foundry_checkpoints_dir()
     if fdir is not None and _foundry_extra_installed():
         from sarva.providers.foundry_provider import (
@@ -145,15 +173,17 @@ def run_diagnostics() -> list[DiagnosticCheck]:
     )
 
     ollama_ok = ollama_reachable()
-    checks.append(
-        DiagnosticCheck(
-            "Ollama (local models)",
-            ollama_ok,
-            f"reachable at {OLLAMA_HOST}"
-            if ollama_ok
-            else f"not reachable at {OLLAMA_HOST} -- local Ollama models unavailable",
+    if ollama_ok:
+        pulled = ollama_pulled_models()
+        ollama_detail = (
+            f"reachable at {OLLAMA_HOST} -- pulled: {', '.join(sorted(pulled))}"
+            if pulled
+            else f"reachable at {OLLAMA_HOST}, but no models pulled yet -- "
+            "run `ollama pull <model>` before routing to it"
         )
-    )
+    else:
+        ollama_detail = f"not reachable at {OLLAMA_HOST} -- local Ollama models unavailable"
+    checks.append(DiagnosticCheck("Ollama (local models)", ollama_ok, ollama_detail))
 
     foundry_extra = _foundry_extra_installed()
     fdir = foundry_checkpoints_dir()

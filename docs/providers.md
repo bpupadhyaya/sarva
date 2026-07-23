@@ -121,6 +121,24 @@ same failures. Fixed by having every affected test explicitly mock
 `ollama_reachable` to `False` (CLI tests) or force a mock-only router
 (server tests), rather than depending on incidental machine state.
 
+**A second, deeper real bug this same live setup surfaced later:** the
+test-isolation fix above papered over the SYMPTOM, not the underlying
+issue — `build_router()` itself marked every registered `ollama/*`
+model "available" the instant the server merely answered, with no
+regard for which model tag was actually pulled. Confirmed directly:
+`sarva run ... --auto` in this exact environment (Ollama reachable,
+only a small model pulled, not the registered `qwen3:8b`) genuinely
+ended with `run ended: failed` — a real request routed to a model that
+was never there, the zero-config Mock fallback never getting a chance.
+Fixed by making availability per-model, not per-server:
+`ollama_pulled_models()` queries the same `/api/tags` endpoint
+`ollama_reachable()` already hits, and `build_router()` now only marks
+`ollama/<tag>` available when that exact tag is in the real pulled set.
+Re-ran the identical failing command afterward and it correctly fell
+back to Mock instead. `sarva doctor`'s Ollama check gained the same
+real data in its detail message (`pulled: qwen2.5:0.5b`, or an
+explicit "no models pulled yet" when the server's up but empty).
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

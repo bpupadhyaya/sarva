@@ -78,11 +78,24 @@ def test_run_diagnostics_reflects_google_key_from_either_env_var(monkeypatch):
 def test_run_diagnostics_reflects_ollama_reachability(monkeypatch):
     _clear_provider_env(monkeypatch)
     monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: True)
+    monkeypatch.setattr(runtime, "ollama_pulled_models", lambda *a, **kw: {"qwen2.5:0.5b"})
 
     checks = {c.name: c for c in run_diagnostics()}
 
     assert checks["Ollama (local models)"].ok is True
     assert "reachable" in checks["Ollama (local models)"].detail
+    assert "qwen2.5:0.5b" in checks["Ollama (local models)"].detail
+
+
+def test_run_diagnostics_reports_ollama_reachable_with_nothing_pulled(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: True)
+    monkeypatch.setattr(runtime, "ollama_pulled_models", lambda *a, **kw: set())
+
+    checks = {c.name: c for c in run_diagnostics()}
+
+    assert checks["Ollama (local models)"].ok is True
+    assert "no models pulled yet" in checks["Ollama (local models)"].detail
 
 
 def test_run_diagnostics_reflects_stt_extra_installed(monkeypatch):

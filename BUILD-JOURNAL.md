@@ -4212,3 +4212,54 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Ollama availability is per-model now, not per-server — a second, deeper bug the live setup surfaced
+
+The earlier Ollama-live-verification milestone's test-isolation fix
+addressed the symptom: several tests broke once a real Ollama server
+started running, because they assumed "zero-config routes to Mock"
+without controlling for a reachable-but-model-not-pulled server. Fixed
+by mocking `ollama_reachable` in those tests. That left the actual
+production code path untouched, and it has the same real bug: running
+`sarva run "list files" --mcp-server "..." --auto` in this exact
+environment — Ollama genuinely reachable, only a small model
+(`qwen2.5:0.5b`) actually pulled, not the registry's registered
+`qwen3:8b` — ended with a real `run ended: failed`. `build_router()`
+marked `ollama/qwen3:8b` "available" the instant the server merely
+answered, with zero regard for which model tag was actually present.
+The zero-config Mock fallback never got a chance, because the router
+genuinely believed an unpulled model was a working one.
+
+**Real fix, not another test-only patch:** new `ollama_pulled_models()`
+queries the exact same `/api/tags` endpoint `ollama_reachable()`
+already hits (confirmed its real response shape against the running
+server: `{"models": [{"name": "qwen2.5:0.5b", ...}]}`) and returns the
+real set of locally-pulled tags. `build_router()` now marks
+`ollama/<tag>` available only when that exact tag is in the real pulled
+set, not merely when the server answers. `run_diagnostics()`'s Ollama
+check gained the same real data in its own detail message (`pulled:
+qwen2.5:0.5b`, or an explicit "no models pulled yet" for a reachable
+but empty server) — real information a user can act on, not just a
+green checkmark that doesn't mean what it implies.
+
+**Verified against the real, still-running local server, not just
+unit tests:** re-ran the identical `sarva run ... --auto` command that
+had failed and it now correctly falls back to Mock; `sarva doctor`
+correctly shows `pulled: qwen2.5:0.5b`; `sarva models` correctly shows
+`ollama/qwen3:8b` as `[ ]` unavailable rather than `[x]`.
+
+5 new tests (`test_runtime.py`, new — the real bug reproduced directly
+with a registered-but-unpulled model, the fix verified with an
+actually-pulled matching tag, the unreachable-server short-circuit
+path, and the real `/api/tags` response-shape parsing; plus 2 more in
+`test_doctor.py` for the enhanced detail message). 429 → 434 Python
+tests. `ruff check`/`format --check` clean. `docs/providers.md`'s
+Ollama section gained a follow-up paragraph on this second, deeper fix.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
