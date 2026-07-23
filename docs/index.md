@@ -47,10 +47,17 @@ and TF-IDF + cosine-similarity semantic recall as an honest, fully
 local, fully testable first tier — not neural embeddings, and stated
 plainly why.
 
-*(Chapters 6+ — packaging for humans — land as their own chapters get
-written. Each chapter mirrors a module in `core/sarva/`; see the nav
-sidebar for what's already up: MCP, eval, distillation, and the whole
-from-scratch foundry track.)*
+**[Chapter 6 — Packaging for Humans](packaging.md)** is live: the CLI's
+seven commands and its zero-config Mock fallback, the server's two
+different endpoints for two different needs (`/chat` non-streaming and
+tool-free, `/ws/chat` streaming with a real confirmation handshake over
+the socket), and the desktop app's real cross-platform release
+bundles — including the honest, still-open gaps (no code signing, no
+Windows sidecar-kill signal handling yet).
+
+*(Further chapters land as their own get written. Each mirrors a module
+in `core/sarva/`; see the nav sidebar for what's already up: MCP, eval,
+distillation, and the whole from-scratch foundry track.)*
 
 ## Quickstart
 

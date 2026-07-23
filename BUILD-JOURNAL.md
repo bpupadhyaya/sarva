@@ -3025,3 +3025,52 @@ just on paper.
 inference-server gap), F1's real distributed training infrastructure
 (needs real multi-node compute this environment doesn't have), or
 continuing the book (Chapter 6: packaging for humans).
+
+## Docs Chapter 6 — packaging for humans: the CLI, the server, the desktop app
+
+Closes `docs/index.md`'s own long-standing placeholder ("Chapters 6+ —
+packaging for humans — land as their own chapters get written"). Three
+modules had zero book coverage until now: `sarva.cli`, `sarva.server.
+app`, and `apps/desktop/src-tauri`. `docs/packaging.md` covers all
+three, verified against current source before writing a word — the same
+discipline that caught two real stale docstrings in earlier chapters
+(`loop.py`, `session.py`).
+
+**What got directly verified, not assumed, before publishing:** the
+server's tool-confirmation handshake (`receive_json()` → `{"approved":
+bool}`, matched line-for-line against `apps/desktop/src/App.tsx`'s
+client-side `respondToConfirmation` — the same handshake described in
+`app.py`'s own docstring is genuinely implemented on both ends, not
+just documented on one); the desktop app's sidecar-kill logic (`#[cfg
+(unix)]` gates only the `pgrep -P <pid>` grandchild-reaping step needed
+because PyInstaller's onefile bootloader forks a real grandchild
+process — confirmed Windows genuinely has no equivalent yet, a real,
+still-open gap stated plainly rather than glossed over); and the
+`core/sarva/server/static/` -> `apps/desktop/dist/` relationship (a
+literal checked-in copy via `scripts/build-web.sh`, a manual step, not
+CI-automated — CI only checks the copy hasn't gone stale).
+
+**Session persistence gets one precise, previously-undocumented detail
+right:** both `sarva chat --session` and `sarva run --session` only
+save the transcript if the run actually reached `done` — a failed,
+budget-exhausted, or cancelled run is never persisted, so a session
+file only ever reflects turns that genuinely completed. Also documents
+the real, working cross-platform release bundles (`.dmg`/`.msi`/
+`.exe`/`.AppImage`/`.deb` via `release-bundle.yml`'s three-OS matrix,
+draft-only GitHub Releases on tag push) alongside the honest, still-open
+gap named directly in the workflow's own name — "Release bundle
+(unsigned)" — no code signing or notarization yet.
+
+No test or code changes — pure documentation, verified line-by-line
+against `cli.py`, `server/app.py`, `src-tauri/src/lib.rs`,
+`release-bundle.yml`, `App.tsx`, and `build-web.sh`. 330 tests
+unaffected. New chapter: `docs/packaging.md`; `docs/index.md`/
+`mkdocs.yml` nav updated to link it instead of describing it as
+pending.
+
+**Next:** batching multiple concurrent requests (§3.6f's remaining
+inference-server gap), F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have), or a
+first pass at code-signing/notarization for the desktop release bundles
+(needs a real Apple/Microsoft signing identity this environment doesn't
+have — likely stays a named, deferred gap).
