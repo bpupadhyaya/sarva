@@ -13,6 +13,19 @@ GEMINI_API_KEY/GOOGLE_API_KEY) until a real run validates it, same
 discipline as every other adapter before its first live run. See
 BUILD-JOURNAL.md.
 
+Also translates image-out: an image-capable Gemini model can return a
+`Part` with `inline_data` populated (the same `Blob` shape used to send
+images in) instead of, or alongside, text. `ModelCapabilities.
+modalities_out` and `ContentEvent` both named "image-out models" as
+future work since T1; this is the first adapter to actually produce
+one. Still gated the same way as the rest of this file: no
+`models.yaml` entry claims an image-out-capable Gemini model id yet
+(this session has no verified-current catalog of which Gemini model
+variants actually support it, or their pricing), so this is real,
+reachable code with no registry entry routing a real request to it —
+the same "adapter exists, wiring a specific verified model in is
+separate" scoping this file already applies to Gemini generally.
+
 Same deliberate scope boundary as openai_provider.py: no entries added
 to `providers/data/models.yaml`. That file states it's "re-validated at
 every release," and this session has no verified-current Gemini model
@@ -55,6 +68,7 @@ from sarva.multimodal.content import (
 )
 from sarva.multimodal.fetch import resolve_media_bytes
 from sarva.providers.base import (
+    ContentEvent,
     DoneEvent,
     GenerateRequest,
     ProviderEvent,
@@ -206,6 +220,22 @@ class GoogleProvider:
                         )
                         blocks.append(call)
                         yield ToolCallEvent(call=call)
+                    elif part.inline_data:
+                        # image-out: an image-capable Gemini model (e.g.
+                        # a "-image" model variant) returns generated
+                        # image bytes the same way images are sent IN
+                        # (types.Blob with .data/.mime_type) -- ModelCapabilities.
+                        # modalities_out's own comment ("v1: {TEXT};
+                        # image-out models later") and ContentEvent's own
+                        # docstring ("e.g. images from image-out models")
+                        # both named this before any adapter actually
+                        # produced one; this is that first real producer.
+                        image = ImageBlock(
+                            media_type=part.inline_data.mime_type,
+                            data=part.inline_data.data,
+                        )
+                        blocks.append(image)
+                        yield ContentEvent(block=image)
         except errors.ClientError as e:
             yield StreamErrorEvent(
                 code="rate_limit" if e.code == 429 else "provider",

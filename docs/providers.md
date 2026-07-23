@@ -147,6 +147,24 @@ actually see. Wiring a real model in is a one-line config change for
 whoever has that data; the adapter code was the part that needed
 writing.
 
+### Image-out: the first adapter to actually produce a `ContentEvent`
+
+`ModelCapabilities.modalities_out` has said `# v1: {TEXT}; image-out
+models later` since this field was written, and `ContentEvent`'s own
+docstring calls out "images from image-out models" — both naming
+image generation as anticipated future work before any adapter
+actually did it. `google_provider.py` closes that: an image-capable
+Gemini model can return a response part with `inline_data` populated
+(the same `Blob` shape used to *send* an image in) instead of, or
+alongside, text — translated into `ImageBlock` + `ContentEvent`, the
+first real producer of an event type that existed in the protocol all
+along with nothing behind it. Same scoping discipline as the rest of
+this chapter: no `models.yaml` entry claims a specific image-out
+Gemini model id yet (no verified-current catalog of which variants
+support it, or their pricing) — the wire-level translation is real and
+tested, wiring a specific verified model in is separate, one-line
+follow-up work.
+
 ## Build it yourself
 
 - Run `sarva models` to see the registry as loaded — which ids exist,

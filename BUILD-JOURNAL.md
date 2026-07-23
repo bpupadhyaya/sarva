@@ -3594,8 +3594,62 @@ No Python test count change (Rust-only milestone). `docs/packaging.md`
 updated with the corrected, more precise framing of what's fixed vs.
 what's genuinely still open and why.
 
+## Image-out — the first adapter to actually fill a type the protocol always had
+
+`ModelCapabilities.modalities_out`'s own comment has said `# v1: {TEXT};
+image-out models later` since the field was written, and
+`ContentEvent`'s own docstring says "e.g. images from image-out
+models" — both named image generation as anticipated future work
+before any adapter ever actually produced one. Confirmed by `grep -rn
+"ContentEvent" core/sarva` before starting: exactly two hits, the
+type's own definition and its slot in the `ProviderEvent` discriminated
+union — never constructed anywhere. T2's own definition of done also
+literally says "Image+PDF in, image **out**," a promise T2 never fully
+delivered on.
+
+`google_provider.py` closes it: an image-capable Gemini model returns
+generated image bytes as a response part with `inline_data` populated —
+the exact same `Blob` shape (`.data`/`.mime_type`) this adapter already
+used to *send* images in, just on the way out instead. Translated into
+`ImageBlock` + `ContentEvent`, appended to the assembled message the
+same way a tool-call block already was. **Chose Gemini over OpenAI's
+separate Images API deliberately, not arbitrarily:** Gemini's
+image-capable models return generated images inline within the same
+`generateContent` streaming call an ordinary chat turn already uses,
+fitting directly into the existing per-chunk translation loop; OpenAI's
+image generation lives on a wholly separate `images.generate()`
+endpoint unrelated to `chat.completions`, which would need a
+special-cased code path outside the `generate()` streaming contract
+every other adapter follows.
+
+**Same scoping discipline this adapter already applies to Gemini
+generally:** no `models.yaml` entry claims a specific image-out-capable
+Gemini model id — this session has no verified-current catalog of
+which model variants actually support it or their pricing, so the
+wire-level translation is real and tested, but nothing routes a real
+request to it yet without an explicit model override naming a real
+image-out model id. Also, honestly, not live-verified: this environment
+has no API keys, so — same as the rest of `google_provider.py` since it
+was first written — this is proven with hermetic `SimpleNamespace`-based
+tests (the established "unit-test pure translation, verify the rest
+live" pattern `test_openai_provider_streaming.py`/
+`test_google_provider_streaming.py` already use), not a live call. No
+new live test added either: doing so responsibly would need a real,
+verified image-out model id, which this session doesn't have — adding
+one would mean guessing, which this project doesn't do.
+
+3 new tests in `tests/conformance/test_google_provider_image_out.py`:
+an inline-data part becoming a `ContentEvent` with the right
+media type/bytes, the generated image surviving into the final
+assistant message, and text+image coexisting in one response without
+either clobbering the other. 409 → 412 Python tests. `ruff check`/
+`format --check` clean. `docs/providers.md` updated with a new
+"Image-out" section.
+
 **Next:** batching multiple concurrent inference requests (§3.6f), F1's
 real distributed training infrastructure (needs real multi-node compute
-this environment doesn't have), or a first pass at code-signing/
-notarization for the desktop release bundles (needs a real signing
-identity this environment doesn't have — likely stays deferred).
+this environment doesn't have), a real local Whisper/TTS audio in/out
+pipeline (T2's other still-unmet promise), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
