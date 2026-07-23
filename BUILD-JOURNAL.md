@@ -2416,3 +2416,49 @@ would.
 **Next:** F1's real (non-toy) training infrastructure, or the last
 piece of §3.6e's post-training line — agentic RL (RL on long-horizon
 tool-use tasks, sandboxed coding-environment harness).
+
+## Docs Chapter 2 — the provider abstraction, model registry, and routing (T5)
+
+The core engine's provider layer went from zero adapters to five real
+ones (Anthropic, OpenAI, Google, Ollama, Mock) over this session without
+ever getting a dedicated docs chapter — `docs/index.md`'s own text had
+named "the provider abstraction, model registry and routing" as
+"Chapter 2" since T0, still marked "(in progress)" for the whole of Part
+I. With the code now genuinely substantial and stable, this was the
+right time to write it, not before.
+
+`docs/providers.md` covers the `Provider` protocol contract itself,
+then — the part worth actually teaching, matching this project's
+stated purpose that "teaching how to build a multimodal AGI tool is as
+much the point as the tool itself" — the real, hard-won differences
+between backends that writing four live adapters surfaced: OpenAI's
+incremental (fragmented, index-keyed) tool-call argument streaming vs.
+Anthropic's already-assembled final message vs. Ollama's complete-per-
+chunk calls; Gemini's complete absence of a distinct "made a tool call"
+finish reason (the real bug this caused and how it was caught, told as
+the teaching example it is); and the three different shapes providers
+use for tool-result messages. Closes with the model registry
+(`models.yaml`) and `Router.pick()`'s availability/modality-aware
+fallback — the literal mechanism behind "absorb a new frontier model =
+one YAML entry" — and repeats, in the chapter's own words, why no
+OpenAI/Google model entries exist yet (no verified-current catalog data
+to add responsibly, the same principle applied when those adapters
+shipped).
+
+**Verified rather than assumed correct:** every code sample and every
+specific claim (line counts, the `Router.pick()` signature, `GenerateConfig`'s
+fields, the `ProviderEvent` union's members, the exact routing.yaml
+content) was checked against the current source before writing it into
+the chapter, not recalled from memory of writing that code earlier in
+this session — caught one real inaccuracy this way (a first draft
+claimed `run_benchmark`/`distill` were both "under 100 lines"; `wc -l`
+showed `harness.py` is 104, fixed to a claim that's actually true).
+
+`docs/index.md` updated to link the new chapter and stop describing it
+as pending. No code changes this entry — pure documentation, verified
+against the code it describes rather than written from memory of having
+written that code.
+
+**Next:** F1's real (non-toy) training infrastructure, agentic RL (the
+last named piece of §3.6e), or Chapter 3 (the agent loop) continuing
+the book.

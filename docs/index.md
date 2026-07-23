@@ -21,9 +21,18 @@ or local — identically. That choice is deliberate and temporary: as models
 more capable than today's frontier arrive, Sarva absorbs them as a one-entry
 registry change, never a rewrite. See the roadmap for where this leads.
 
-*(Chapters 2+ — the provider abstraction, model registry and routing, the
-agent loop, multimodality, memory, and packaging for humans — land as the
-core engine is built. Each chapter mirrors a module in `core/sarva/`.)*
+**[Chapter 2 — The Provider Abstraction, Model Registry, and
+Routing](providers.md)** is live: the `Provider` protocol every backend
+implements, five real adapters (Anthropic/OpenAI/Google/Ollama/Mock)
+and the genuine wire-format differences writing them surfaced, and how
+`models.yaml` + the router turn "absorb a new frontier model" into a
+one-entry data edit instead of a rewrite.
+
+*(Chapters 3+ — the agent loop, multimodality, memory, and packaging
+for humans — land as their own chapters get written. Each chapter
+mirrors a module in `core/sarva/`; see the nav sidebar for what's
+already up: memory, MCP, eval, distillation, and the whole from-scratch
+foundry track.)*
 
 ## Quickstart
 
