@@ -301,6 +301,57 @@ single DPO preference pair shifts the margin dramatically toward the
 chosen response — no reward model, no sampled rollouts, just the one
 preference pair.
 
+## Agentic RL's environment harness: sandboxed coding tasks with real, verifiable rewards
+
+§3.6e's post-training line ends with agentic RL — "RL on long-horizon
+tool-use tasks... this, not pretraining, is what turns a base model
+into a Fable/K3-class agent. Includes the RL environment harness
+(sandboxed coding tasks with automatic verification)." The full RL
+training loop (a real policy-gradient algorithm — PPO, GRPO, or similar
+— plus a model-in-the-loop training run) is real, deferred work this
+project doesn't have the compute for yet. The harness that loop would
+consume is genuinely buildable and testable today, and that's what
+`sarva_foundry.rl` is.
+
+A `CodingTask` pairs a prompt with `test_code` that exercises a
+submission and exits non-zero on any failed assertion — the automatic
+verification the reward comes from, not a human or model judgment call.
+`evaluate_submission(task, submitted_code)` runs the submission plus
+the test code in a **genuinely separate subprocess** (not `exec()`
+inside the caller's own process — the same isolation `RunShellTool`
+already uses in `core/sarva/agent/tools.py`, for the same reason) under
+a hard wall-clock timeout, and returns a real binary reward: `1.0` if
+every assertion held, `0.0` otherwise — including a timeout, which
+counts as a genuine failure rather than a special case the caller has
+to handle. `test_submission_runs_in_a_genuinely_separate_process`
+proves the isolation directly: a submission that mutates its own
+process's environment variables can't leak that mutation back into the
+caller.
+
+**"Sandboxed" named honestly, not overclaimed:** subprocess isolation
+plus a timeout is real isolation — it's not a full security sandbox.
+Submitted code still runs with the same filesystem/network permissions
+the parent process has. A production RL-from-code-execution system
+needs a real container/VM boundary (gVisor, Firecracker, ...); that's
+real, deferred, infrastructure-heavy work, named directly in
+`environment.py`'s own module docstring rather than implied to already
+be covered.
+
+`CODING_TASKS` bundles three small, real, hand-verified tasks — same
+honesty discipline as `sarva.eval.benchmarks.ARITHMETIC`: real problems
+with real, hand-checked reference solutions, not a claim to
+HumanEval-scale coverage. Each task's own tests are proven
+*discriminating*, not just satisfiable: `test_bundled_coding_tasks_reject_a_deliberately_wrong_solution`
+confirms a plausible-but-wrong solution actually fails, not just that
+the correct one passes.
+
+`examples/13_rl_coding_environment.py` runs three fixed "policies"
+(stand-ins for what a real agentic-RL rollout would sample from a
+model) against the bundled tasks and prints the genuinely-earned reward
+for each: a correct solution scores 1.0, a plausible-but-wrong one
+scores 0.0 with the real captured `AssertionError`, and an infinite
+loop is caught by the timeout and scored 0.0 rather than hanging.
+
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
@@ -310,7 +361,6 @@ sourcing doesn't yet; nor does an LSH banding index, which near-duplicate
 dedup would need to scale past the current O(kept²) pairwise
 comparison), the distributed training slice of §3.6d (FSDP → 3D
 parallelism, loss-spike handling, scaling-law tooling) once a model
-worth training at that scale exists, and the last piece of §3.6e's
-post-training line — agentic RL (RL on long-horizon tool-use tasks,
-the sandboxed coding-environment harness, distillation from frontier
-models) — beyond SFT and DPO.
+worth training at that scale exists, and the actual RL training loop
+(policy-gradient updates from the environment harness's rewards) that
+would make agentic RL real rather than just its harness.

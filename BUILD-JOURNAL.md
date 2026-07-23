@@ -2640,3 +2640,61 @@ corrected against real, observed CLI behavior. 291 tests unaffected.
 
 **Next:** F1's real (non-toy) training infrastructure, agentic RL, or
 continuing the book (packaging for humans is Chapter 6+).
+
+## Agentic RL's environment harness — sandboxed coding tasks with real verifiable rewards (§3.6e)
+
+§3.6e's post-training line ends with agentic RL: "RL on long-horizon
+tool-use tasks... Includes the RL environment harness (sandboxed coding
+tasks with automatic verification)." The full RL training loop (a real
+policy-gradient algorithm plus a model-in-the-loop training run) needs
+compute this project doesn't have yet — but the harness that loop would
+consume is genuinely buildable and testable today, and closes the last
+named piece of §3.6e that was still fully unbuilt.
+
+`sarva_foundry.rl.environment.evaluate_submission(task, submitted_code)`
+runs a submission plus real test code in a genuinely separate
+subprocess (not `exec()` in the caller's process — same isolation
+`RunShellTool` already uses in `core/sarva/agent/tools.py`) under a
+hard wall-clock timeout, returning a real binary reward: `1.0` if every
+assertion in the test code held, `0.0` otherwise. A timeout is scored
+as a genuine failure, not a special case — an infinite loop is not a
+passing submission.
+
+**"Sandboxed" named honestly in the module's own docstring, not
+overclaimed:** subprocess isolation + timeout is real isolation, not a
+full security sandbox — submitted code still has the parent process's
+filesystem/network permissions. A production system needs a real
+container/VM boundary; named directly as real, deferred,
+infrastructure-heavy work rather than implied to already be covered.
+
+**Every test scenario runs a real subprocess, nothing mocked** — the
+whole point of this module is that the reward comes from actually
+running code, so mocking the subprocess would test nothing real.
+Verified end to end before writing any test: ran three real scenarios
+by hand first (a correct solution scoring 1.0, a wrong one scoring 0.0
+with a captured real `AssertionError`, and a genuine 2-second-timeout
+infinite loop correctly caught rather than hanging the shell). One
+detail worth naming: with `text=True` passed to `subprocess.run`, a
+`TimeoutExpired`'s `.stdout`/`.stderr` come back already as `str` (or
+`None`), not `bytes` — checked empirically rather than assumed, which
+simplified an unnecessary bytes-decode branch the first draft had.
+
+`CODING_TASKS` bundles three small, real, hand-verified tasks (add,
+palindrome check, Fibonacci) — same honesty discipline as
+`sarva.eval.benchmarks.ARITHMETIC`. Each task's tests are proven
+*discriminating*, not just satisfiable: a dedicated test confirms a
+plausible-but-wrong solution for every bundled task actually fails, not
+just that the correct one passes — catching the failure mode where a
+test set is too permissive to mean anything.
+
+`examples/13_rl_coding_environment.py` runs three fixed "policies"
+(standing in for what a real agentic-RL rollout would sample from a
+model) against the bundled tasks, printing genuinely-earned rewards for
+each — correct (1.0), plausible-but-wrong (0.0, real captured error),
+and infinite-loop (0.0, caught by the timeout).
+
+7 new tests in `test_rl_environment.py`. 291 → 298 Python tests.
+
+**Next:** F1's real (non-toy) training infrastructure, or the actual RL
+training loop (policy-gradient updates consuming this harness's
+rewards) — the one piece of agentic RL still genuinely unbuilt.
