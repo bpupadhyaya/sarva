@@ -34,6 +34,7 @@ nav:
       - Pretraining with real resume: foundry/training.md
       - Serving a trained checkpoint (the foundry Provider adapter): foundry/inference.md
       - Recipes (named, costed configs laptop-125M to 70B): foundry/recipes.md
+      - The ablation harness (trustworthy architecture comparisons): foundry/ablation.md
 
 markdown_extensions:
   - admonition
