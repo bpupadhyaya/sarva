@@ -2,9 +2,13 @@
 
 Runs against MockProvider (no network, no API key) — the harness itself
 is what's under test here, not any real model's actual accuracy. Real
-provider grading is exercised by whoever runs `sarva eval` with a
-configured API key, same split as every other live-only concern in this
-project (tests/live/).
+grading against Anthropic/OpenAI/Google/Ollama is exercised by whoever
+runs `sarva eval` with a configured API key or a reachable local
+server, the same live-only split as everywhere else in this project
+(tests/live/). Foundry is the one provider that doesn't belong in that
+bucket -- it needs no API key or network, so
+`test_foundry_provider.py`'s own `run_benchmark()` test exercises it
+for real, right here in this automated suite.
 """
 
 from __future__ import annotations

@@ -14,11 +14,13 @@ codebase (the agent loop, the router, the CLI). Reusing it here means
 `sarva eval` grades every registered model identically, with zero
 special-casing per backend — literally "the same yardstick."
 
-The same reasoning extends forward: once §3.1's planned foundry adapter
-exists (a foundry-trained checkpoint plugged into the registry as a real
-`Provider`), it will be gradable by this exact same harness with no
-changes here. That adapter doesn't exist yet — named as real, deferred
-work, not implied to already be done.
+The same reasoning already extends all the way to the foundry track:
+`sarva.providers.foundry_provider.FoundryProvider` plugs a
+foundry-trained checkpoint into the registry as a real `Provider`, and
+it's gradable by this exact same harness with zero changes here —
+verified directly, not just claimed, by
+`tests/conformance/test_foundry_provider.py`'s own `run_benchmark()`
+test against a real (if untrained) toy checkpoint.
 
 ## What's in the box
 

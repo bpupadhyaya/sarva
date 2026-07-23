@@ -224,6 +224,36 @@ async def test_foundry_provider_generate_rejects_an_unknown_model_id(tmp_path: P
             pass
 
 
+async def test_foundry_provider_is_gradable_through_the_real_eval_harness(tmp_path: Path):
+    # eval/harness.py's own module docstring makes a direct claim: the
+    # same run_benchmark() call "will grade a foundry-trained model too
+    # the moment ... a real 'foundry adapter' ... exists." That adapter
+    # has existed since a prior milestone, but nothing had ever actually
+    # run a FoundryProvider through run_benchmark() in this automated
+    # suite -- test_eval_harness.py only ever exercises MockProvider,
+    # framing everything else as "live-only, exercised by whoever runs
+    # `sarva eval` with a configured key." Foundry doesn't belong in
+    # that bucket: unlike Anthropic/OpenAI/Google, it needs no API key
+    # or network, so there was no real reason this had to stay
+    # hand-verified-once instead of a real, permanent regression test.
+    from sarva.eval.benchmarks import ARITHMETIC
+    from sarva.eval.harness import run_benchmark
+
+    _make_bundle(tmp_path / "toy")
+    provider = FoundryProvider(tmp_path)
+
+    report = await run_benchmark(ARITHMETIC, provider, model="foundry/toy")
+
+    assert report.model == "foundry/toy"
+    assert len(report.results) == len(ARITHMETIC.cases)
+    # An untrained toy checkpoint getting arithmetic right would be the
+    # real red flag here -- the honest, expected result is 0%, the same
+    # no-fabrication discipline this project already applies to the
+    # zero-config Mock provider's own eval score.
+    assert report.accuracy == 0.0
+    await provider.close()
+
+
 def test_registry_register_adds_a_dynamic_entry_without_touching_static_ones(tmp_path: Path):
     _make_bundle(tmp_path / "toy")
     static_info = model_info_for_bundle("static", tmp_path / "toy")

@@ -3902,3 +3902,44 @@ confirmed by direct execution here), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Foundry is gradable through the eval harness — a stale docstring found in three places, and a real automated-coverage gap it was hiding
+
+`eval/harness.py`'s own module docstring said the foundry adapter
+"doesn't exist yet — named as real, deferred work, not implied to
+already be done." `docs/eval.md` said the same thing almost verbatim.
+Both were wrong: `FoundryProvider` has existed since an earlier
+milestone and is fully wired into the registry. Checking a claim
+against current source before trusting it, the same recurring theme
+this session keeps running into in different files.
+
+**The stale docstring was hiding something more concrete than itself
+being outdated:** `test_eval_harness.py`'s own docstring grouped
+foundry grading under "live-only, exercised by whoever runs `sarva
+eval` with a configured API key" — but foundry needs no API key and no
+network at all, unlike Anthropic/OpenAI/Google. It had been genuinely
+hand-verified exactly once, in an earlier session, via a manual `sarva
+eval --model foundry/toy` CLI run — and never pinned as a real,
+permanent regression test. There was no actual reason it had to stay
+in the "can't test here" bucket.
+
+New test in `test_foundry_provider.py`: trains a real tiny checkpoint,
+wraps it in `FoundryProvider`, runs it through the real
+`run_benchmark()` against the real bundled `ARITHMETIC` benchmark, and
+asserts the honest result — 0% accuracy for an untrained toy model,
+same no-fabrication discipline this project already applies to the
+zero-config Mock provider's own eval score. Three docstrings corrected
+to describe what's actually true now: `eval/harness.py`,
+`test_eval_harness.py`, and `docs/eval.md`.
+
+1 new test, 426 → 427 Python tests. `ruff check`/`format --check`
+clean.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Linux `espeak`-path real-runtime
+verification (written against documented CLI behavior but only macOS
+confirmed by direct execution here), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

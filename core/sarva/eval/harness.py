@@ -5,11 +5,11 @@ third-party models with the same yardstick)").
 
 Deliberately built against the `Provider` protocol, not against any
 specific backend: the same `run_benchmark()` call grades Anthropic,
-OpenAI, Google, Ollama, or the offline Mock provider identically, and
-will grade a foundry-trained model too the moment §3.1's planned
-"foundry adapter" (models trained by the foundry plugging into the same
-registry as first-class citizens) exists — that adapter is real,
-deferred, named work, not assumed already done. Reuses
+OpenAI, Google, Ollama, the offline Mock provider, and a foundry-trained
+model identically — `sarva.providers.foundry_provider.FoundryProvider`
+plugs models trained by `sarva_foundry` into this same registry as
+first-class citizens, and `tests/conformance/test_foundry_provider.py`
+runs a real one through this exact harness. Reuses
 `sarva.providers.base.complete()` (the existing "drain the stream, get
 the DoneEvent" helper) rather than re-implementing stream draining.
 """
