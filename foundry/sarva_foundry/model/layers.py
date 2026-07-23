@@ -14,6 +14,9 @@ implement directly.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -42,8 +45,42 @@ class RMSNorm(nn.Module):
         return self.weight * x.to(input_dtype)
 
 
+@dataclass(frozen=True)
+class RopeScalingConfig:
+    """Long-context extension (spec §3.6a: "position-interpolation/NTK
+    scaling"). Two real, distinct, named techniques — not one generic
+    "scaling factor" knob that conflates them, because they trade off
+    differently and a caller needs to actually pick:
+
+    - **"linear"** (Chen et al. 2023, position interpolation): every
+      position is divided by `factor` before computing rotation angles,
+      uniformly slowing every frequency's rotation rate. Simple, but
+      compresses the *highest*-frequency (most local, most
+      information-dense) dimensions right along with the low-frequency
+      ones, which can blur fine-grained nearby-token distinctions.
+    - **"ntk"** (bloc97's NTK-aware scaling): instead of touching
+      positions, raises the RoPE base `theta` itself. The
+      highest-frequency dimension's rotation rate is `theta^0 = 1`
+      regardless of `theta`, so that dimension is left almost untouched
+      — only the lower-frequency (longer-range) dimensions stretch.
+      Better preserves local relative-position fidelity than linear
+      scaling; the "neural tangent kernel" framing this is named after
+      is exactly this frequency-dependent behavior.
+    """
+
+    method: Literal["linear", "ntk"]
+    factor: float
+
+    def __post_init__(self) -> None:
+        if self.factor <= 0:
+            raise ValueError(f"factor must be positive, got {self.factor}")
+
+
 def precompute_rope(
-    head_dim: int, max_seq_len: int, theta: float = 10000.0
+    head_dim: int,
+    max_seq_len: int,
+    theta: float = 10000.0,
+    scaling: RopeScalingConfig | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Precompute the cos/sin tables for rotary position embeddings
     (Su et al. 2021), "rotate-half" convention (GPT-NeoX/LLaMA-style):
@@ -52,12 +89,22 @@ def precompute_rope(
     nearby positions get high-frequency (fast-changing) rotation and
     distant positions get low-frequency rotation — this is what encodes
     relative position directly into the attention dot product without any
-    learned positional parameters.
+    learned positional parameters. `scaling=None` (the default) is
+    exactly the original, unscaled table; see `RopeScalingConfig` for
+    what changes when a long-context scaling strategy is requested.
     """
     if head_dim % 2 != 0:
         raise ValueError(f"head_dim must be even for RoPE, got {head_dim}")
-    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
+
+    effective_theta = theta
+    if scaling is not None and scaling.method == "ntk":
+        effective_theta = theta * (scaling.factor ** (head_dim / (head_dim - 2)))
+
+    inv_freq = 1.0 / (effective_theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
     positions = torch.arange(max_seq_len).float()
+    if scaling is not None and scaling.method == "linear":
+        positions = positions / scaling.factor
+
     freqs = torch.outer(positions, inv_freq)  # (max_seq_len, head_dim/2)
     emb = torch.cat([freqs, freqs], dim=-1)  # (max_seq_len, head_dim)
     return emb.cos(), emb.sin()

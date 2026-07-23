@@ -2129,3 +2129,52 @@ edge case, custom-grader support). 230 → 238 Python tests.
 
 **Next:** F1's real (non-toy) training infrastructure, or the remaining
 §3.6a extensions (long-context scaling, native multimodal input).
+
+## Long-context RoPE scaling — linear interpolation and NTK-aware scaling (§3.6a)
+
+Closes the second item on §3.6a's "position-interpolation/NTK scaling"
+line (MoE closed the first, native multimodal input remains). Two real,
+distinct, named techniques, not a single generic "scale factor" knob —
+implemented as `RopeScalingConfig(method="linear"|"ntk", factor=...)`,
+threaded through `precompute_rope` → `GroupedQueryAttention` →
+`TransformerConfig.rope_scaling` (default `None`, output bit-identical
+to before this feature existed — confirmed by a dedicated regression
+test, not just assumed from the diff).
+
+**Linear** (Chen et al. 2023, position interpolation): divides every
+position by `factor` before computing rotation angles.
+**NTK-aware** (bloc97): raises the RoPE base `theta` itself instead of
+touching positions. The distinguishing, testable property: the
+highest-frequency dimension's rotation rate is `theta^0 = 1` regardless
+of `theta`, so NTK leaves it **exactly** bit-identical to the unscaled
+table at every position, while linear scaling (which divides every
+position uniformly) visibly changes it — two dedicated tests prove this
+directly rather than asserting it in a docstring, plus a matching pair
+proving both techniques *do* stretch the lowest-frequency (long-range)
+dimension, so neither is a no-op either. Relative-position invariance
+(the property RoPE exists for) is verified to still hold under both
+scaling configs, same style as the existing unscaled-table test.
+
+**A real numeric-precision lesson while writing `examples/08_long_context_rope_scaling.py`:**
+the first draft printed `cos(angle)` at a handful of short positions to
+show the effect — and for the lowest-frequency dimension, every column
+printed the same value to 4 decimal places, because real RoPE
+frequencies are tiny by design (that's *why* long-context scaling
+matters at all — the effect only becomes visually significant over
+thousands of positions, not dozens). Caught by actually running the
+draft and looking at the output, not assumed correct from the code.
+Fixed by printing what's honestly demonstrable at toy scale instead:
+raw per-dimension frequency *ratios* for NTK (position-independent,
+exactly 1.0 at dim 0 and exactly `1/factor` at the lowest dimension —
+visible without needing any position at all) and the exact
+position-index equivalence linear scaling produces (`cos` at scaled
+index `i*factor` matching `cos` at unscaled index `i` to 6 decimal
+places). A real forward pass through an NTK-scaled model closes the
+example, proving the config wiring produces a runnable model, not just
+a standalone table function.
+
+9 new tests in `tests/foundry/test_rope_scaling.py`, including a full
+trainability test with linear scaling active. 238 → 247 Python tests.
+
+**Next:** F1's real (non-toy) training infrastructure, or native
+multimodal input — the last named piece of §3.6a's architecture list.

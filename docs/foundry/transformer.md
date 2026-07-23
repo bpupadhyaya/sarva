@@ -134,11 +134,44 @@ incremental rebalancing the mechanism is actually designed to produce.
 shows this directly on a real (if toy-scale) training run, not just in
 an isolated test.
 
+## Long-context scaling: linear interpolation and NTK-aware RoPE
+
+`RopeScalingConfig` is the second frontier-class extension from §3.6a's
+list ("position-interpolation/NTK scaling"). Swaps in via
+`TransformerConfig.rope_scaling` — leave it `None` (the default) and
+`precompute_rope`'s output is bit-for-bit identical to before this
+feature existed. Two real, distinct, named techniques, not one generic
+"scale factor" knob:
+
+- **Linear** (Chen et al. 2023, position interpolation): every position
+  is divided by `factor` before computing rotation angles — the table
+  covers `factor` times as many raw positions while every frequency
+  rotates proportionally slower, so the model never sees a rotation
+  angle outside the range it saw in training. Simple, but compresses the
+  *highest*-frequency (most local) dimension right along with the low-
+  frequency ones.
+- **NTK-aware** (bloc97): instead of touching positions, raises the RoPE
+  base `theta` itself. The highest-frequency dimension's rotation rate
+  is `theta^0 = 1` regardless of `theta`, so NTK scaling leaves that
+  dimension **exactly** unaffected — only the lower-frequency
+  (longer-range) dimensions stretch. `test_ntk_scaling_leaves_the_highest_frequency_dimension_unchanged`
+  pins this directly (bit-identical to the unscaled table at dimension
+  0, for every position), and its direct contrast,
+  `test_linear_scaling_does_change_the_highest_frequency_dimension`,
+  proves linear scaling genuinely doesn't have this property — these are
+  two different techniques, not the same math wearing two names.
+
+Both preserve RoPE's core guarantee — a rotated dot product still
+depends only on relative position, never absolute — for a *fixed*
+scaling config, verified the same way the unscaled table's relative-
+position invariance is verified in `test_model.py`.
+
 ## Try it
 
 ```bash
-uv run python examples/03_train_toy_transformer.py     # dense baseline
-uv run python examples/07_moe_transformer.py            # MoE, watch the load balance itself
+uv run python examples/03_train_toy_transformer.py       # dense baseline
+uv run python examples/07_moe_transformer.py              # MoE, watch the load balance itself
+uv run python examples/08_long_context_rope_scaling.py    # linear vs NTK RoPE scaling, made visible
 ```
 
 The first trains the real byte-level BPE tokenizer (see the
@@ -150,11 +183,18 @@ end — memorizing (intentionally, at this toy scale) the sentence it was
 trained on. The second does the same training loop with an
 8-expert-per-layer MoE feedforward instead, printing each layer's
 per-expert token counts every 50 steps so you can watch the load
-actually flatten out as `update_expert_bias()` runs after each step.
+actually flatten out as `update_expert_bias()` runs after each step. The
+third prints the actual per-dimension frequency ratios NTK scaling
+produces (dimension 0's ratio is exactly 1.0, the lowest dimension's is
+exactly `1/factor`) and the exact position-index equivalence linear
+scaling produces — a training run wouldn't be the honest way to show
+either property at toy scale (extending real context length needs a
+real long-context fine-tuning pass this project doesn't have data or
+compute for yet), but the math itself is fully visible today.
 
 ## What's next
 
 Pretraining data pipelines, a real (non-toy) training loop with
-checkpointing, and the remaining frontier-class extensions from §3.6a —
-long-context scaling, native multimodal input — build on this baseline
-rather than replacing it.
+checkpointing, and the remaining frontier-class extension from §3.6a —
+native multimodal input — build on this baseline rather than replacing
+it.

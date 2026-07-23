@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from torch import Tensor, nn
 
 from sarva_foundry.model.attention import GroupedQueryAttention
-from sarva_foundry.model.layers import RMSNorm, SwiGLU, default_swiglu_hidden_dim
+from sarva_foundry.model.layers import RMSNorm, RopeScalingConfig, SwiGLU, default_swiglu_hidden_dim
 from sarva_foundry.model.moe import MoEConfig, MoEFeedForward
 
 
@@ -26,6 +26,7 @@ class TransformerConfig:
     n_kv_heads: int = 4
     max_seq_len: int = 2048
     rope_theta: float = 10000.0
+    rope_scaling: RopeScalingConfig | None = None  # None (default): unscaled RoPE, unchanged
     norm_eps: float = 1e-6
     hidden_dim: int | None = None  # default: default_swiglu_hidden_dim(dim)
     moe: MoEConfig | None = None  # None (default): dense SwiGLU FFN, unchanged
@@ -52,6 +53,7 @@ class TransformerBlock(nn.Module):
             head_dim=config.head_dim,
             max_seq_len=config.max_seq_len,
             rope_theta=config.rope_theta,
+            rope_scaling=config.rope_scaling,
         )
         self.mlp_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.mlp: nn.Module

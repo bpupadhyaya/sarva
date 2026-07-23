@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from sarva_foundry.model.layers import apply_rope, precompute_rope
+from sarva_foundry.model.layers import RopeScalingConfig, apply_rope, precompute_rope
 
 
 def repeat_kv(x: Tensor, n_rep: int) -> Tensor:
@@ -39,6 +39,7 @@ class GroupedQueryAttention(nn.Module):
         head_dim: int,
         max_seq_len: int,
         rope_theta: float = 10000.0,
+        rope_scaling: RopeScalingConfig | None = None,
     ):
         super().__init__()
         if n_heads % n_kv_heads != 0:
@@ -53,7 +54,7 @@ class GroupedQueryAttention(nn.Module):
         self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
         self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
 
-        cos, sin = precompute_rope(head_dim, max_seq_len, rope_theta)
+        cos, sin = precompute_rope(head_dim, max_seq_len, rope_theta, scaling=rope_scaling)
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
 
