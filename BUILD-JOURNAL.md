@@ -2086,3 +2086,46 @@ deferred integration work, named rather than assumed.
 **Next:** F1's real (non-toy) training infrastructure, an eval harness
 (§3.6g), or the remaining §3.6a extensions (long-context scaling, native
 multimodal input).
+
+## Eval harness — grading every model with the same yardstick (§3.6g)
+
+Closes §3.6g's named gap: "benchmark harness shared with the registry
+(grades our models and third-party models with the same yardstick)."
+
+`sarva.eval.harness.run_benchmark(benchmark, provider, model)` is
+deliberately built against the `Provider` protocol, not any specific
+backend — the same abstraction that already makes Anthropic/OpenAI/
+Google/Ollama/Mock interchangeable everywhere else in this codebase
+(the agent loop, the router, the CLI). One function call grades any of
+them identically; the moment §3.1's planned foundry adapter exists (a
+foundry-trained checkpoint plugged into the registry as a real
+`Provider` — not built yet, named honestly as real deferred work), it
+becomes gradable by this exact same harness with zero changes here.
+Reuses `sarva.providers.base.complete()` (the existing "drain the
+stream, get the `DoneEvent`" helper) instead of reimplementing stream
+draining.
+
+`ARITHMETIC`: a bundled, ten-case benchmark — real arithmetic problems,
+each answer computed and hand-checked, not generated and assumed
+correct. Deliberately small, not a claim to GSM8K-scale coverage, same
+"real, not a fabricated placeholder" discipline as the corpus pipeline's
+length filter and the degraders' metadata-only reports elsewhere in this
+project. `contains_match` (checking whether the expected answer appears
+anywhere in the output) is the default grader rather than
+`exact_match`, since real models rarely answer with *only* the expected
+string — an exact-match default would mostly measure formatting luck.
+A case whose request fails (`ProviderError` — rate limit, auth, etc.) is
+scored incorrect with the error recorded as its output, rather than
+aborting the whole benchmark run; one flaky case shouldn't hide every
+other case's real result.
+
+Wired into the CLI as a real, runnable command: `sarva eval [--model
+ID]` grades every available model (or one, filtered) against the bundled
+benchmark and prints accuracy + correct/total side by side — the
+roadmap language made concrete rather than left as a library-only
+capability. 8 new tests in `tests/conformance/test_eval_harness.py`
+(grader correctness, scoring math, the provider-error path, empty-report
+edge case, custom-grader support). 230 → 238 Python tests.
+
+**Next:** F1's real (non-toy) training infrastructure, or the remaining
+§3.6a extensions (long-context scaling, native multimodal input).

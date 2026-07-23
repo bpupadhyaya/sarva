@@ -186,6 +186,38 @@ def models_cmd() -> None:
         console.print(f"\\[{mark}] {m.id:20s} {m.display_name}")
 
 
+@app.command("eval")
+def eval_cmd(
+    model: str | None = typer.Option(
+        None, "--model", help="Only evaluate this model id (default: every available model)."
+    ),
+) -> None:
+    """Grade available models against the bundled benchmark — the same
+    yardstick for every model, whichever provider it comes from."""
+    asyncio.run(_eval(model))
+
+
+async def _eval(model_filter: str | None) -> None:
+    from sarva.eval import ARITHMETIC, run_benchmark
+
+    router = _build_router()
+    providers = _build_providers()
+    model_ids = [model_filter] if model_filter else sorted(router.available)
+
+    console.print(f"Benchmark: {ARITHMETIC.name} ({len(ARITHMETIC.cases)} cases)\n")
+    for model_id in model_ids:
+        info = router.registry.get(model_id)
+        provider = providers.get(info.provider)
+        if provider is None:
+            console.print(
+                f"[yellow]skip[/yellow]  {model_id} (provider {info.provider!r} not configured)"
+            )
+            continue
+        report = await run_benchmark(ARITHMETIC, provider, model=model_id)
+        correct = sum(r.correct for r in report.results)
+        console.print(f"{model_id:25s} {report.accuracy:.0%}  ({correct}/{len(report.results)})")
+
+
 @sessions_app.command("list")
 def sessions_list() -> None:
     """List saved chat sessions and how many messages each holds."""

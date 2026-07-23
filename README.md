@@ -10,21 +10,26 @@ point as the tool itself.
 
 ## Status
 
-Early — the core engine (provider layer, agent loop, built-in tools
+v0.1.0 (draft release) — the core engine (provider layer with real
+Anthropic/OpenAI/Google/Ollama adapters, agent loop, built-in tools
 including session persistence and semantic memory recall,
-image/audio/video degradation for models that can't handle a modality),
-the FastAPI server (REST + WebSocket, with real tool-confirmation over
-the socket), and a web UI with a working chat and tool-approval flow are
-scaffolded and tested; the CLI works end to end. The desktop app (Tauri)
-bundles and auto-starts its own backend, with real cross-platform
-release bundles (macOS/Linux/Windows) — see below for the one-click flow
-and its known gaps. The from-scratch model-training track (`foundry/`)
-has a runnable (toy-scale) pretraining pipeline: local-file corpus
-sourcing (exact + near-duplicate dedup, quality filtering, provenance/
-license tracking), a byte-level BPE tokenizer, a dense decoder-only
-transformer (RoPE, RMSNorm, SwiGLU, GQA), and a training loop with a
-warmup+cosine LR schedule and bit-identical checkpoint/resume — see
-`examples/04_pretrain_and_resume.py`, or
+image/audio/video degradation for models that can't handle a modality,
+an MCP client so the ecosystem's tools plug in with `sarva run
+--mcp-server`, and a benchmark harness that grades every model with the
+same yardstick via `sarva eval`), the FastAPI server (REST + WebSocket,
+with real tool-confirmation over the socket), and a web UI with a
+working chat and tool-approval flow are scaffolded and tested; the CLI
+works end to end. The desktop app (Tauri) bundles and auto-starts its
+own backend, with real cross-platform release bundles
+(macOS/Linux/Windows) — see below for the one-click flow and its known
+gaps. The from-scratch model-training track (`foundry/`) has a runnable
+(toy-scale) pretraining pipeline: local-file corpus sourcing (exact +
+near-duplicate dedup, quality filtering, provenance/license tracking), a
+byte-level BPE tokenizer, a dense decoder-only transformer (RoPE,
+RMSNorm, SwiGLU, GQA) with an optional Mixture-of-Experts feedforward
+(fine-grained experts, a shared expert, aux-loss-free load balancing),
+and a training loop with a warmup+cosine LR schedule and bit-identical
+checkpoint/resume — see `examples/04_pretrain_and_resume.py`, or
 `examples/06_real_corpus_pretraining.py` for the same pipeline run
 against real, sourced, licensed public-domain text instead of toy
 sentences. Web-scale corpus sourcing and distributed training aren't

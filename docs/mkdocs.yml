@@ -22,6 +22,7 @@ nav:
   - Core Engine:
       - Memory (sessions + semantic recall): memory.md
       - MCP client (plugging in the ecosystem's tools): mcp.md
+      - Eval (grading every model the same way): eval.md
   - Foundry:
       - The tokenizer, from scratch: foundry/tokenizer.md
       - The transformer, from scratch: foundry/transformer.md
