@@ -81,35 +81,37 @@ needing an unsupported modality still fails outright exactly as it did
 before degraders existed. Nobody gets a lower-fidelity answer than they
 explicitly asked for.
 
-## An honest gap: `DocumentBlock` is typed but not processed
+## Where "never silently drop" stops, and how that boundary got closed
 
-`DocumentBlock` (PDFs, docx, ...) exists in the type system —
-`models.yaml` even marks `claude-opus-4-8` as supporting `document`
-input — but there is no degrader for it, and no provider adapter
-translates it. A `DocumentBlock` reaching `AnthropicProvider`,
-`OpenAIProvider`, or `GoogleProvider` today is silently absent from the
-translated request: each adapter's block-translation function is a
-plain `if`/`elif` chain over the block types it knows how to handle,
-with no `else` branch — an unrecognized block type (currently
-`DocumentBlock`, and in practice `ThinkingBlock` too, on the second and
-later turns of a real multi-turn conversation with an extended-thinking
-model, since the agent loop appends the full assistant message —
-thinking block included — back into history for the next turn) is
-simply skipped rather than raised on.
+`degrade_message`'s "never silently drop" guarantee holds at the
+degradation layer — a block that reaches a provider adapter is one
+`degrade_message` already confirmed the target model's declared
+modality support *should* cover. It turned out the *adapters
+themselves* were a separate place that same principle didn't reach:
+each block-translation function (`_to_anthropic_message`,
+`_to_openai_messages`, `_to_gemini_content`) was a plain `if`/`elif`
+chain over the block types it knew how to handle, with no `else`
+branch — an unrecognized block type was simply skipped, not raised on.
+`DocumentBlock` (PDFs, docx, ... — typed since T0, still with no
+degrader and no adapter support) hit this every time; `ThinkingBlock`
+hit it too, on the second and later turns of any real multi-turn
+conversation with an extended-thinking model, since the agent loop
+appends the full assistant message — thinking block included — back
+into history for the next turn.
 
-This is a real, named exception to `degrade_message`'s own "never
-silently drop" guarantee — that guarantee holds at the degradation
-layer (a block that reaches a provider adapter is one `degrade_message`
-already confirmed the target model's declared modality support
-*should* cover), not at the lower-level wire-translation step inside
-each adapter, which turned out to be a separate place the same
-principle doesn't currently reach. Named here rather than left for a
-reader to discover the hard way; not fixed in this entry, since making
-every adapter raise loudly on an unhandled block type has a real
-behavioral consequence for today's multi-turn thinking-model
-conversations (they'd start raising on turn two instead of silently
-continuing without the thinking content) that needs its own careful
-pass, not a rushed side-fix.
+This is now closed, with the two cases handled differently on purpose:
+every adapter's translation function has an explicit
+`elif isinstance(b, ThinkingBlock): continue` — a **deliberate, named**
+skip, since none of the three backends currently accept a
+caller-supplied reasoning trace back on the next turn anyway (there's
+nothing meaningful to round-trip yet) — followed by a catch-all
+`else: raise ValueError(...)` for genuinely unhandled types, currently
+`DocumentBlock` and any future `ContentBlock` variant that gets added
+without adapter support catching up first. The distinction matters:
+dropping a thinking trace the model can't use anyway is harmless;
+silently omitting a document the user actually attached and having the
+model answer as though it read it is a materially misleading response,
+not a cosmetic gap — so that case fails loudly instead.
 
 ## Build it yourself
 
@@ -120,9 +122,10 @@ pass, not a rushed side-fix.
   proves the full documented chain (video → sampled image frames → text)
   via `degrade_message`'s own recursion, not just
   `VideoToTextDegrader.degrade()` checked in isolation.
-- Construct a `Message` with a `DocumentBlock` and run it through
-  `AnthropicProvider`'s translation function directly — watch it come
-  back with the document silently missing, the gap this chapter names.
+- Construct a `Message` with a `DocumentBlock` and run it through any
+  of the three adapters' translation functions directly — watch it
+  raise `ValueError` naming exactly which block type it can't
+  translate, instead of silently vanishing.
 - Try `sarva chat "..." --image path/to/photo.png` against a
   text-only-routed model with `degraders=default_degraders()` wired in
   (see `cli.py`) and watch the real fallback: route to a text-capable

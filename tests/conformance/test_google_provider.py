@@ -8,7 +8,16 @@ covered by tests/live/test_live_providers.py.
 
 from __future__ import annotations
 
-from sarva.multimodal.content import ImageBlock, Message, TextBlock, ToolCallBlock, ToolResultBlock
+import pytest
+from sarva.multimodal.content import (
+    DocumentBlock,
+    ImageBlock,
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 from sarva.providers.google_provider import _to_gemini_content, _tool_call_names
 
 
@@ -80,3 +89,29 @@ async def test_tool_result_error_uses_the_error_key():
     )
     out = await _to_gemini_content(m, {"t1": "explode"})
     assert out.parts[0].function_response.response == {"error": "boom"}
+
+
+async def test_thinking_block_is_explicitly_dropped_not_translated():
+    # Deliberate, named skip -- Gemini surfaces "thought" parts on the
+    # way out (ThinkingDeltaEvent) but there's no documented way to feed
+    # one back in as request content yet. Verifies it doesn't appear in
+    # translated output and doesn't raise.
+    m = Message(role="assistant", content=[ThinkingBlock(text="pondering"), TextBlock(text="hi")])
+    out = await _to_gemini_content(m, {})
+    assert len(out.parts) == 1
+    assert out.parts[0].text == "hi"
+
+
+async def test_unsupported_block_type_raises_instead_of_silently_dropping():
+    # DocumentBlock has no wire-format mapping in this adapter yet.
+    # Silently omitting it would send the request missing content the
+    # caller believes is present -- must raise loudly instead.
+    m = Message(
+        role="user",
+        content=[
+            TextBlock(text="see attached"),
+            DocumentBlock(media_type="application/pdf", data=b"x"),
+        ],
+    )
+    with pytest.raises(ValueError, match="DocumentBlock"):
+        await _to_gemini_content(m, {})

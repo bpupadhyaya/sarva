@@ -2554,3 +2554,51 @@ real finding named honestly rather than fixed hastily.
 real fix for the silent-block-drop gap this chapter named (needs its
 own careful pass), or continuing the book (memory and packaging for
 humans are Chapters 5+).
+
+## The real fix: provider adapters no longer silently drop unhandled content blocks
+
+Closes the gap the last entry named and deliberately didn't rush a fix
+for. The careful pass it needed: distinguish a **deliberate, named**
+skip from an **unknown, dangerous** one, rather than treating every
+unhandled block type identically.
+
+All three adapters' translation functions (`_to_anthropic_message`,
+`_to_openai_messages`, `_to_gemini_content`) now have an explicit
+`elif isinstance(b, ThinkingBlock): continue` — a real, intentional
+skip, since none of the three backends currently accept a
+caller-supplied reasoning trace back on a later turn anyway, so there's
+nothing meaningful to round-trip yet — followed by a catch-all
+`else: raise ValueError(f"... cannot translate a {type(b).__name__!r} content block ...")`.
+`DocumentBlock` now hits that catch-all and raises clearly, instead of
+silently vanishing from the outgoing request.
+
+**Verified safe before writing a single test, not assumed safe from
+reading the diff:** grepped the whole tree first — `DocumentBlock` is
+referenced nowhere outside `content.py` itself (no test, no call site
+anywhere constructs one), so making the adapters raise on it changes
+zero existing behavior. `ThinkingBlock` is referenced in `mock.py` (as
+an *output* type) and in `test_content.py` (pure model round-trip
+tests, not provider translation), with no test anywhere asserting a
+`ThinkingBlock` survives translation — the explicit skip preserves
+today's real (if previously *accidental*) behavior exactly, just makes
+it an intentional line of code instead of an implicit gap in an
+`if`/`elif` chain. Confirmed empirically too: ran a standalone script
+against all three adapters' real translation functions before touching
+the test files, watching `DocumentBlock` raise and `ThinkingBlock` drop
+cleanly in each.
+
+The distinction encoded in the fix, not just described in prose:
+dropping a thinking trace the model can't use anyway is harmless;
+silently omitting a document the user actually attached — and letting
+the model answer as though it read it — is a materially misleading
+response, not a cosmetic gap. One case stays a silent skip because
+that's genuinely correct; the other now fails loudly because silence
+there was never correct.
+
+6 new tests (2 per adapter — the deliberate-skip case and the
+raises-loudly case), all 285 pre-existing tests still pass unchanged
+(291 total). `docs/multimodal.md` updated to describe the fix instead
+of the open gap.
+
+**Next:** F1's real (non-toy) training infrastructure, agentic RL, or
+continuing the book (memory and packaging for humans are Chapters 5+).

@@ -49,6 +49,7 @@ from sarva.multimodal.content import (
     ImageBlock,
     Message,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultBlock,
 )
@@ -112,6 +113,28 @@ async def _to_gemini_content(m: Message, call_names: dict[str, str]) -> types.Co
                         id=b.tool_call_id, name=name, response=response
                     )
                 )
+            )
+        elif isinstance(b, ThinkingBlock):
+            # Deliberately, explicitly dropped -- not silently: Gemini's
+            # "thought" parts are surfaced on the way out (see
+            # ThinkingDeltaEvent in generate() below) but there's no
+            # documented way to feed one back in as part-of-request
+            # content yet. Explicit here so it's a named, intentional
+            # skip rather than an unhandled type quietly falling through
+            # with no case at all.
+            continue
+        else:
+            # A block type this adapter has no translation for at all
+            # (e.g. DocumentBlock, which has neither a degrader nor
+            # adapter support yet). Raising here is deliberate: silently
+            # omitting it would send the request missing content the
+            # caller believes is present, and the model would answer as
+            # if it had read something it never received -- a materially
+            # misleading response, not a cosmetic gap. See
+            # docs/multimodal.md for the fuller story.
+            raise ValueError(
+                f"GoogleProvider cannot translate a {type(b).__name__!r} content block "
+                "(no wire-format mapping exists for it yet)"
             )
     return types.Content(role=role, parts=parts)
 

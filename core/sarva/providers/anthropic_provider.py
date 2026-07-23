@@ -87,9 +87,29 @@ async def _to_anthropic_message(m: Message) -> dict[str, Any]:
                     "is_error": b.is_error,
                 }
             )
-        # ThinkingBlock round-trip (required when continuing on the same
-        # model) lands when the agent loop starts threading provider_data
-        # back through GenerateRequest — tracked for T2.
+        elif isinstance(b, ThinkingBlock):
+            # Deliberately, explicitly dropped -- not silently: round-trip
+            # (required to continue thinking on the same model) lands when
+            # the agent loop starts threading provider_data back through
+            # GenerateRequest, tracked as real deferred work, not yet
+            # built. Explicit here so it's an intentional, named skip
+            # rather than an unhandled type falling through with no case
+            # at all -- see the `else` below for what happens to a block
+            # type that has no such justification.
+            continue
+        else:
+            # A block type this adapter has no translation for at all
+            # (e.g. DocumentBlock, which has neither a degrader nor
+            # adapter support yet). Raising here is deliberate: silently
+            # omitting it would send the request to Claude missing
+            # content the caller believes is present, and the model
+            # would answer as if it had read something it never
+            # received -- a materially misleading response, not a
+            # cosmetic gap. See docs/multimodal.md for the fuller story.
+            raise ValueError(
+                f"AnthropicProvider cannot translate a {type(b).__name__!r} content block "
+                "(no wire-format mapping exists for it yet)"
+            )
     return {"role": m.role, "content": blocks}
 
 

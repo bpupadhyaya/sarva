@@ -13,7 +13,16 @@ from __future__ import annotations
 
 import base64
 
-from sarva.multimodal.content import ImageBlock, Message, TextBlock, ToolCallBlock, ToolResultBlock
+import pytest
+from sarva.multimodal.content import (
+    DocumentBlock,
+    ImageBlock,
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 from sarva.providers.anthropic_provider import _to_anthropic_message
 
 
@@ -55,3 +64,26 @@ async def test_tool_call_and_result_translation():
         "content": "sunny",
         "is_error": False,
     }
+
+
+async def test_thinking_block_is_explicitly_dropped_not_translated():
+    # Deliberate, named skip -- not yet round-tripped back to the API.
+    # Verifies it doesn't appear in translated output and doesn't raise.
+    m = Message(role="assistant", content=[ThinkingBlock(text="pondering"), TextBlock(text="hi")])
+    out = await _to_anthropic_message(m)
+    assert out["content"] == [{"type": "text", "text": "hi"}]
+
+
+async def test_unsupported_block_type_raises_instead_of_silently_dropping():
+    # DocumentBlock has no wire-format mapping in this adapter yet.
+    # Silently omitting it would send the request missing content the
+    # caller believes is present -- must raise loudly instead.
+    m = Message(
+        role="user",
+        content=[
+            TextBlock(text="see attached"),
+            DocumentBlock(media_type="application/pdf", data=b"x"),
+        ],
+    )
+    with pytest.raises(ValueError, match="DocumentBlock"):
+        await _to_anthropic_message(m)
