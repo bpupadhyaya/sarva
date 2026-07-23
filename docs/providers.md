@@ -165,6 +165,25 @@ support it, or their pricing) — the wire-level translation is real and
 tested, wiring a specific verified model in is separate, one-line
 follow-up work.
 
+### Video-in: native understanding, not just sampled frames
+
+The design doc's own T5 roadmap line names "MCP client, video input" as
+a still-open deliverable. Until now, a `VideoBlock` reaching any
+provider had exactly one path: `VideoToTextDegrader` sampling up to 4
+frames into `ImageBlock`s first (see the multimodal chapter) — real and
+useful, but a lossy fallback, not native understanding. `google_provider.py`
+now also translates `VideoBlock` directly, via the identical
+`inline_data`/`Blob` shape already used for images — Gemini's own real,
+native video understanding, sent as-is rather than pre-degraded.
+The degrader stays exactly as useful as before for every other
+provider, or for a caller who explicitly wants the frame-sampled
+fallback; this is additive. Honestly scoped on size: inline `Blob` data
+is base64-encoded into the request body, which Gemini's documented
+limits cap around 20MB total — fine for short clips, but a real caller
+with a long video needs Gemini's separate Files API (upload once,
+reference by URI), named as real, deferred follow-up rather than
+silently mishandled.
+
 ## Build it yourself
 
 - Run `sarva models` to see the registry as loaded — which ids exist,

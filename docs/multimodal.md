@@ -77,7 +77,13 @@ its own worth trusting differently:
   PyAV (statically-bundled decoder libraries, no system `ffmpeg`
   dependency) to sample up to 4 evenly-spaced real frames as
   `ImageBlock`s plus the real decoded duration. Undecodable bytes fall
-  back to the same declared-metadata report the other two use.
+  back to the same declared-metadata report the other two use. Since
+  the providers chapter's own "Video-in" section, this is no longer the
+  only path for a `VideoBlock` — `google_provider.py` now sends genuine
+  video directly to Gemini's native video understanding instead of
+  degrading to frames first, when that adapter is the one in play. This
+  degrader remains exactly as useful for every other provider, or a
+  caller who wants the frame-sampled fallback explicitly.
 
 `default_degraders()` wires all three into every real `AgentLoop` call
 site (CLI, server) — but degradation itself is opt-in at the loop level

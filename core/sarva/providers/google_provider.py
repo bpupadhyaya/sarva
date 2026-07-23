@@ -26,6 +26,22 @@ reachable code with no registry entry routing a real request to it —
 the same "adapter exists, wiring a specific verified model in is
 separate" scoping this file already applies to Gemini generally.
 
+Also translates native video-in: `VideoBlock` -> `types.Blob(data=...,
+mime_type=...)`, the exact same `inline_data` shape already used for
+images, sent to Gemini instead of degraded to sampled frames first.
+Named directly in the design doc's own T5 roadmap line ("MCP client,
+video input") as a still-open deliverable; `sarva.multimodal.degraders.
+VideoToTextDegrader` (frame-sampling fallback for models with no native
+video support) stays exactly as useful as before for every OTHER
+model, or for a caller who skips this adapter's real path -- this is
+additive, not a replacement. Honestly scoped on size: inline `Blob`
+data is base64-encoded in the wire request, which Gemini's documented
+limits cap at roughly 20MB total request size -- fine for the short
+clips this project's own examples/tests use, but a real caller with a
+long video would need Gemini's separate Files API (upload once,
+reference by URI), left as real, separate, deferred follow-up rather
+than silently mishandled here.
+
 Same deliberate scope boundary as openai_provider.py: no entries added
 to `providers/data/models.yaml`. That file states it's "re-validated at
 every release," and this session has no verified-current Gemini model
@@ -65,6 +81,7 @@ from sarva.multimodal.content import (
     ThinkingBlock,
     ToolCallBlock,
     ToolResultBlock,
+    VideoBlock,
 )
 from sarva.multimodal.fetch import resolve_media_bytes
 from sarva.providers.base import (
@@ -113,6 +130,14 @@ async def _to_gemini_content(m: Message, call_names: dict[str, str]) -> types.Co
             # images work too, not just data/path.
             image_bytes = await resolve_media_bytes(b)
             blob = types.Blob(data=image_bytes, mime_type=b.media_type)
+            parts.append(types.Part(inline_data=blob))
+        elif isinstance(b, VideoBlock):
+            # Same inline_data shape as images -- Gemini's real, native
+            # video understanding, not a degraded-to-frames fallback.
+            # See the module docstring for the real ~20MB inline-request
+            # size caveat.
+            video_bytes = await resolve_media_bytes(b)
+            blob = types.Blob(data=video_bytes, mime_type=b.media_type)
             parts.append(types.Part(inline_data=blob))
         elif isinstance(b, ToolCallBlock):
             call = types.FunctionCall(id=b.id, name=b.name, args=b.arguments)

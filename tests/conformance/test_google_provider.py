@@ -17,6 +17,7 @@ from sarva.multimodal.content import (
     ThinkingBlock,
     ToolCallBlock,
     ToolResultBlock,
+    VideoBlock,
 )
 from sarva.providers.google_provider import _to_gemini_content, _tool_call_names
 
@@ -41,6 +42,19 @@ async def test_image_block_translation_round_trips_raw_bytes():
 
     part = out.parts[0]
     assert part.inline_data.mime_type == "image/png"
+    assert part.inline_data.data == raw
+
+
+async def test_video_block_translation_round_trips_raw_bytes():
+    # Native video-in: VideoBlock -> the same inline_data Blob shape
+    # images already use, sent directly to Gemini rather than degraded
+    # to sampled frames first.
+    raw = b"\x00\x00\x00\x18ftypmp42 fake mp4 bytes"
+    m = Message(role="user", content=[VideoBlock(media_type="video/mp4", data=raw)])
+    out = await _to_gemini_content(m, {})
+
+    part = out.parts[0]
+    assert part.inline_data.mime_type == "video/mp4"
     assert part.inline_data.data == raw
 
 

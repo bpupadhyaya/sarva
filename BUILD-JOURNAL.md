@@ -3749,3 +3749,55 @@ confirmed by direct execution here), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Native video-in — closing T5's other still-open roadmap line
+
+The design doc's own T5 roadmap line names "MCP client, video input" as
+a still-open deliverable; MCP shipped a few milestones back, video
+input never had a native path — every `VideoBlock` had exactly one
+route to any model, `VideoToTextDegrader` sampling up to 4 frames into
+`ImageBlock`s first, confirmed by `grep -n "VideoBlock" core/sarva/
+providers/*.py` returning nothing before starting. Real and useful, but
+lossy: a model that genuinely understands video motion/audio/temporal
+structure never got the chance to.
+
+`google_provider.py` now translates `VideoBlock` directly too, via the
+identical `inline_data`/`Blob` shape already used for `ImageBlock` —
+the same wire mechanism, just a different media type, since Gemini's
+own API treats inline video and inline images identically at the
+`Part` level. Chose Gemini for the same reason image-out did: it's the
+one provider among the three with genuine native video understanding
+built into the same chat-completion call every other content type
+already goes through — Anthropic and OpenAI's chat APIs have no video
+input support to translate to at all.
+
+**Additive, not a replacement:** `VideoToTextDegrader` stays exactly as
+useful as before for every other provider, or for a caller who
+explicitly wants the frame-sampled fallback (e.g. a text-only model, or
+before this adapter existed). Nothing about the degradation opt-in
+mechanism (`AgentLoop(degraders=...)`) changed — a video sent to
+Gemini through the normal flow now just has a real native path
+available where previously it had none.
+
+**Honestly scoped on size, not silently assumed unlimited:** inline
+`Blob` data is base64-encoded directly into the request body, which
+Gemini's own documented limits cap around 20MB total request size —
+fine for the short clips this project's tests and examples use, but a
+real caller with a longer video needs Gemini's separate Files API
+(upload once, reference by URI), named directly as real, deferred
+follow-up work rather than something this change silently mishandles.
+
+1 new test (`test_video_block_translation_round_trips_raw_bytes`,
+mirroring the existing image-block translation test exactly). 421 → 422
+Python tests. `ruff check`/`format --check` clean. `docs/providers.md`
+gained a new "Video-in" section; `docs/multimodal.md`'s video-degrader
+description cross-references it.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Linux `espeak`-path real-runtime
+verification (written against documented CLI behavior but only macOS
+confirmed by direct execution here), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
