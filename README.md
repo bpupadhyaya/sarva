@@ -128,6 +128,9 @@ docs/             # the accompanying book: "Building a Multimodal AGI Tool"
 scripts/          # build-web.sh, and future setup/release scripts
 ```
 
+Build/preview the book locally: `pip install mkdocs mkdocs-material && mkdocs serve`
+(from the repo root — `mkdocs.yml` lives there, `docs_dir` defaults to `docs/`).
+
 ## License
 
 MIT.

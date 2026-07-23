@@ -4091,3 +4091,56 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## The docs site had never actually been built — found while sweeping docs/index.md for staleness
+
+Started this as a routine staleness sweep of `docs/index.md` (the
+book's own front page): "Chapter 4... the three real degraders
+(image/audio/video)" was stale (document makes four, and audio now
+does real transcription, both from earlier milestones this session);
+"Chapter 6... the CLI's seven commands... no Windows sidecar-kill
+signal handling yet" was stale on both counts (nine commands now,
+including `speak`; the Windows sidecar leak on graceful close is
+fixed, only the abrupt-kill signal path remains genuinely open). Fixed
+both.
+
+**Verifying those fixes actually rendered led to a much bigger, real
+finding:** `mkdocs build` had never once been run against this
+project's `docs/mkdocs.yml` — no CI job builds it, and every chapter
+across this whole session was written and reviewed as plain Markdown,
+never through the actual site generator. Installed `mkdocs`/
+`mkdocs-material` for real and ran a build: it failed immediately,
+before rendering a single page — `mkdocs.yml` lived inside `docs/`
+itself with the default `docs_dir` (which looks for a `docs/`
+subdirectory *relative to the config file*, i.e. a nonexistent nested
+`docs/docs/`), not because any chapter's content was wrong. The book
+this project's own positioning is built around had a config bug that
+made it entirely unbuildable, the whole session, undetected.
+
+**Fixed at the root, matching mkdocs' own idiomatic layout, not
+special-cased:** moved `mkdocs.yml` to the repo root (`docs_dir`
+defaults to `docs/`, a real sibling directory from there — no `nav:`
+path needed to change, since every path was already relative to
+`docs_dir`). Verified for real: a full `mkdocs build --strict` now
+succeeds, producing real rendered HTML for all 13 chapters — spot-
+checked `site/index.html` directly for the corrected "Nine commands"/
+"four real degraders" text landing correctly.
+
+**Closed the loop so this can't silently regress again:** new `docs`
+CI job (`ubuntu-latest`, installs `mkdocs`/`mkdocs-material`, runs
+`mkdocs build --strict` — `--strict` turns a broken `nav:` entry or
+dead internal link into a real CI failure, not a silently missing
+page). `README.md` gained a one-line "build/preview the book locally"
+note.
+
+No Python test count change (docs/config-only milestone) — 429 stays
+429. `ruff check`/`format --check` clean (unaffected, no Python
+touched).
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

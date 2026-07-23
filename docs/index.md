@@ -36,10 +36,12 @@ fallback — plus what's honestly not built yet (subagent fan-out, named
 in the design but not in code).
 
 **[Chapter 4 — Multimodality](multimodal.md)** is live: the typed
-`ContentBlock` vocabulary every layer speaks, the three real
-degraders (image/audio/video), and how every provider adapter now
-distinguishes a deliberate content-block skip from a dangerous one
-instead of silently dropping either.
+`ContentBlock` vocabulary every layer speaks, the four real degraders
+(image/audio/video/document — audio now attempts genuine local Whisper
+transcription first, falling back to metadata only when that's
+unavailable), and how every provider adapter now distinguishes a
+deliberate content-block skip from a dangerous one instead of silently
+dropping either.
 
 **[Chapter 5 — Memory](memory.md)** is live too: plain-file session
 persistence (proven for both tool-free and tool-using conversations),
@@ -48,12 +50,17 @@ local, fully testable first tier — not neural embeddings, and stated
 plainly why.
 
 **[Chapter 6 — Packaging for Humans](packaging.md)** is live: the CLI's
-seven commands and its zero-config Mock fallback, the server's two
-different endpoints for two different needs (`/chat` non-streaming and
-tool-free, `/ws/chat` streaming with a real confirmation handshake over
-the socket), and the desktop app's real cross-platform release
-bundles — including the honest, still-open gaps (no code signing, no
-Windows sidecar-kill signal handling yet).
+nine commands (including `speak`, local text-to-speech with no API key)
+and its zero-config Mock fallback, the server's two different endpoints
+for two different needs (`/chat` non-streaming and tool-free, `/ws/chat`
+streaming with a real confirmation handshake over the socket), local
+speech in/out (`sarva.audio`, real Whisper STT + OS-native TTS,
+verified against real installed engines), and the desktop app's real
+cross-platform release bundles — including the honest, still-open gaps
+(no code signing; a graceful window close now correctly kills the
+sidecar's frozen server process on Windows too, but an abrupt kill that
+bypasses the close handler entirely still doesn't, for a real, checked
+Win32 API reason, not an oversight).
 
 *(Further chapters land as their own get written. Each mirrors a module
 in `core/sarva/`; see the nav sidebar for what's already up: MCP, eval,

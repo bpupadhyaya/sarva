@@ -96,6 +96,28 @@ jobs:
             exit 1
           fi
 
+  docs:
+    # Every "book" chapter is real Markdown reviewed and edited by hand,
+    # but nothing had ever actually run `mkdocs build` against it -- a
+    # real, previously-uncaught misconfiguration (docs_dir pointing at a
+    # nonexistent nested docs/docs/ directory) meant the site could not
+    # build at all until this job's own addition found and fixed it. See
+    # BUILD-JOURNAL.md. `--strict` turns broken nav entries/internal
+    # links into a real CI failure instead of a silently missing page.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install mkdocs
+        run: pip install mkdocs mkdocs-material
+
+      - name: Build docs
+        run: mkdocs build --strict
+
   desktop:
     # `cargo check` only — a fast compile/borrow-check pass, not a full
     # release build or cross-platform bundle (.dmg/.msi/.AppImage). Real
