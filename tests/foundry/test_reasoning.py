@@ -98,6 +98,23 @@ def test_answer_reward_rejects_a_repeated_closing_tag_even_if_the_answer_appears
     assert answer_reward(completion, "5") == 0.0
 
 
+def test_answer_reward_does_not_reward_a_wrong_answer_containing_the_right_digit():
+    # A third real reward-hacking exploit, found the same way
+    # sarva.eval.harness.contains_match's identical bug was: a raw
+    # substring check rewards a genuinely WRONG answer whenever the
+    # right digit happens to appear inside a longer wrong number.
+    # Single-digit addition (this module's own example task) makes this
+    # a real, not hypothetical, risk -- roughly half of all real sums
+    # are two-digit (10-18). Confirmed directly before this fix:
+    # answer_reward("<think>...</think>The answer is 17", "7") returned
+    # 1.0, rewarding a wrong answer as if it were correct.
+    completion = "<think>let me add</think>The answer is 17"
+    assert answer_reward(completion, "7") == 0.0
+    # A genuinely correct single-digit answer must still be rewarded.
+    correct = "<think>let me add</think>The answer is 7."
+    assert answer_reward(correct, "7") == 1.0
+
+
 def test_reasoning_reward_combines_format_and_answer_with_default_weights():
     both_right = "<think>2+3=5</think>5"
     assert reasoning_reward(both_right, "5") == 1.0  # 0.3*1 + 0.7*1

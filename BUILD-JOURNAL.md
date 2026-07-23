@@ -4387,6 +4387,44 @@ provider_against_the_arithmetic_benchmark`, `"0%"` → `"0/10"`). 443 →
 gained a new section on this bug; `sarva.eval.benchmarks`'s own module
 docstring documents the `div-1`/`div-2` fix directly.
 
+## A third reward-hacking exploit found in GRPO's own reward function — the same bug just fixed in the eval harness
+
+`answer_reward`'s own docstring said it followed "the same
+`contains_match` philosophy" `sarva.eval`'s default grader uses —
+which turned out to mean it inherited `contains_match`'s exact bug
+too, just fixed a few commits earlier. A raw substring check
+(`expected_answer in answer_segment`) rewards a genuinely WRONG answer
+whenever the right digit happens to appear inside a longer wrong
+number. For `examples/17_reasoning_token_training.py`'s own task
+(single-digit addition), this is a real, not hypothetical, risk:
+roughly half of all real sums are two-digit (10-18), so a model
+answering `"17"` when the expected answer was `"7"` was scored as
+fully correct by the actual reward function real GRPO training uses.
+Confirmed directly: `answer_reward("<think>...</think>The answer is
+17", "7")` returned `1.0` before this fix.
+
+This is the module's THIRD documented reward-hacking exploit —
+`format_reward`/`answer_reward` already had two others closed earlier
+this session (the `</think>`-padding exploits, both from a real GRPO
+training run discovering them). Fixed the same way
+`contains_match` was: matched on a real word boundary (`\bexpected\b`),
+not a raw substring.
+
+**The already-published 31% → 56% GRPO numbers were re-checked against
+the fix, not left standing on faith:** re-ran the example (fixed seed,
+fully deterministic) after the fix and got the identical 31% → 56%
+result. The exploit was real, proven by the standalone reproduction —
+it just didn't happen to change this specific already-published run's
+numbers. Confirmed by actually re-running it, not assumed because the
+fix "should" leave a healthy run unaffected.
+
+1 new test (`test_answer_reward_does_not_reward_a_wrong_answer_
+containing_the_right_digit`, mirroring `contains_match`'s own new
+regression test). 446 → 447 Python tests. `ruff check`/`format
+--check` clean. `docs/foundry/training.md` gained two new paragraphs:
+the exploit itself, and the honest re-verification of the published
+numbers.
+
 **Next:** batching multiple concurrent inference requests (§3.6f), F1's
 real distributed training infrastructure (needs real multi-node compute
 this environment doesn't have), a Windows TTS engine (genuinely

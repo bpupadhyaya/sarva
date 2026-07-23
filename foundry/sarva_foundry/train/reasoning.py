@@ -71,13 +71,27 @@ def format_reward(completion_text: str) -> float:
 
 
 def answer_reward(completion_text: str, expected_answer: str) -> float:
-    """1.0 iff `expected_answer` appears anywhere in whatever text
-    follows `</think>` — the same `contains_match` philosophy
-    `sarva.eval`'s default grader uses, since real models rarely answer
-    with *only* the expected string. Returns 0.0 (not a crash or an
-    exception) when there's no `</think>` at all, since an unformatted
-    completion has no defined "answer segment" to check in the first
-    place.
+    """1.0 iff `expected_answer` appears, word-boundary matched, anywhere
+    in whatever text follows `</think>` — the same `contains_match`
+    philosophy `sarva.eval`'s default grader uses, since real models
+    rarely answer with *only* the expected string. Returns 0.0 (not a
+    crash or an exception) when there's no `</think>` at all, since an
+    unformatted completion has no defined "answer segment" to check in
+    the first place.
+
+    **A third real reward-hacking exploit, found the same way
+    `sarva.eval.harness.contains_match`'s identical bug was:** this
+    function used to do a raw substring check
+    (`expected_answer in answer_segment`), which rewards a genuinely
+    WRONG answer whenever the right digit happens to appear inside a
+    longer wrong number -- for single-digit addition specifically
+    (`examples/17_reasoning_token_training.py`'s own task), roughly
+    half of all real sums are two-digit (10-18), so a model answering
+    "17" when the expected answer is "7" was scored fully correct.
+    Confirmed directly, not hypothetical:
+    `answer_reward("<think>...</think>The answer is 17", "7")` returned
+    `1.0` before this fix. Now matched on a real word boundary
+    (`\\bexpected\\b`), the same fix `contains_match` got.
 
     Requires EXACTLY one `</think>`, same as `format_reward` — a second
     real reward-hacking exploit caught empirically, not hypothetical:
@@ -92,7 +106,8 @@ def answer_reward(completion_text: str, expected_answer: str) -> float:
     if completion_text.count(THINK_END) != 1:
         return 0.0
     answer_segment = completion_text.split(THINK_END, 1)[1]
-    return 1.0 if expected_answer in answer_segment else 0.0
+    pattern = r"\b" + re.escape(expected_answer) + r"\b"
+    return 1.0 if re.search(pattern, answer_segment) else 0.0
 
 
 def reasoning_reward(

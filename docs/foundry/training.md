@@ -462,6 +462,31 @@ such guarantee. Fixed with `errors="replace"` in the final UTF-8 decode
 — standard practice for any real tokenizer used in inference/RL rollout,
 not a workaround specific to this example.
 
+**A third real reward-hacking exploit, found later while checking
+`sarva.eval.harness.contains_match` for the identical bug:**
+`answer_reward`'s own docstring said it followed "the same
+`contains_match` philosophy" — which turned out to include
+`contains_match`'s own bug: a raw substring check
+(`expected_answer in answer_segment`) rewards a genuinely WRONG answer
+whenever the right digit happens to appear inside a longer wrong
+number. For single-digit addition specifically, roughly half of all
+real sums are two-digit (10-18), so a model answering `"17"` when the
+expected answer is `"7"` was being scored fully correct. Confirmed
+directly, not hypothetical: `answer_reward("<think>...</think>The
+answer is 17", "7")` returned `1.0` before the fix. Fixed the same way
+`contains_match` was: matched on a real word boundary
+(`\bexpected\b`), not a raw substring.
+
+**The already-published 31% → 56% numbers below were re-checked
+against the fix, not left standing on faith:** re-ran
+`examples/17_reasoning_token_training.py` (same fixed seed,
+fully deterministic) after the fix and got the identical 31% → 56%
+result. The exploit was real and worth closing regardless — proven by
+the standalone reproduction above — but it happened not to change this
+specific run's already-reported numbers, an honest outcome confirmed
+by actually re-running the example, not assumed because the fix
+"should" leave healthy runs unaffected.
+
 `examples/17_reasoning_token_training.py` runs the real two-stage
 recipe on single-digit addition (`"2 plus 3 = "` →
 `"<think>2+3=5</think>5"`): cold-start SFT reliably nails the format
