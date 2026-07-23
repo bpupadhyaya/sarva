@@ -87,7 +87,48 @@ class DecoderOnlyTransformer(nn.Module):
         self.lm_head.weight = self.tok_embeddings.weight
 
     def forward(self, token_ids: Tensor) -> Tensor:
+        return self._forward_embeds(self.tok_embeddings(token_ids))
+
+    def embed_multimodal(
+        self, token_ids: Tensor, image_embeds: Tensor, image_token_id: int
+    ) -> Tensor:
+        """Text token embeddings, with every occurrence of
+        `image_token_id` in `token_ids` replaced, in row-major
+        (batch-then-sequence) order, by the next row of `image_embeds`
+        `(batch, n_image_tokens, dim)` — the placeholder-token splicing
+        every LLaVA-class VLM uses, so the causal decoder underneath sees
+        one unified sequence and never needs to know which positions
+        came from an image. `image_embeds` must already be projected to
+        `self.config.dim` (see `vision.Projector`) — this method does no
+        projection itself. Assumes every batch item contributes the same
+        number of image placeholder tokens, matching `image_embeds`'
+        uniform per-item token count (one image per example, or images
+        of the same patch count)."""
         x = self.tok_embeddings(token_ids)
+        mask = token_ids == image_token_id
+        n_placeholders = int(mask.sum())
+        n_image_tokens = image_embeds.shape[0] * image_embeds.shape[1]
+        if n_placeholders != n_image_tokens:
+            raise ValueError(
+                f"{n_placeholders} image-placeholder tokens in token_ids but "
+                f"{n_image_tokens} image embeddings were provided"
+            )
+        x = x.clone()
+        x[mask] = image_embeds.reshape(-1, image_embeds.shape[-1]).to(x.dtype)
+        return x
+
+    def forward_multimodal(
+        self, token_ids: Tensor, image_embeds: Tensor, image_token_id: int
+    ) -> Tensor:
+        """Like `forward`, but every `image_token_id` position in
+        `token_ids` is embedded from `image_embeds` instead of the token
+        embedding table — the rest of the decoder (causal self-attention,
+        FFN, norm, head) is exactly the same code path as text-only
+        `forward`, unaware anything about the sequence came from an
+        image."""
+        return self._forward_embeds(self.embed_multimodal(token_ids, image_embeds, image_token_id))
+
+    def _forward_embeds(self, x: Tensor) -> Tensor:
         for layer in self.layers:
             x = layer(x)
         x = self.norm(x)

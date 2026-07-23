@@ -166,12 +166,67 @@ depends only on relative position, never absolute — for a *fixed*
 scaling config, verified the same way the unscaled table's relative-
 position invariance is verified in `test_model.py`.
 
+## Native multimodal input: a vision encoder + projector
+
+`sarva_foundry.model.vision` is the third and last named piece of
+§3.6a's architecture list ("native multimodal (vision encoder +
+projector; audio later)"). Three real, standard LLaVA-class pieces,
+each reusing this project's already-tested substrate rather than a
+parallel implementation:
+
+- **`PatchEmbed`**: splits an image into non-overlapping patches and
+  linearly projects each to `dim`, via a single strided `nn.Conv2d`
+  (kernel = stride = patch size) — the standard "patchify" trick.
+  `test_patch_embed_matches_manual_flatten_and_linear` proves this is
+  exactly equivalent to manually slicing each patch, flattening it, and
+  applying one shared linear layer, not just "produces the right shape."
+- **`VisionEncoder`**: patchify, then N *bidirectional* transformer
+  blocks — reuses `GroupedQueryAttention`/`RMSNorm`/`SwiGLU` with the
+  new `causal=False` option (the text decoder's blocks still default to
+  `causal=True`, unchanged). An image patch needs to see every other
+  patch, not just ones that happen to come "earlier" in some arbitrary
+  flatten order.
+  `test_vision_encoder_is_genuinely_bidirectional_not_accidentally_causal`
+  is the mirror image of `test_model.py`'s causal-masking test:
+  perturbing the *first* patch must change the encoder's output at the
+  *last* patch too, proving `causal=False` is genuinely wired through
+  rather than silently ignored.
+- **`Projector`**: a 2-layer MLP with a GELU nonlinearity mapping the
+  vision encoder's output dim to the text decoder's `dim` — the
+  "connector" every LLaVA-class model uses (LLaVA-1.5's own ablation
+  found this beats a single linear projection, which
+  `test_projector_is_nonlinear_not_a_disguised_linear_layer` checks
+  directly: fit the best possible *linear* map to a few samples and
+  confirm it does NOT predict fresh samples the way the real, nonlinear
+  `Projector` does).
+
+`DecoderOnlyTransformer.forward_multimodal(token_ids, image_embeds,
+image_token_id)` is the splice point: every occurrence of
+`image_token_id` in `token_ids` is replaced by the next projected image
+embedding, and the *same* causal decoder body runs on the resulting
+sequence — the decoder never needs to know which positions came from an
+image. The strongest proof this actually works, not just runs:
+`test_full_stack_is_trainable_gradients_flow_through_vision_and_text`
+asserts every parameter across the vision encoder, the projector, AND
+the text decoder receives a real gradient during a real training step —
+a broken splice (e.g. an accidental `.detach()`) would silently zero out
+the vision/projector gradients while still producing plausible-shaped
+logits, which no shape-only test could catch.
+
+**Honestly named simplification:** the vision encoder reuses 1D RoPE
+over the flattened patch sequence — the same positional mechanism the
+text decoder already has — rather than a 2D-aware scheme (2D RoPE or
+learned 2D embeddings) a production vision encoder would use to encode
+row/column structure. Real, deferred follow-up work, not silently
+assumed equivalent.
+
 ## Try it
 
 ```bash
-uv run python examples/03_train_toy_transformer.py       # dense baseline
-uv run python examples/07_moe_transformer.py              # MoE, watch the load balance itself
-uv run python examples/08_long_context_rope_scaling.py    # linear vs NTK RoPE scaling, made visible
+uv run python examples/03_train_toy_transformer.py            # dense baseline
+uv run python examples/07_moe_transformer.py                   # MoE, watch the load balance itself
+uv run python examples/08_long_context_rope_scaling.py         # linear vs NTK RoPE scaling, made visible
+uv run python examples/09_multimodal_vision_transformer.py     # vision encoder + projector + decoder, trained
 ```
 
 The first trains the real byte-level BPE tokenizer (see the
@@ -190,11 +245,19 @@ exactly `1/factor`) and the exact position-index equivalence linear
 scaling produces — a training run wouldn't be the honest way to show
 either property at toy scale (extending real context length needs a
 real long-context fine-tuning pass this project doesn't have data or
-compute for yet), but the math itself is fully visible today.
+compute for yet), but the math itself is fully visible today. The fourth
+trains a vision encoder + projector + text decoder together on a
+deliberately trivial but real task — a solid red image should make the
+model predict one specific token, a solid blue image a different one,
+with *identical* surrounding text — so getting both right after training
+is only possible if the model is genuinely using the image content, not
+guessing from text alone.
 
 ## What's next
 
-Pretraining data pipelines, a real (non-toy) training loop with
-checkpointing, and the remaining frontier-class extension from §3.6a —
-native multimodal input — build on this baseline rather than replacing
-it.
+§3.6a's full named architecture list (dense baseline, MoE, long-context
+RoPE scaling, native multimodal input) is now built. What's still ahead:
+pretraining data pipelines at real scale and a real (non-toy) training
+loop with distributed checkpointing (§3.6d/F1), post-training (§3.6e),
+and audio input — named in §3.6a's own multimodal line as "vision
+encoder + projector; audio later," and "later" still means later.

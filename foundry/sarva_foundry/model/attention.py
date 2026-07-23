@@ -1,4 +1,4 @@
-"""Grouped-query causal self-attention with RoPE (spec §3.6a).
+"""Grouped-query self-attention with RoPE (spec §3.6a).
 
 GQA (Ainslie et al. 2023) is the middle ground between multi-head
 attention (one KV head per query head — expensive KV cache) and
@@ -6,6 +6,13 @@ multi-query attention (one shared KV head — cheap but quality-degrading):
 query heads are split into groups that each share one KV head, which is
 what every current frontier-class open model (LLaMA 3, Qwen, Mistral)
 actually ships for exactly this cache/quality tradeoff.
+
+`causal` defaults to `True` (the decoder-only text path, unchanged from
+before this parameter existed) — `causal=False` is what
+`vision.py`'s bidirectional encoder blocks use: an image patch needs to
+see every other patch, not just earlier ones in some arbitrary
+flatten order, since "earlier" isn't a meaningful notion for spatial
+patches the way it is for a left-to-right token sequence.
 """
 
 from __future__ import annotations
@@ -40,6 +47,7 @@ class GroupedQueryAttention(nn.Module):
         max_seq_len: int,
         rope_theta: float = 10000.0,
         rope_scaling: RopeScalingConfig | None = None,
+        causal: bool = True,
     ):
         super().__init__()
         if n_heads % n_kv_heads != 0:
@@ -48,6 +56,7 @@ class GroupedQueryAttention(nn.Module):
         self.n_kv_heads = n_kv_heads
         self.head_dim = head_dim
         self.n_rep = n_heads // n_kv_heads
+        self.causal = causal
 
         self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
         self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
@@ -91,7 +100,9 @@ class GroupedQueryAttention(nn.Module):
         # drawn. `is_causal=True` is what makes this a decoder: position i
         # can only attend to positions <= i (verified directly in
         # tests/foundry/test_model.py, not just assumed from the flag).
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # `self.causal=False` (vision.py's bidirectional encoder) lets
+        # every position attend to every other position instead.
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
 
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, self.n_heads * self.head_dim)
         return self.wo(out)

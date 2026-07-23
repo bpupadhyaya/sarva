@@ -2178,3 +2178,67 @@ trainability test with linear scaling active. 238 → 247 Python tests.
 
 **Next:** F1's real (non-toy) training infrastructure, or native
 multimodal input — the last named piece of §3.6a's architecture list.
+
+## Native multimodal input — the last named piece of §3.6a's architecture list
+
+§3.6a: "native multimodal (vision encoder + projector; audio later)."
+With MoE and long-context RoPE scaling already shipped, this closes
+every named architecture item — audio stays explicitly future work per
+the design doc's own wording.
+
+`sarva_foundry.model.vision` adds three real, standard LLaVA-class
+pieces, each reusing already-tested substrate: `PatchEmbed` (strided-
+conv "patchify," proven mathematically identical to manual
+flatten+linear, not just shape-checked), `VisionEncoder` (patchify + N
+*bidirectional* transformer blocks, reusing `GroupedQueryAttention`/
+`RMSNorm`/`SwiGLU` with a new `causal: bool = True` parameter —
+`causal=False` for vision, the text decoder's default completely
+unchanged), and `Projector` (2-layer MLP + GELU, the LLaVA-1.5-style
+connector).
+
+`DecoderOnlyTransformer.forward_multimodal(token_ids, image_embeds,
+image_token_id)` is the splice point: every `image_token_id` position
+gets replaced by the next projected image embedding, then the *same*
+causal decoder body (refactored behind a shared `_forward_embeds`
+helper so text-only `forward` and multimodal `forward_multimodal` are
+provably the same code path past embedding construction) runs
+unmodified.
+
+**Two tests worth naming for what they specifically guard against, not
+just "more coverage":**
+- `test_vision_encoder_is_genuinely_bidirectional_not_accidentally_causal`
+  — the mirror image of the existing causal-masking test: perturbing the
+  *first* patch must change the *last* patch's output, proving
+  `causal=False` is genuinely wired through rather than silently
+  ignored (a shape-only test can't distinguish a correctly bidirectional
+  encoder from an accidentally-still-causal one).
+- `test_full_stack_is_trainable_gradients_flow_through_vision_and_text`
+  — asserts every parameter across the vision encoder, the projector,
+  AND the text decoder receives a real gradient during a real training
+  step. A broken splice (e.g. an accidental `.detach()` in
+  `embed_multimodal`) would silently zero out the vision/projector
+  gradients while still producing plausible-shaped logits — exactly the
+  kind of bug a shape-only or even a loss-decreases-only test can miss,
+  since the text decoder alone could still fit *some* pattern from the
+  placeholder positions' fixed (untrained) embeddings.
+
+`examples/09_multimodal_vision_transformer.py` trains the full stack on
+a deliberately trivial but real task: a solid red image should make the
+model predict token 5, a solid blue image token 10, with *identical*
+surrounding text tokens in both cases — getting both right after
+training is only possible if the model is genuinely using image
+content, since there's no way to guess correctly from text alone. Loss
+goes from 64.7 to 0.0000; the model correctly predicts both tokens.
+
+**Honestly named simplification, not silently assumed equivalent:** the
+vision encoder reuses 1D RoPE over the flattened patch sequence — same
+mechanism the text decoder already has, not a 2D-aware positional scheme
+(2D RoPE or learned 2D embeddings) a production vision encoder would use
+to actually encode row/column structure.
+
+13 new tests in `tests/foundry/test_vision.py`. 247 → 260 Python tests.
+§3.6a's full named architecture list (dense baseline, MoE, long-context
+RoPE scaling, native multimodal input) is now built.
+
+**Next:** F1's real (non-toy) training infrastructure, or F2
+post-training (§3.6e: SFT/DPO/agentic RL).
