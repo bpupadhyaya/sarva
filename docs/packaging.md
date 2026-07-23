@@ -154,13 +154,25 @@ sidecar process.** `src-tauri/src/lib.rs` starts the frozen Python
 server as a Tauri sidecar (`sidecar("sarva-server").args(["serve"])`) on
 launch. Killing it cleanly turned out to need more than the obvious
 `child.kill()`: PyInstaller's onefile bootloader forks a real grandchild
-process that call alone can't reach, so a `#[cfg(unix)]`-gated
-`pgrep -P <pid>` + `kill -9` step reaps it specifically on macOS/Linux.
-**Windows genuinely doesn't have this yet** — a plain window-close still
-cleans up via Tauri's `CloseRequested` handler, but there's no
-equivalent to the Unix SIGINT/SIGTERM handler that also triggers the
-grandchild reap, a real, open, documented gap rather than a silently
-assumed non-issue.
+process that call alone can't reach, so `kill_sidecar` reaps it on every
+platform now — `pgrep -P <pid>` + `kill -9` on macOS/Linux,
+`taskkill /F /T /PID <pid>` (Windows' native process-tree kill) on
+Windows. **A real bug this closed, not just a documented gap:** until
+now the grandchild-reaping logic was unconditionally `#[cfg(unix)]`-
+gated, so even the ordinary graceful window-close path — which already
+fires identically on every platform via Tauri's `CloseRequested` —
+silently orphaned the frozen server on Windows, still holding the port.
+**One piece genuinely still doesn't have a Windows equivalent, for a
+real, checked reason:** catching an abrupt SIGTERM/SIGINT-equivalent
+(the app killed directly rather than closed gracefully) needs Win32's
+console-control-handler API, which only delivers events to a process
+with an attached console — this app is `windows_subsystem = "windows"`
+in release builds specifically to avoid popping one. A real fix would
+need deeper Win32 message-loop hooking (`WM_QUERYENDSESSION`), left
+open and explained rather than silently assumed away — this environment
+also has no Windows machine to verify runtime behavior on, only CI's
+`windows-latest` `cargo check` job, which confirms the code compiles
+correctly for the target, not that it behaves correctly at runtime.
 
 Real, working cross-platform installers do exist:
 `.github/workflows/release-bundle.yml` ("Release bundle (unsigned)")

@@ -3546,3 +3546,56 @@ section.
 real distributed training infrastructure (needs real multi-node compute
 this environment doesn't have), or Windows sidecar orphan-process
 reaping (`src-tauri/src/lib.rs`'s own documented gap).
+
+## Windows sidecar reaping — a real bug found while investigating the documented gap
+
+`src-tauri/src/lib.rs`'s own module doc has named "Windows has no
+equivalent yet" since the sidecar-killing logic first shipped, framed
+as an untested corner. Investigating it properly surfaced something
+more concrete: `kill_sidecar`'s grandchild-reaping logic (the part that
+actually matters — PyInstaller's onefile bootloader forks a real
+grandchild process that a plain `child.kill()` never reaches) was
+unconditionally `#[cfg(unix)]`-gated. That means even the ordinary
+graceful window-close path — `on_window_event`'s `CloseRequested`,
+which already fires identically on every platform, not just the abrupt-
+signal path the doc called out — silently orphaned the real frozen
+server on Windows, leaving it holding the port. Not just "untested,"
+a real leak on the one shutdown path Windows already exercises.
+
+**Fixed with Windows' own native tool, not a port of the Unix
+approach:** `taskkill /F /T /PID <pid>` kills the whole process tree in
+one call — simpler than Unix's `pgrep -P` + `kill -9` loop, since `/T`
+already recurses through every descendant.
+
+**The other half of the original gap — an abrupt SIGTERM/SIGINT-style
+kill bypassing the window-close handler entirely — genuinely still has
+no Windows equivalent, for a real, checked reason rather than a vague
+TODO:** `main.rs` sets `windows_subsystem = "windows"` for release
+builds (required to avoid popping a console window on launch), and
+Win32's console-control-handler API (`SetConsoleCtrlHandler`, the
+nearest analogue to `signal-hook`'s SIGINT/SIGTERM interception) only
+delivers events to a process with an attached console — a
+windows-subsystem GUI app doesn't have one. A real fix needs deeper
+Win32 message-loop hooking (`WM_QUERYENDSESSION`), left open and
+explained rather than silently assumed non-existent.
+
+**Honestly scoped on verification too:** this environment has no
+Windows machine, so the fix is verified the same way the rest of this
+file's Windows-targeted code already is — a real `cargo check` on a
+genuine `windows-latest` GitHub Actions runner (CI's existing `desktop`
+matrix job), confirming the new `#[cfg(windows)]` branch compiles
+correctly for the target, not that `taskkill` behaves correctly at
+runtime (no way to check that without real Windows hardware). Verified
+locally first on macOS: `cargo check` compiles clean with a placeholder
+sidecar binary (matching CI's own setup step), and `cargo fmt --check`
+confirms no formatting drift in the changed file.
+
+No Python test count change (Rust-only milestone). `docs/packaging.md`
+updated with the corrected, more precise framing of what's fixed vs.
+what's genuinely still open and why.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), or a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have — likely stays deferred).
