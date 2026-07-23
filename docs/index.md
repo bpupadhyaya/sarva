@@ -35,10 +35,17 @@ rather than an exception, and the opt-in multimodal-degradation
 fallback — plus what's honestly not built yet (subagent fan-out, named
 in the design but not in code).
 
-*(Chapters 4+ — multimodality, memory, and packaging for humans — land
-as their own chapters get written. Each chapter mirrors a module in
-`core/sarva/`; see the nav sidebar for what's already up: memory, MCP,
-eval, distillation, and the whole from-scratch foundry track.)*
+**[Chapter 4 — Multimodality](multimodal.md)** is live: the typed
+`ContentBlock` vocabulary every layer speaks, the three real
+degraders (image/audio/video), and an honestly-named real gap
+`degrade_message`'s own "never silently drop" guarantee doesn't
+currently reach — `DocumentBlock` is typed but unprocessed by any
+provider adapter.
+
+*(Chapters 5+ — memory and packaging for humans — land as their own
+chapters get written. Each chapter mirrors a module in `core/sarva/`;
+see the nav sidebar for what's already up: memory, MCP, eval,
+distillation, and the whole from-scratch foundry track.)*
 
 ## Quickstart
 

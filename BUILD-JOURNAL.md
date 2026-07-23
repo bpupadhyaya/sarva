@@ -2504,3 +2504,53 @@ tests) rather than describing tests that sound plausible.
 **Next:** F1's real (non-toy) training infrastructure, agentic RL (the
 last named piece of §3.6e), or continuing the book (multimodality,
 memory, and packaging for humans are Chapters 4+).
+
+## Docs Chapter 4 — multimodality, and a real silent-content-drop gap found while verifying it
+
+Continuing the book. `docs/multimodal.md` covers the typed
+`ContentBlock` vocabulary (`_MediaBlock`'s exactly-one-of-data/path/url
+validator, lazy explicit byte resolution, `fetch.py`'s streamed,
+byte-capped, scheme-restricted url fetching) and the three real
+degraders (image/audio/video), tying back to earlier entries rather
+than re-explaining them.
+
+**A real, previously-unnamed gap found while double-checking
+`degrade_message`'s "never silently drops a block" claim against
+actual provider-adapter code, not assumed to hold everywhere it sounds
+like it should:** `DocumentBlock` exists in the type system, and
+`models.yaml` even marks `claude-opus-4-8` as supporting `document`
+input — but there is no degrader for it, and none of the three provider
+adapters' translation functions (`_to_anthropic_message`,
+`_to_openai_messages`, `_to_gemini_content`) have a case for it. Each
+is a plain `if`/`elif` chain with no `else` — an unhandled block type
+is silently absent from the translated request, not raised on. Checking
+further surfaced that this isn't only a `DocumentBlock` problem:
+`ThinkingBlock` hits the identical silent-drop path on the second and
+later turns of any real multi-turn conversation with an extended-
+thinking model, since the agent loop appends the full assistant message
+— thinking block included — back into `messages` for the next turn,
+and Anthropic's own adapter has an existing comment naming this as
+untracked-since-T2 work.
+
+**Documented, not silently patched over — and deliberately not "fixed"
+in this entry either:** making every adapter raise loudly on an
+unhandled block type would change real current behavior (multi-turn
+thinking-model conversations would start raising on turn two instead of
+silently continuing without the thinking content) in a way that needs
+its own careful pass with its own tests, not a rushed fix bundled into
+a documentation entry. `degrade_message`'s own "never silently drops a
+block" guarantee is real and enforced — precisely at the degradation
+layer, which is one step removed from where this gap actually lives
+(the lower-level wire-translation step inside each adapter, which turns
+out to be a separate place the same principle doesn't currently reach).
+Naming the exact boundary of a guarantee, not just that a guarantee
+exists, is worth getting right in the docs even when it's not the most
+flattering thing to write down.
+
+No test or behavior changes this entry — pure documentation, plus one
+real finding named honestly rather than fixed hastily.
+
+**Next:** F1's real (non-toy) training infrastructure, agentic RL, the
+real fix for the silent-block-drop gap this chapter named (needs its
+own careful pass), or continuing the book (memory and packaging for
+humans are Chapters 5+).
