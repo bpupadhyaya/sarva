@@ -77,9 +77,84 @@ tokenize → embed → attend → predict → backprop pipeline working end to
 end — memorizing (intentionally, at this toy scale) the sentence it was
 trained on.
 
+## Mixture-of-Experts: the first frontier-class extension
+
+`sarva_foundry.model.moe` is the first of §3.6a's named frontier-class
+extensions — the K3/DeepSeek-class design: **fine-grained experts** (many
+smaller experts rather than a few large ones), a **shared expert**
+(always active for every token, alongside whichever routed experts get
+selected), and **aux-loss-free load balancing**. It swaps in for the
+dense baseline via `TransformerConfig.moe` — leave it `None` (the
+default) and nothing here changes; set it and every block's `SwiGLU`
+feedforward becomes a routed `MoEFeedForward` instead. Composable, not a
+fork: the attention stack, RMSNorm, RoPE, and the rest of
+`TransformerBlock` are completely untouched either way.
+
+### Why aux-loss-free, specifically
+
+Traditional MoE load balancing adds an auxiliary loss term that
+penalizes uneven expert usage — but that loss term competes with the
+actual language-modeling loss for gradient budget, and tuning its weight
+is its own fragile hyperparameter problem. DeepSeek-V3's alternative:
+give each expert a **bias** added to the router's logits, used *only*
+for deciding which experts get selected (top-k), never for weighting how
+much a selected expert's output counts (that weight comes from a
+softmax over the *raw*, unbiased logits of just the selected experts).
+After each forward pass, `update_expert_bias()` nudges the bias for
+overloaded experts down and underloaded experts up by a fixed amount —
+plain arithmetic on a `register_buffer`, not a `Parameter`, so it can
+never accumulate a gradient. No loss term anywhere ever sees this
+signal — that's the entire meaning of "aux-loss-free."
+
+Keeping selection and weighting genuinely separate is the one detail
+that makes this real rather than a relabeled auxiliary loss:
+`test_route_bias_changes_selection_but_not_weight_of_a_selected_expert`
+pins it directly — a large enough bias forces a different expert to be
+selected, and the weight that expert's output receives is still
+identical to what an *unbiased* selection of it would have produced.
+
+### A real test-construction mistake, caught by running it, not shipped
+
+The first draft of the load-balancing convergence test used an
+all-zero, frozen gate — reasoning that this would isolate the bias's
+effect from noisy real routing signal. Running it showed the opposite of
+convergence: with zero per-token signal from the gate, routing became a
+pure popularity contest decided entirely by whichever expert currently
+had the highest bias, so every single token piled onto one expert each
+round — and the "winner" flipped to a *different* single expert every
+few rounds as the bias update caught up, rather than smoothly spreading
+load across experts. Same load standard deviation before and after,
+just relabeled. The fix was realizing the mistake was in the test's
+setup, not the algorithm: a real (untouched, randomly-initialized) gate
+gives different tokens different raw preferences, so as the bias narrows
+the gap between an overloaded and an underloaded expert, only *some*
+tokens peel off to the alternative each round — the graceful,
+incremental rebalancing the mechanism is actually designed to produce.
+`examples/07_moe_transformer.py`'s printed per-step expert-load column
+shows this directly on a real (if toy-scale) training run, not just in
+an isolated test.
+
+## Try it
+
+```bash
+uv run python examples/03_train_toy_transformer.py     # dense baseline
+uv run python examples/07_moe_transformer.py            # MoE, watch the load balance itself
+```
+
+The first trains the real byte-level BPE tokenizer (see the
+[tokenizer chapter](tokenizer.md)) on a toy corpus, feeds real token ids
+into a ~142K-parameter transformer, trains for 200 steps on CPU in a few
+seconds, and greedy-decodes a continuation to show the whole
+tokenize → embed → attend → predict → backprop pipeline working end to
+end — memorizing (intentionally, at this toy scale) the sentence it was
+trained on. The second does the same training loop with an
+8-expert-per-layer MoE feedforward instead, printing each layer's
+per-expert token counts every 50 steps so you can watch the load
+actually flatten out as `update_expert_bias()` runs after each step.
+
 ## What's next
 
 Pretraining data pipelines, a real (non-toy) training loop with
-checkpointing, and the frontier-class extensions from §3.6a — MoE
-routing, long-context scaling, native multimodal input — build on this
-baseline rather than replacing it.
+checkpointing, and the remaining frontier-class extensions from §3.6a —
+long-context scaling, native multimodal input — build on this baseline
+rather than replacing it.

@@ -14,6 +14,7 @@ from torch import Tensor, nn
 
 from sarva_foundry.model.attention import GroupedQueryAttention
 from sarva_foundry.model.layers import RMSNorm, SwiGLU, default_swiglu_hidden_dim
+from sarva_foundry.model.moe import MoEConfig, MoEFeedForward
 
 
 @dataclass
@@ -27,6 +28,7 @@ class TransformerConfig:
     rope_theta: float = 10000.0
     norm_eps: float = 1e-6
     hidden_dim: int | None = None  # default: default_swiglu_hidden_dim(dim)
+    moe: MoEConfig | None = None  # None (default): dense SwiGLU FFN, unchanged
 
     def __post_init__(self) -> None:
         if self.dim % self.n_heads != 0:
@@ -52,7 +54,11 @@ class TransformerBlock(nn.Module):
             rope_theta=config.rope_theta,
         )
         self.mlp_norm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.mlp = SwiGLU(config.dim, config.hidden_dim)
+        self.mlp: nn.Module
+        if config.moe is not None:
+            self.mlp = MoEFeedForward(config.dim, config.moe)
+        else:
+            self.mlp = SwiGLU(config.dim, config.hidden_dim)
 
     def forward(self, x: Tensor) -> Tensor:
         x = x + self.attn(self.attn_norm(x))

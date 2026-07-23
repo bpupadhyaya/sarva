@@ -2014,3 +2014,75 @@ as the other two additions. `test_google_provider.py` covers
 gated test was added to `tests/live/test_live_providers.py` (model id
 overridable via `GOOGLE_TEST_MODEL`). 209 → 219 Python tests, all
 passing.
+
+## Mixture-of-Experts — the first frontier-class architecture extension (§3.6a)
+
+T1's provider layer being done freed up the next real, well-scoped,
+locally-verifiable piece: §3.6a's "frontier-class architecture" line
+names Mixture-of-Experts explicitly — "the K3/DeepSeek-class design:
+fine-grained experts, shared experts, aux-loss-free load balancing" —
+and it's genuinely testable at toy scale on a laptop, unlike the
+distributed-training slice of F1 this same section defers to real
+compute.
+
+`sarva_foundry.model.moe.MoEFeedForward` swaps in for `SwiGLU` via a new
+`TransformerConfig.moe: MoEConfig | None` field (default `None`, dense
+baseline completely unchanged — 13 existing `test_model.py` tests still
+pass untouched). All three named ideas, not a generic MoE strawman:
+fine-grained experts (many smaller FFNs vs. a few large ones), an
+always-active shared expert, and aux-loss-free load balancing via a
+`register_buffer` bias (never a `Parameter` — can't accumulate a
+gradient) added to router logits for *selection* only, updated after
+each forward by a fixed arithmetic rule (`update_expert_bias()`), never
+by an auxiliary loss term competing with the real training objective.
+
+**The one detail that makes "aux-loss-free" real rather than a relabeled
+aux loss, pinned by a dedicated test:** selection uses `gate_logits +
+bias`, but the *weight* applied to a selected expert's output comes from
+softmax over the *raw*, unbiased logits of just the selected experts —
+`test_route_bias_changes_selection_but_not_weight_of_a_selected_expert`
+forces a different expert to be selected via a large bias and confirms
+its weight is identical to what an unbiased selection of it would have
+produced.
+
+**A real test-construction bug caught by running it, not shipped:** the
+first draft of the load-balancing convergence test froze the gate at
+all-zero to "isolate" the bias's effect — this produced the *opposite*
+of convergence, a winner-take-all oscillation where literally every
+token piled onto whichever single expert currently had the highest bias,
+flipping to a *different* single expert each round as the bias update
+caught up (same load std-dev before and after, just relabeled — caught
+by printing per-round loads, not by the assertion alone, exactly the
+"verify a test's assumption empirically before trusting it" pattern this
+project keeps re-learning). Root cause: a real gate gives different
+tokens different per-token preferences, which is what lets tokens peel
+off to alternative experts gradually as the bias narrows the gap between
+over/underloaded experts — the graceful rebalancing the mechanism is
+designed to produce. Fixed by using a real (untouched) random gate;
+`test_load_balancing_converges_toward_balance_over_repeated_updates` now
+shows the load's standard deviation shrinking by more than half over 50
+update cycles from a deliberately fully-skewed start.
+
+11 new tests total in `tests/foundry/test_moe.py`, including a full
+trainability test (gradients flow through the router, every selected
+expert, and the shared expert; loss decreases on a toy task, mirroring
+the dense transformer's own trainability test) and a config-swap test
+proving `DecoderOnlyTransformer` picks `MoEFeedForward` vs `SwiGLU`
+purely from `TransformerConfig.moe` with identical output shapes either
+way. `examples/07_moe_transformer.py` runs the same toy training loop as
+example 03 with `update_expert_bias()` called after every optimizer
+step, printing each layer's per-expert token counts every 50 steps —
+real, visible convergence toward balance on an actual training run, not
+just inside an isolated test. 230 Python tests total now (219 → 230).
+
+**Honestly scoped, not silently implied broader:** dense per-expert
+loop (`index_add_`), not scatter/gather or grouped-GEMM kernels — correct
+and simple at this project's training scale, the same "commodity
+substrate" boundary `layers.py` draws around `nn.Linear`, drawn here on
+the routing/balancing math's side of it instead. `update_expert_bias()`
+is a method the caller invokes, not auto-wired into `Trainer` — real,
+deferred integration work, named rather than assumed.
+
+**Next:** F1's real (non-toy) training infrastructure, an eval harness
+(§3.6g), or the remaining §3.6a extensions (long-context scaling, native
+multimodal input).
