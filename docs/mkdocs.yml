@@ -32,6 +32,7 @@ nav:
       - The transformer, from scratch: foundry/transformer.md
       - Pretraining with real resume: foundry/training.md
       - Serving a trained checkpoint (the foundry Provider adapter): foundry/inference.md
+      - Recipes (named, costed configs laptop-125M to 70B): foundry/recipes.md
 
 markdown_extensions:
   - admonition

@@ -2919,3 +2919,65 @@ full story, including the `is_causal` bug.
 §3.6f's inference-server gap), the foundry recipes directory (§3.6h:
 named/costed configs starting at the 125M laptop scale), or continuing
 the book (Chapter 6: packaging for humans).
+
+## Foundry recipes — named, costed configs, and a real OOM confirming why they're estimated, not instantiated
+
+Closes §3.6h, named directly in the design doc's own repo-structure
+diagram since T0: `foundry/recipes/  # named, costed configs: laptop-125M
+-> 1B -> 7B -> 70B`. `sarva_foundry.recipes.Recipe` bundles a real
+`TransformerConfig` with the training hyperparameters that go with it
+(token budget, batch size, LR, warmup) plus `compute_estimate()` — a
+real FLOPs-based estimate using the standard `6*N*D` dense-transformer
+training-FLOPs approximation (Kaplan et al. 2020 / Hoffmann et al.
+2022), not a fabricated number.
+
+**The design decision that matters most here:** `compute_estimate`
+takes hardware throughput (FLOP/s) and price ($/hour) as explicit
+caller-supplied arguments rather than hardcoding a specific GPU or
+price — the same no-fabrication practice that kept unverified
+OpenAI/Google pricing out of `models.yaml`. "Costed" means "you can
+compute a real cost from real inputs," not "we assert a fixed dollar
+figure that will be stale by the time anyone reads it."
+
+**`param_count()` doesn't instantiate the model to count its
+parameters, and there's a real reason why, confirmed empirically while
+building this:** constructing an actual ~70B-parameter
+`DecoderOnlyTransformer` was tried directly and got killed by the OS for
+memory use on this laptop — not a hypothetical concern, a real crash.
+`param_count()` computes the same number analytically instead, straight
+from the architecture's own weight-matrix shapes (attention's four
+projections, SwiGLU's three matrices, the tied embedding table). This
+formula is **verified exact, not assumed**: `tests/foundry/
+test_recipes.py` instantiates real models at the two scales small
+enough to build (`LAPTOP_125M`, 125,264,640 params; `SCALE_1B`,
+1,057,581,056 params) and confirms `param_count()` matches
+`.num_parameters()` bit-for-bit at both — since it's the same
+architecture code, not a fitted approximation, that exactness holds at
+the two larger, never-instantiated scales too (`SCALE_7B`, 5,802,037,248;
+`SCALE_70B`, 55,628,275,712).
+
+**Labels are honest about the field's own looseness, not inflated:**
+every parameter count is the real computed number, not rounded to hit
+its label exactly — the same convention published models already use
+(Llama-2-7B is actually 6.7B; Mistral-7B is 7.24B). `SCALE_70B` sits
+further from its label (55.6B) than the others because this project's
+plain 2/3× SwiGLU hidden-dim rule differs from Llama-2-70B's own custom
+FFN multiplier — reported plainly rather than hand-tuned to hit exactly
+70B.
+
+`examples/16_foundry_recipes.py` prints every recipe's real parameter
+count and compute estimates under two explicitly-labeled **illustrative**
+hardware profiles (never claimed as current, verified GPU pricing), then
+does something the printed table alone can't prove: runs `LAPTOP_125M`'s
+real architecture for a few real training steps on this machine,
+measures actual wall-clock tokens/sec, converts that into a real FLOP/s
+figure via the same `6*N*D` formula, and shows what `compute_estimate`
+predicts from *this machine's own measured speed* — a genuine
+correlation check between the formula and reality, not two disconnected
+numbers. 7 new tests, 323 → 330 Python tests. New docs chapter:
+`docs/foundry/recipes.md`.
+
+**Next:** batching multiple concurrent requests (§3.6f's remaining
+inference-server gap), F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have), or
+continuing the book (Chapter 6: packaging for humans).
