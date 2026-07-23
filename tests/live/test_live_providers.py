@@ -64,9 +64,15 @@ async def test_anthropic_terminal_event_law():
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _ollama_reachable(), reason="no Ollama server reachable")
 async def test_ollama_terminal_event_law():
+    # models.yaml's real registered default is ollama/qwen3:8b (~5GB) --
+    # overridable via OLLAMA_TEST_MODEL (matching OPENAI_TEST_MODEL/
+    # GOOGLE_TEST_MODEL below) for anyone verifying against a smaller
+    # locally-pulled model instead, without changing what the registry
+    # itself defaults to.
+    model = os.environ.get("OLLAMA_TEST_MODEL", "ollama/qwen3:8b")
     provider = OllamaProvider()
     req = GenerateRequest(
-        model="ollama/qwen3:8b",
+        model=model,
         messages=[Message(role="user", content=[TextBlock(text="Say 'hi' and nothing else.")])],
     )
     events = [e async for e in provider.generate(req)]

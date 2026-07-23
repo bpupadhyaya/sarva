@@ -3943,3 +3943,70 @@ confirmed by direct execution here), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Ollama verified live — and a real, latent test-isolation bug it surfaced
+
+Every provider adapter's module docstring has carried some version of
+"written to the documented shape, not yet exercised against a live
+[thing]" since it was written — true for Anthropic/OpenAI/Google
+because this environment has no credentials for any of them. Ollama is
+categorically different: it needs no API key, only a locally running
+server, and this environment can actually run one. `brew install
+ollama` (already available via Homebrew), `ollama serve`, `ollama pull
+qwen2.5:0.5b` (~400MB — `models.yaml`'s real registered default,
+`qwen3:8b`, is ~5GB, too large to be a reasonable one-off verification
+download).
+
+With a real server running: `tests/live/test_live_providers.py::
+test_ollama_terminal_event_law` passed for real (added an
+`OLLAMA_TEST_MODEL` env var override first, matching the
+`OPENAI_TEST_MODEL`/`GOOGLE_TEST_MODEL` precedent, so the pulled model
+didn't require editing the test itself). Went further than the one
+pinned test: a direct script confirmed real incremental streaming
+(`TextDeltaEvent`s accumulating to the exact final message text) and
+real tool-calling (a `get_weather` tool call correctly parsed into a
+`ToolCallEvent` + `DoneEvent` with `StopReason.TOOL_USE`) against the
+live server — the parts of `ollama_provider.py` that had never been
+exercised against real wire data before, not just the happy-path
+terminal event.
+
+**A real, latent bug this surfaced, not caused by anything this session
+did wrong:** running the full test suite with the real Ollama server up
+broke 7 tests across `test_cli.py`/`test_server.py`. Every one asserted
+"zero-config routes to Mock" without ever mocking away
+`ollama_reachable()` — silently true in CI and in this sandbox purely
+because no real Ollama server had ever happened to be running before
+now, not because anything actually forced Mock. Once a real server
+existed, the real router legitimately preferred `ollama/qwen3:8b`
+(reachable, but not the specific small model actually pulled) over
+falling back to Mock, and those tests broke on a real, if incidental,
+routing decision. **Any contributor who runs this suite on a machine
+with their own local Ollama already running — a very plausible setup
+for exactly the kind of person this project's free/local/private tier
+targets — would have hit the identical failures**, independent of
+anything this session did; the real Ollama install just made it visible
+here first.
+
+Fixed at the root, not by shutting the server back down to make the
+symptom disappear: `test_cli.py`'s `_clear_provider_env` now also
+mocks `ollama_reachable` to `False`, matching the pattern `test_doctor.
+py` already used correctly; `test_server.py` gained a `_force_mock_only`
+helper (same patch target as the existing `_use_scripted_mock`) applied
+to every test that assumed default zero-config routing without
+explicitly forcing it. All 427 tests pass with the real Ollama server
+left running in the background — the suite is now actually isolated
+from incidental local machine state, not just working by coincidence.
+
+`ollama_provider.py`'s own module docstring, `docs/providers.md`, and
+this entry all record the real verification. No test *count* change
+(existing tests fixed, not new ones added) — 427 stays 427.
+`ruff check`/`format --check` clean.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Linux `espeak`-path real-runtime
+verification (written against documented CLI behavior but only macOS
+confirmed by direct execution here), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

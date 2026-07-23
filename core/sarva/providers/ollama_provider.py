@@ -4,10 +4,16 @@ Talks to a local Ollama server's `/api/chat` endpoint (newline-delimited
 JSON streaming). This is what makes the "free & private" tier real: no
 network egress beyond localhost, no API key, no cost.
 
-NOTE: written to Ollama's documented chat API shape but not yet exercised
-against a running Ollama instance in this environment — mark its
-conformance tests `@pytest.mark.live` (skipped unless OLLAMA_HOST is
-reachable) until a real run validates it. See BUILD-JOURNAL.md.
+Verified live, not just written to the documented shape: unlike
+Anthropic/OpenAI/Google (which need a real credential this environment
+doesn't have), Ollama needs only a locally running server — `brew
+install ollama`, `ollama serve`, `ollama pull qwen2.5:0.5b` (a small
+model, not the ~5GB `qwen3:8b` registered as the real default in
+`models.yaml`), then a genuine `tests/live/test_live_providers.py::
+test_ollama_terminal_event_law` run (see `OLLAMA_TEST_MODEL` there for
+overriding the pulled model) plus direct streaming and tool-call checks
+against the real running server — all passed. See BUILD-JOURNAL.md for
+the full verification record.
 """
 
 from __future__ import annotations

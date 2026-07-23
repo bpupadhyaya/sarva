@@ -39,6 +39,25 @@ def _use_scripted_mock(monkeypatch, script: list[ScriptedTurn]) -> MockProvider:
     return provider
 
 
+def _force_mock_only(monkeypatch) -> MockProvider:
+    """For tests that want the real, DEFAULT (unscripted) Mock echo
+    behavior rather than a custom script -- same patch target as
+    `_use_scripted_mock`, real reason this exists: a "zero-config"
+    assertion here was silently depending on unstated machine state (no
+    real Ollama server happening to be reachable), true in CI and in
+    this environment's own sandbox until this session actually installed
+    and ran one to verify the Ollama adapter live -- which then broke
+    every one of these tests, since the real router legitimately started
+    preferring `ollama/qwen3:8b` (reachable but not pulled) over falling
+    back to Mock. A real, latent test-isolation bug any contributor
+    running this suite with their own local Ollama already running would
+    have hit too, not unique to this session."""
+    provider = MockProvider()
+    monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
+    monkeypatch.setattr(app_module, "build_router", _mock_only_router)
+    return provider
+
+
 def test_health():
     resp = _client().get("/health")
     assert resp.status_code == 200
@@ -53,7 +72,8 @@ def test_models_lists_mock_as_available():
     assert mock["available"] is True
 
 
-def test_chat_zero_config_uses_mock():
+def test_chat_zero_config_uses_mock(monkeypatch):
+    _force_mock_only(monkeypatch)
     resp = _client().post("/chat", json={"message": "hello server"})
     assert resp.status_code == 200
     body = resp.json()
@@ -63,6 +83,7 @@ def test_chat_zero_config_uses_mock():
 
 
 def test_chat_with_session_persists_across_requests(tmp_path, monkeypatch):
+    _force_mock_only(monkeypatch)
     monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)
 
     client = _client()
@@ -76,6 +97,7 @@ def test_chat_with_session_persists_across_requests(tmp_path, monkeypatch):
 
 
 def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
+    _force_mock_only(monkeypatch)
     monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)
 
     _client().post("/chat", json={"message": "no memory please"})
@@ -83,7 +105,8 @@ def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
     assert SessionStore().list_sessions() == []
 
 
-def test_websocket_streams_events_and_ends_with_run_done():
+def test_websocket_streams_events_and_ends_with_run_done(monkeypatch):
+    _force_mock_only(monkeypatch)
     client = _client()
     with client.websocket_connect("/ws/chat") as ws:
         ws.send_json({"message": "hi via websocket"})
@@ -100,6 +123,7 @@ def test_websocket_streams_events_and_ends_with_run_done():
 
 
 def test_websocket_with_session_persists(tmp_path, monkeypatch):
+    _force_mock_only(monkeypatch)
     monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)
     client = _client()
 

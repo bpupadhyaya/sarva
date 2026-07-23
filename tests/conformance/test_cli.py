@@ -14,6 +14,7 @@ import json
 
 import pytest
 import sarva.memory.session as session_module
+import sarva.runtime as runtime
 from sarva.audio import tts_engine_available
 from sarva.cli import app
 from sarva.memory.session import SessionStore
@@ -31,6 +32,14 @@ def _clear_provider_env(monkeypatch) -> None:
         "SARVA_FOUNDRY_CHECKPOINTS",
     ):
         monkeypatch.delenv(var, raising=False)
+    # "Zero-config" here must mean the same thing regardless of what else
+    # happens to be running on the machine executing this suite -- a real
+    # local Ollama server (reachable, but without the specific model this
+    # test expects pulled) would otherwise make the real router prefer it
+    # over falling back to Mock, a real test-isolation bug this session
+    # found by actually installing and running Ollama to verify that
+    # adapter live (see BUILD-JOURNAL.md).
+    monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: False)
 
 
 def _isolate_sessions(monkeypatch, tmp_path) -> None:

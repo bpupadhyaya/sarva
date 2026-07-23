@@ -92,6 +92,35 @@ None of this is exposed to callers. `AgentLoop`, `run_benchmark`, and
 same event stream shape regardless of which of the five backends is
 underneath.
 
+### Ollama is the one adapter verified fully live in this environment
+
+Anthropic, OpenAI, and Google's adapters are all written to their
+documented SDK/API shapes but have never been exercised against a real
+credential here — this environment simply has none. Ollama is
+different: it needs no API key, only a locally running server, which
+this environment *can* actually provide. `brew install ollama`,
+`ollama serve`, `ollama pull qwen2.5:0.5b` (a small model — `models.
+yaml`'s real registered default, `qwen3:8b`, is ~5GB), then a real
+`tests/live/test_live_providers.py::test_ollama_terminal_event_law` run
+against it (`OLLAMA_TEST_MODEL` overrides the pulled model), plus
+direct streaming and tool-call checks against the same live server. All
+passed — the first of the five adapters to move from "written to spec"
+to "confirmed working against a real backend" in this environment.
+
+**A real, latent bug this surfaced, not caused:** several
+CLI/server conformance tests asserted "zero-config routes to Mock"
+without ever mocking away `ollama_reachable()` — true by coincidence in
+CI and in this environment right up until a real Ollama server actually
+started running, at which point the real router legitimately preferred
+`ollama/qwen3:8b` (reachable, but not the small model actually pulled)
+over falling back to Mock, and those tests broke. Any contributor
+running this suite on a machine with their own local Ollama already
+running — a very plausible setup for exactly the kind of person this
+project's free/local/private tier is built for — would have hit the
+same failures. Fixed by having every affected test explicitly mock
+`ollama_reachable` to `False` (CLI tests) or force a mock-only router
+(server tests), rather than depending on incidental machine state.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which
