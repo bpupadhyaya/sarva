@@ -4,13 +4,13 @@ A session is a saved conversation: a list[Message], one JSON file per
 session name. Deliberately simple and inspectable — `cat
 ~/.sarva/sessions/default.json` should just work.
 
-Scope note: this is proven correct for tool-free conversations (the
-sequence is exactly history + [user turn, assistant turn], reconstructable
-from a single AgentLoop.run() call's RunDoneEvent.final_message). It is
-NOT yet wired for tool-using runs (`sarva run`) — reconstructing the full
-message sequence across multiple model/tool rounds needs either a richer
-return value from the loop or a transcript replay, neither built yet. See
-BUILD-JOURNAL.md.
+Wired for both tool-free (`sarva chat`) and tool-using (`sarva run`)
+conversations: `AgentLoop.run(transcript_out=...)` extends a caller-
+supplied list in place with the complete final message history —
+including every intermediate tool-call/tool-result round, not just the
+final assistant turn — which both CLI commands pass straight to
+`SessionStore.save()`. See `test_transcript_out_includes_full_tool_use_round`
+in `tests/conformance/test_agent.py` for the real, tool-using proof.
 """
 
 from __future__ import annotations

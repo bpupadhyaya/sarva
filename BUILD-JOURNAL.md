@@ -2602,3 +2602,41 @@ of the open gap.
 
 **Next:** F1's real (non-toy) training infrastructure, agentic RL, or
 continuing the book (memory and packaging for humans are Chapters 5+).
+
+## Docs Chapter 5 — memory, and a second real stale docstring found and fixed
+
+Continuing the book (Chapters 2-4 shipped earlier this session).
+`docs/memory.md` already existed with solid content from the session
+that built semantic memory and session-identity threading — promoted it
+to Chapter 5 (retitled, added a "Build it yourself" section) rather
+than rewriting from scratch, after re-verifying every claim in it
+against current source.
+
+**A second real stale docstring found this way, matching Chapter 3's
+pattern exactly:** `sarva.memory.session`'s own module docstring still
+said tool-using session persistence (`sarva run --session`) was "NOT
+yet wired" — untrue since the `transcript_out` mechanism shipped
+earlier this session specifically to solve that problem, and
+`test_transcript_out_includes_full_tool_use_round` in
+`test_agent.py` already proves it works. Fixed the docstring in the
+same commit.
+
+**A real inaccuracy caught by actually running the documented example,
+not by reading the code and assuming the prose was right:** the first
+draft of the "Build it yourself" section suggested running `sarva chat
+"remember that..."` — wrong on two counts, caught only by running it.
+First, `sarva chat` is constructed with `tools=[]` in `cli.py` — memory
+tools are only reachable via `sarva run`. Second, even after switching
+to `sarva run`, the offline Mock provider was assumed likely to at
+least attempt something tool-shaped — running it for real showed Mock
+just echoes text back and never decides to call a tool on its own,
+since it isn't actually intelligent. Both docs claims were fixed to
+state plainly that this walkthrough needs a real configured model,
+matching the honesty bar the rest of this project holds prose to.
+
+No test changes — two docstring fixes (one in `session.py`, matching
+the earlier `loop.py` fix's pattern exactly) plus documentation
+corrected against real, observed CLI behavior. 291 tests unaffected.
+
+**Next:** F1's real (non-toy) training infrastructure, agentic RL, or
+continuing the book (packaging for humans is Chapter 6+).

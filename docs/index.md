@@ -37,15 +37,20 @@ in the design but not in code).
 
 **[Chapter 4 — Multimodality](multimodal.md)** is live: the typed
 `ContentBlock` vocabulary every layer speaks, the three real
-degraders (image/audio/video), and an honestly-named real gap
-`degrade_message`'s own "never silently drop" guarantee doesn't
-currently reach — `DocumentBlock` is typed but unprocessed by any
-provider adapter.
+degraders (image/audio/video), and how every provider adapter now
+distinguishes a deliberate content-block skip from a dangerous one
+instead of silently dropping either.
 
-*(Chapters 5+ — memory and packaging for humans — land as their own
-chapters get written. Each chapter mirrors a module in `core/sarva/`;
-see the nav sidebar for what's already up: memory, MCP, eval,
-distillation, and the whole from-scratch foundry track.)*
+**[Chapter 5 — Memory](memory.md)** is live too: plain-file session
+persistence (proven for both tool-free and tool-using conversations),
+and TF-IDF + cosine-similarity semantic recall as an honest, fully
+local, fully testable first tier — not neural embeddings, and stated
+plainly why.
+
+*(Chapters 6+ — packaging for humans — land as their own chapters get
+written. Each chapter mirrors a module in `core/sarva/`; see the nav
+sidebar for what's already up: MCP, eval, distillation, and the whole
+from-scratch foundry track.)*
 
 ## Quickstart
 

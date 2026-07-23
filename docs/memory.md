@@ -1,13 +1,25 @@
-# Memory: sessions and semantic recall
+# Chapter 5 — Memory: Sessions and Semantic Recall
 
-`core/sarva/memory/` has two layers, deliberately kept separate.
+Chapter 4 covered what a conversation is made of. This chapter is about
+what happens to it after the run ends — `core/sarva/memory/`, which has
+two layers, deliberately kept separate.
 
 ## Session persistence: plain files
 
 `sarva.memory.session.SessionStore` is a saved conversation — one JSON
 file per session name, human-readable and greppable (`cat
 ~/.sarva/sessions/default.json` just works). It answers "what did we
-talk about," reconstructed exactly.
+talk about," reconstructed exactly — for both tool-free conversations
+(`sarva chat --session ...`) and tool-using ones (`sarva run --session
+...`). The latter isn't just "the final answer": `AgentLoop.run(
+transcript_out=...)` extends a caller-supplied list in place with the
+*complete* message history for the run, including every intermediate
+tool-call/tool-result round, not only the last assistant turn —
+`RunDoneEvent.final_message` alone could never carry that, since it's
+only ever the last turn. Both CLI commands build a `transcript_out`
+list and hand it straight to `SessionStore.save()`, so resuming a saved
+tool-using session actually restores the full back-and-forth, not a
+summary of it.
 
 ## Semantic memory: TF-IDF + cosine similarity
 
@@ -71,3 +83,30 @@ checked that the parameter exists. A run with no session at all
 (`sarva chat` with no `--session`) leaves `ctx.session_id` as `None` and
 falls back to the tool's own default, exactly as before this was wired
 in — every existing call site that never sets a session is unaffected.
+
+## Build it yourself
+
+- `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools
+  are only available via `sarva run`, which wires in `BUILTIN_TOOLS`.
+  With a real model configured (`ANTHROPIC_API_KEY` set — the offline
+  Mock provider just echoes text back and never decides to call a tool
+  on its own, confirmed by actually running it: `sarva run "remember
+  that my favorite color is teal" --session demo --auto` against Mock
+  produces a plain echo, not a `remember` call), run `sarva run
+  "remember that my favorite color is teal" --session demo`, then in a
+  fresh call `sarva run "what's my favorite color?" --session demo` —
+  no code needed, just the CLI, to see both layers work together (the
+  model calling `remember`, then a later turn calling `recall_memory`
+  and getting back exactly what it stored).
+- Try the same with a *different* `--session` name and confirm the
+  second session genuinely can't see the first's memory — the
+  per-session isolation this chapter describes, not assumed to hold.
+- Read `tests/conformance/test_vector_memory.py`'s
+  `test_search_ranks_the_topically_relevant_entry_first` — it doesn't
+  just check that search returns *something*, it confirms a
+  topically-related stored note actually outscores an unrelated one for
+  a matching query, a real property of the TF-IDF + cosine similarity
+  math, not a placeholder assertion.
+- `cat ~/.sarva/sessions/<name>.json` after a real `sarva run --session
+  ...` with tool calls in it, and see the full transcript — tool calls
+  and results included — sitting there as plain, readable JSON.
