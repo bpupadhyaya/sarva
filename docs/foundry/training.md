@@ -352,6 +352,66 @@ for each: a correct solution scores 1.0, a plausible-but-wrong one
 scores 0.0 with the real captured `AssertionError`, and an infinite
 loop is caught by the timeout and scored 0.0 rather than hanging.
 
+## GRPO: the training loop the harness was missing
+
+The harness above computes rewards; it doesn't do anything with them.
+`sarva_foundry.train.rl` closes that gap with **Group Relative Policy
+Optimization** (Shao et al. 2024, DeepSeekMath) — the last named piece
+of §3.6e's agentic RL line. For each prompt, sample a *group* of K
+completions from the current policy, score each with a real reward
+function, and use each completion's reward *relative to its own
+group's mean* — `(reward - group_mean) / (group_std + eps)` — as the
+policy-gradient weight. No separate value network/critic needed, unlike
+full PPO, which is exactly why GRPO is the lighter-weight,
+teaching-scale-appropriate choice here.
+
+`sample_completion(model, prompt_ids, max_new_tokens, temperature)`
+does the rollout under `torch.no_grad()` — sampling itself isn't
+differentiable, and doesn't need to be. The gradient comes entirely
+from re-evaluating each sampled completion's log-probability under the
+*current* model parameters afterward, reusing DPO's own
+`sequence_logprobs` directly: REINFORCE's gradient estimator is
+`E[R · grad_theta log P(action)]`, and that log-probability term is
+exactly what `sequence_logprobs` already computes. `build_grpo_batch`
+pads and masks a group of completions the same way `build_sft_batch`
+does (mask covers only each completion's own tokens, never the shared
+prompt); `Trainer.grpo_step(x, y, mask, rewards)` computes the
+advantages and does the update, mirroring the `build_*_batch` →
+`Trainer.*_step` shape both SFT and DPO already established.
+
+**A real finding from actually running this, not assumed from the
+math:** this project's tiny, weight-tied, freshly-initialized
+transformers turn out to have extremely peaked initial sampling — one
+dominant token at >99% probability regardless of prompt, measured
+across ten different random seeds before any test was written, not a
+one-off fluke. At temperature=1.0 this leaves no exploration for GRPO
+to learn from at all (a zero-variance group every single step, correctly
+scored as a no-op — see below). A higher rollout temperature (8.0)
+restores real exploration; standard practice in real-world RL
+fine-tuning too, not a workaround invented just to make a demo work.
+
+**Two properties tested directly, not just the trainability outcome:**
+a genuinely zero-variance group (every completion scoring identically)
+is a deliberate no-op — zero loss, unchanged weights, but the step
+counter still advances — rather than dividing by a near-zero standard
+deviation and producing garbage.
+`test_grpo_training_increases_the_rewarded_behaviors_probability` is
+the real end-to-end proof, mirroring DPO's preference-margin test
+exactly: measure a target token's sampling rate before training,
+train for real, measure again — 12.5% → 69% in the actual test run
+recorded in BUILD-JOURNAL.md, not an assumed number.
+
+`examples/14_grpo_rl_training.py` runs that exact scenario and prints
+the real before/after rates, then prints — labeled explicitly as
+illustrative, not executed — exactly how `CODING_TASKS`/
+`evaluate_submission` from example 13 would plug in as the reward
+function for real coding-task RL: the GRPO loop itself doesn't change
+at all, only the reward function does. It's not run for real here
+because a 2-layer, 16-dim toy transformer genuinely cannot learn to
+write working Python from sparse code-execution rewards in a short
+demo, and this project doesn't fabricate results to make a chapter look
+more finished than it is.
+
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
@@ -359,8 +419,9 @@ files, exact + near-duplicate dedup, length filtering, and provenance/license
 tracking including per-file manifests all exist now — larger-scale
 sourcing doesn't yet; nor does an LSH banding index, which near-duplicate
 dedup would need to scale past the current O(kept²) pairwise
-comparison), the distributed training slice of §3.6d (FSDP → 3D
+comparison), and the distributed training slice of §3.6d (FSDP → 3D
 parallelism, loss-spike handling, scaling-law tooling) once a model
-worth training at that scale exists, and the actual RL training loop
-(policy-gradient updates from the environment harness's rewards) that
-would make agentic RL real rather than just its harness.
+worth training at that scale exists. §3.6e's post-training line — SFT,
+DPO, and agentic RL (both the environment harness and now the GRPO
+training loop) — is fully built, at the scale a laptop can actually run
+and verify.

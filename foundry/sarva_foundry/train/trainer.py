@@ -25,6 +25,12 @@ forward passes: policy and a frozen reference model, each on a chosen
 and a rejected response), so it's a distinct method rather than another
 `train_step` parameter, but shares the same optimizer/grad-clip/step-
 counting machinery.
+
+`grpo_step` adds the third post-training step, GRPO-style agentic RL
+(`sarva_foundry.train.rl`) — group-relative policy-gradient updates
+from real, task-verified rewards (see `sarva_foundry.rl.environment`),
+reusing `sequence_logprobs` again for the same reason DPO does: it's
+exactly the log-probability term the REINFORCE gradient estimator needs.
 """
 
 from __future__ import annotations
@@ -127,6 +133,52 @@ class Trainer:
             ref_rejected_lp = sequence_logprobs(ref_model, rejected_x, rejected_y, rejected_mask)
 
         loss = dpo_loss(policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, beta)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        if self.config.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+        self.optimizer.step()
+        self.step += 1
+        return loss.item()
+
+    def grpo_step(self, x: Tensor, y: Tensor, loss_mask: Tensor, rewards: list[float]) -> float:
+        """One GRPO update (spec §3.6e) over a *group* of completions
+        sampled from the same prompt. `(x, y, loss_mask)` is what
+        `sarva_foundry.train.rl.build_grpo_batch` produces (one row per
+        completion in the group); `rewards` is the real, task-verified
+        reward for each row, in the same order — typically from
+        `sarva_foundry.rl.environment.evaluate_submission(...).reward`.
+
+        Advantage is each completion's reward relative to its OWN
+        group's mean, normalized by the group's standard deviation — no
+        separate value network/critic needed, unlike full PPO. A
+        zero-variance group (every completion scored identically, most
+        commonly because the group is small or the task is currently
+        too hard/easy for the policy to produce any variation) has no
+        relative signal to learn from; rather than divide by
+        (near-)zero, this is a deliberate no-op step: the step counter
+        still advances, but no gradient is computed or applied."""
+        if len(rewards) != x.shape[0]:
+            raise ValueError(
+                f"{len(rewards)} rewards provided for a batch of {x.shape[0]} completions"
+            )
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+        std = rewards_t.std()
+        if std < 1e-6:
+            self.step += 1
+            return 0.0
+
+        advantages = (rewards_t - rewards_t.mean()) / (std + 1e-6)
+
+        self.model.train()
+        if self.config.schedule is not None:
+            lr = self.config.schedule.lr_at(self.step)
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
+
+        log_probs = sequence_logprobs(self.model, x, y, loss_mask)
+        loss = -(advantages.detach() * log_probs).mean()
 
         self.optimizer.zero_grad()
         loss.backward()
