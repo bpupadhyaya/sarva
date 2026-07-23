@@ -113,3 +113,20 @@ equivalent from a caller's point of view, not just independently
 plausible. Both `sarva run`'s `--mcp-server` command-line path and a
 custom `Authorization` header were exercised directly against a live
 running server before calling this done, not just through pytest.
+
+**Every test above talks to a fixture server this same project wrote**
+— a real subprocess, but one that could in principle share this
+client's own misunderstanding of the protocol. `tests/live/
+test_live_mcp.py` closes that specific gap: a genuinely independent,
+third-party MCP server, `@modelcontextprotocol/server-filesystem`
+(Anthropic's own official reference filesystem server, launched for
+real via `npx`), listed 14 real tools it actually implements, and a
+real read + write round trip — the write direction verified by reading
+the file back from disk directly afterward, not by trusting the tool
+result alone. Also confirmed through the actual CLI (`sarva run
+--mcp-server "npx -y @modelcontextprotocol/server-filesystem ..."`),
+which connected and printed the real tool list. Live-gated like every
+other real-external-service test in this project (`pytest.mark.live`,
+skipped by default, additionally skipped if `npx` isn't on `PATH`) — a
+CI run depending on npm registry availability on every push isn't a
+tradeoff this project makes for any live external verification.

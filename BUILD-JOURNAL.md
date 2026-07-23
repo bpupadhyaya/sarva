@@ -4045,3 +4045,49 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## MCP verified against a real, independent third-party server, not just this project's own fixtures
+
+Every MCP conformance test this project had — stdio and HTTP alike —
+talked to a fixture server this same project wrote
+(`tests/fixtures/mcp_echo_server.py`/`mcp_http_echo_server.py`). Real
+subprocesses, genuine protocol traffic, but a fixture written by the
+same codebase as the client testing against it can in principle share
+the client's own misreading of the spec — a gap worth closing directly,
+the same instinct behind verifying Ollama against a real server instead
+of only this project's own mock.
+
+Installed and ran `@modelcontextprotocol/server-filesystem` — Anthropic's
+own official reference filesystem MCP server — via `npx`, and drove it
+through Sarva's real `connect_stdio_mcp_server`/`list_mcp_tools`/
+`McpToolAdapter` path, not a special test-only code path. It listed all
+14 real tools the server actually implements (not assumed from
+documentation), and a full read-then-write round trip worked: `read_
+text_file` returned the exact file contents, `write_file` reported
+success, and — the real proof for the write direction, not just
+trusting the tool's own claim — the written file was read back directly
+from disk afterward and matched exactly. Also confirmed through the
+actual CLI: `sarva run --mcp-server "npx -y
+@modelcontextprotocol/server-filesystem ..."` connected and printed the
+real tool list, proving the wiring works at the command-line boundary
+too, not just the library call.
+
+New `tests/live/test_live_mcp.py`, gated the same way every other
+live-external-service test in this project is (`pytest.mark.live`,
+skipped by default; additionally skipped if `npx` isn't on `PATH`) —
+deliberately not made a default CI dependency, since depending on npm
+registry availability on every push isn't a tradeoff this project makes
+for any other live verification either.
+
+1 new test, always excluded from the default 429 (live-gated), so no
+count change to the numbers that matter for the default run. `ruff
+check`/`format --check` clean. `docs/mcp.md`'s "Verification" section
+updated with the real third-party interop record.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
