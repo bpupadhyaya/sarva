@@ -3142,3 +3142,52 @@ inference-server gap), F1's real distributed training infrastructure
 first pass at code-signing/notarization for the desktop release bundles
 (needs a real Apple/Microsoft signing identity this environment doesn't
 have — likely stays a named, deferred gap).
+
+## `sarva doctor` — the CLI command named in the repo-structure diagram since T0, never built until now
+
+The design doc's own repo-structure diagram lists `cli.py # ... chat,
+run, serve, models, doctor` — confirmed by grep that `doctor` never
+existed as an actual `@app.command()` in `cli.py`, unlike every other
+name in that list.
+
+`sarva.runtime.run_diagnostics()` is the backing logic, deliberately
+living in the same module as `build_router`/`build_providers` and
+reading the exact same env vars, calling the exact same
+`ollama_reachable`/`_has_google_key`/`_foundry_extra_installed` helpers
+— so the diagnostic report can never silently drift out of sync with
+what "available" actually means elsewhere in that file, the same
+reason `sarva models` already lives right next to the registry it
+reports on. Five checks: Anthropic/OpenAI/Google API keys, Ollama
+reachability, and the foundry extra + any discovered checkpoint
+bundles. `sarva doctor` (the CLI command) adds Python/platform info and
+a sixth check — whether the web UI's static build exists for `sarva
+serve` — printed alongside.
+
+**A real bug caught by actually running the command, not just reading
+the code:** the first version's foundry-not-configured message read
+"sarva installed, but SARVA_FOUNDRY_CHECKPOINTS is unset" — the literal
+substring `[foundry]` had vanished. Rich's `console.print()` treats
+square brackets as markup syntax; `sarva[foundry]` looked like an
+(invalid) style tag and got silently swallowed rather than erroring.
+Fixed by wrapping every dynamic detail string in `rich.markup.escape()`
+before printing — the same discipline this file already applies to raw
+model output elsewhere in `cli.py`, just missed here on the first pass.
+A dedicated regression test (`test_doctor_cli_never_swallows_bracketed_
+text_as_rich_markup`) pins that `"sarva[foundry]"` actually appears in
+the printed output, not just that the command exits zero.
+
+**Framing matters, stated directly in both the code and the docs:**
+`ok=False` means "not configured," not "broken" — every check here is a
+genuinely optional provider, and a fresh, zero-config install is
+expected to fail most of them and still work fine via the Mock
+provider. 8 new tests (`test_doctor.py`, using `typer.testing.CliRunner`
+for the first time in this codebase), 336 → 344 Python tests.
+`docs/packaging.md` updated to describe the new command (and its own
+command count corrected from seven to eight).
+
+**Next:** batching multiple concurrent requests (§3.6f's remaining
+inference-server gap), F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have), reasoning/
+thinking-token training (§3.6a names it; nothing in `foundry/` builds it
+yet), or MCP's HTTP/SSE transport (the client docstring names stdio-only
+as real, deferred scope).

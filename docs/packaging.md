@@ -15,7 +15,7 @@ means or how local providers get detected.
 `sarva chat "hello"` works with no configuration at all — the module's
 own docstring states the design goal directly: "Zero-config by default:
 with no `ANTHROPIC_API_KEY` set, everything routes to the offline
-`MockProvider` so `sarva chat "hello"` always works." Seven commands,
+`MockProvider` so `sarva chat "hello"` always works." Eight commands,
 each doing one thing:
 
 - **`chat MESSAGE [--image PATH] [--session NAME]`** — one-shot,
@@ -33,6 +33,16 @@ each doing one thing:
   whether it's currently available (API key present, Ollama reachable,
   a foundry checkpoint discovered — see the providers and foundry
   chapters).
+- **`doctor`** — diagnoses the local setup: which provider API keys are
+  set, Ollama reachability, whether the `sarva[foundry]` extra is
+  installed and any checkpoints it discovers, and whether the web UI is
+  built in for `sarva serve`. Backed by `sarva.runtime.run_diagnostics`,
+  which reads the exact same env vars and calls the exact same helpers
+  `build_router`/`build_providers` use — the report can never silently
+  drift out of sync with what "available" actually means elsewhere.
+  Every unchecked item is optional, not broken: a fresh, zero-config
+  install is expected to fail most of these and still work fine via the
+  Mock provider.
 - **`eval [--model ID]`** / **`distill PROMPTS --model ID --out PATH`**
   — the eval harness and distillation pipeline, covered in their own
   chapters.

@@ -9,6 +9,7 @@ of sync on availability logic.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,100 @@ def build_router() -> Router:
             registry.register(info)
             available.add(info.id)
     return Router(registry, routing, available)
+
+
+@dataclass(frozen=True)
+class DiagnosticCheck:
+    name: str
+    ok: bool
+    detail: str
+
+
+def run_diagnostics() -> list[DiagnosticCheck]:
+    """Backs `sarva doctor`. One check per condition `build_router`/
+    `build_providers` above actually gate availability on -- deliberately
+    kept in this same module (reading the same env vars, calling the same
+    `ollama_reachable`/`_has_google_key`/`_foundry_extra_installed`
+    helpers) so this report can never silently drift out of sync with
+    what "available" really means elsewhere in this file. `ok=False`
+    means "not configured," not "broken" -- every one of these is a
+    genuinely optional provider; a fresh, zero-config install is expected
+    to fail every check here and still work fine via the Mock provider."""
+    checks: list[DiagnosticCheck] = []
+
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    checks.append(
+        DiagnosticCheck(
+            "Anthropic API key",
+            has_anthropic,
+            "ANTHROPIC_API_KEY is set"
+            if has_anthropic
+            else "ANTHROPIC_API_KEY not set -- Claude models unavailable",
+        )
+    )
+
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    checks.append(
+        DiagnosticCheck(
+            "OpenAI API key",
+            has_openai,
+            "OPENAI_API_KEY is set"
+            if has_openai
+            else "OPENAI_API_KEY not set -- OpenAI models unavailable",
+        )
+    )
+
+    has_google = _has_google_key()
+    checks.append(
+        DiagnosticCheck(
+            "Google API key",
+            has_google,
+            "GEMINI_API_KEY or GOOGLE_API_KEY is set"
+            if has_google
+            else "GEMINI_API_KEY/GOOGLE_API_KEY not set -- Gemini models unavailable",
+        )
+    )
+
+    ollama_ok = ollama_reachable()
+    checks.append(
+        DiagnosticCheck(
+            "Ollama (local models)",
+            ollama_ok,
+            f"reachable at {OLLAMA_HOST}"
+            if ollama_ok
+            else f"not reachable at {OLLAMA_HOST} -- local Ollama models unavailable",
+        )
+    )
+
+    foundry_extra = _foundry_extra_installed()
+    fdir = foundry_checkpoints_dir()
+    if not foundry_extra:
+        foundry_ok = False
+        foundry_detail = (
+            "sarva[foundry] extra not installed -- pip install sarva[foundry] "
+            "to serve a locally-trained checkpoint"
+        )
+    elif fdir is None:
+        foundry_ok = False
+        foundry_detail = (
+            "sarva[foundry] installed, but SARVA_FOUNDRY_CHECKPOINTS is unset "
+            "(or isn't a real directory) -- no checkpoints will be discovered"
+        )
+    else:
+        from sarva.providers.foundry_provider import discover_checkpoint_bundles
+
+        bundles = discover_checkpoint_bundles(fdir)
+        foundry_ok = bool(bundles)
+        foundry_detail = (
+            f"{len(bundles)} checkpoint bundle(s) found under {fdir}: {', '.join(sorted(bundles))}"
+            if bundles
+            else f"SARVA_FOUNDRY_CHECKPOINTS={fdir} has no valid checkpoint bundles"
+        )
+    checks.append(
+        DiagnosticCheck("Foundry (local from-scratch models)", foundry_ok, foundry_detail)
+    )
+
+    return checks
 
 
 def build_providers() -> dict[str, Any]:

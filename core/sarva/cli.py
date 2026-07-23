@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import platform
 import shlex
+import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message
 from sarva.multimodal.degraders import default_degraders
 from sarva.providers.base import TextDeltaEvent
-from sarva.runtime import build_providers, build_router
+from sarva.runtime import build_providers, build_router, run_diagnostics
 
 app = typer.Typer(help="Sarva — an open, all-in-one multimodal AGI tool.")
 sessions_app = typer.Typer(help="Manage persisted chat sessions (used by `sarva chat --session`).")
@@ -184,6 +186,44 @@ def models_cmd() -> None:
     for m in router.registry.all():
         mark = "[green]x[/green]" if m.id in router.available else " "
         console.print(f"\\[{mark}] {m.id:20s} {m.display_name}")
+
+
+@app.command("doctor")
+def doctor_cmd() -> None:
+    """Diagnose this local Sarva setup: which providers are configured,
+    whether Ollama and any foundry checkpoints are reachable, and whether
+    the web UI is built in for `sarva serve` -- the same checks
+    `build_router`/`build_providers` use to decide availability, so this
+    never drifts out of sync with what actually works."""
+    console.print(f"Python {sys.version.split()[0]} on {platform.system()} ({platform.machine()})")
+    console.print()
+
+    # `check.detail`/`static_dir` can contain literal square brackets (e.g.
+    # "sarva[foundry]") that Rich's markup parser would otherwise silently
+    # swallow as an (invalid) style tag -- escape() is what keeps those
+    # bytes on screen instead of vanishing, the same reason the rest of
+    # this file never prints raw model output without it.
+    for check in run_diagnostics():
+        mark = "[green]x[/green]" if check.ok else "[dim]-[/dim]"
+        console.print(f"\\[{mark}] {check.name:32s} {escape(check.detail)}")
+
+    console.print()
+    static_dir = Path(__file__).parent / "server" / "static"
+    web_ui_built = static_dir.is_dir() and any(static_dir.iterdir())
+    mark = "[green]x[/green]" if web_ui_built else "[dim]-[/dim]"
+    detail = (
+        f"built web UI present at {static_dir}"
+        if web_ui_built
+        else f"no built web UI at {static_dir} -- `sarva serve` will be API-only "
+        "(run ./scripts/build-web.sh to add it)"
+    )
+    console.print(f"\\[{mark}] {'Web UI (for sarva serve)':32s} {escape(detail)}")
+
+    console.print(
+        "\n[dim]Every unchecked item above is an optional provider or feature -- "
+        "a fresh install is expected to fail most of these and still work fine "
+        "via the zero-config Mock provider.[/dim]"
+    )
 
 
 @app.command("eval")
