@@ -3074,3 +3074,71 @@ inference-server gap), F1's real distributed training infrastructure
 first pass at code-signing/notarization for the desktop release bundles
 (needs a real Apple/Microsoft signing identity this environment doesn't
 have — likely stays a named, deferred gap).
+
+## `DocumentToTextDegrader` — the fourth degrader, closing the last uncovered modality
+
+`Degrader`'s own motivating docstring example in `content.py` has said
+"video -> [image frames + text transcript]" since T0, alongside the
+same design intent for documents — but grepping the tree before
+starting confirmed `core/sarva/multimodal/degraders/` had exactly three
+converters (image/audio/video) and zero for `DocumentBlock`, which has
+been typed since T0 (`models.yaml` even marks `claude-opus-4-8` as
+accepting document input). A `DocumentBlock` sent toward a text-only
+model had no fallback path at all — the one modality where
+`UnsupportedModalityError` was the *only* possible outcome, unlike every
+other modality.
+
+Same honesty principle as the other three: real extracted text where a
+real extractor exists, never a fabricated summary. `pypdf` (pure
+Python, MIT) is the new dependency for real per-page PDF text
+extraction — the same "commodity substrate" tier as Pillow (images) and
+PyAV (video), not a black box in the sense this project's own "no black
+boxes" principle actually means. Plain-text-adjacent media types
+(`text/plain`, `text/markdown`, `text/csv`, `text/html`,
+`application/json`) need no library at all — a UTF-8 decode of the
+block's own bytes *is* the real content. Extracted text is capped at
+20,000 characters, the corpus pipeline's length-filter philosophy
+applied here (an attached 300-page PDF shouldn't consume a target
+model's whole context window on its own), with the degraded message
+stating honestly when and how much was cut.
+
+**A scanned/image-only PDF (no text layer) degrades the same way a read
+error does** — both mean "nothing could be extracted," matching the
+audio degrader's own framing: an undecodable format is the *expected*
+real case for a converter handling arbitrary caller-supplied bytes, not
+a bug. `.docx` and other binary office formats get the same
+declared-metadata-only fallback, named directly in the module's own
+docstring as real, deferred scope — a second heavy dependency isn't
+justified by one format the way `pypdf` is justified by PDF being
+ubiquitous.
+
+**Test fixtures are real, not fabricated, matching the video degrader's
+own precedent** (which encodes a real tiny mp4 with PyAV itself rather
+than shipping a binary fixture file): `_minimal_pdf_bytes()` hand-builds
+a genuinely valid single-page PDF with correctly computed byte offsets
+(not relying on `pypdf`'s xref-recovery leniency for a malformed one),
+so the tests prove a real write-bytes-then-extract round trip. One
+self-caught test bug along the way: an early truncation-test assertion
+counted every literal `"x"` character across the *entire* formatted
+output message (including incidental ones in words like "text/plain"),
+overcounting by exactly the number of stray matches in the header —
+fixed to check the actual extracted body slice directly instead of a
+naive substring count.
+
+Also fixed a genuinely stale comment this surfaced: all three provider
+adapters' wire-translation `else` branches still said `DocumentBlock`
+"has neither a degrader nor adapter support yet" — true when written,
+false now that a degrader exists; reworded to describe precisely when
+that `else` branch is still reachable (degradation skipped, or a
+model's registry entry claims document support no adapter has wire-level
+code for) rather than implying the gap is still total. 6 new tests
+(one existing `default_degraders` coverage test updated for the new
+modality), 336 Python tests. `docs/multimodal.md` updated with the new
+degrader's own section and a corrected "Build it yourself" walkthrough.
+
+**Next:** batching multiple concurrent requests (§3.6f's remaining
+inference-server gap), F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have), or a
+first pass at code-signing/notarization for the desktop release bundles
+(needs a real Apple/Microsoft signing identity this environment doesn't
+have — likely stays a named, deferred gap).

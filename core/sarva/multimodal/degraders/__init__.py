@@ -3,11 +3,13 @@ registry defined in sarva.multimodal.content."""
 
 from sarva.multimodal.content import Degrader, Modality
 from sarva.multimodal.degraders.audio import AudioToTextDegrader
+from sarva.multimodal.degraders.document import DocumentToTextDegrader
 from sarva.multimodal.degraders.image import ImageDecodeError, ImageToTextDegrader
 from sarva.multimodal.degraders.video import VideoToTextDegrader
 
 __all__ = [
     "AudioToTextDegrader",
+    "DocumentToTextDegrader",
     "ImageDecodeError",
     "ImageToTextDegrader",
     "VideoToTextDegrader",
@@ -25,4 +27,5 @@ def default_degraders() -> dict[Modality, Degrader]:
         Modality.IMAGE: ImageToTextDegrader(),
         Modality.AUDIO: AudioToTextDegrader(),
         Modality.VIDEO: VideoToTextDegrader(),
+        Modality.DOCUMENT: DocumentToTextDegrader(),
     }

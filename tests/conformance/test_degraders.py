@@ -11,6 +11,7 @@ import pytest
 from PIL import Image
 from sarva.multimodal.content import (
     AudioBlock,
+    DocumentBlock,
     ImageBlock,
     Message,
     Modality,
@@ -18,7 +19,12 @@ from sarva.multimodal.content import (
     VideoBlock,
     degrade_message,
 )
-from sarva.multimodal.degraders import AudioToTextDegrader, VideoToTextDegrader, default_degraders
+from sarva.multimodal.degraders import (
+    AudioToTextDegrader,
+    DocumentToTextDegrader,
+    VideoToTextDegrader,
+    default_degraders,
+)
 from sarva.multimodal.degraders.image import ImageDecodeError, ImageToTextDegrader
 
 
@@ -36,6 +42,47 @@ def _wav_bytes(duration_s: float, framerate: int = 8000) -> bytes:
         wav_file.setsampwidth(2)
         wav_file.setframerate(framerate)
         wav_file.writeframes(b"\x00\x00" * n_frames)
+    return buf.getvalue()
+
+
+def _minimal_pdf_bytes(text: str) -> bytes:
+    """A real, hand-built, valid single-page PDF whose content stream
+    literally contains `text` -- constructed with correct byte offsets
+    (not a fixture file checked into the repo, and not trusting pypdf's
+    xref-recovery leniency), so the test proves a real
+    write-bytes-then-extract round trip rather than a fabricated one."""
+    content_stream = f"BT /F1 24 Tf 20 100 Td ({text}) Tj ET".encode("latin-1")
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R"
+        b"/Resources<</Font<</F1 5 0 R>>>>>>",
+        b"<</Length "
+        + str(len(content_stream)).encode()
+        + b">>\nstream\n"
+        + content_stream
+        + b"\nendstream",
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    buf = io.BytesIO()
+    buf.write(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(buf.tell())
+        buf.write(f"{i} 0 obj\n".encode())
+        buf.write(obj)
+        buf.write(b"\nendobj\n")
+    xref_offset = buf.tell()
+    n = len(objects) + 1
+    buf.write(f"xref\n0 {n}\n".encode())
+    buf.write(b"0000000000 65535 f \n")
+    for off in offsets:
+        buf.write(f"{off:010d} 00000 n \n".encode())
+    buf.write(b"trailer\n")
+    buf.write(f"<</Size {n}/Root 1 0 R>>\n".encode())
+    buf.write(b"startxref\n")
+    buf.write(f"{xref_offset}\n".encode())
+    buf.write(b"%%EOF")
     return buf.getvalue()
 
 
@@ -319,15 +366,94 @@ async def test_video_degrade_falls_back_cleanly_on_a_video_stream_with_no_frames
     assert "3.0s" in out[0].text  # falls back to the declared value
 
 
+# ---------- DocumentToTextDegrader ----------
+
+
+async def test_document_degrader_extracts_real_text_from_a_real_pdf():
+    raw = _minimal_pdf_bytes("Hello World")
+    block = DocumentBlock(media_type="application/pdf", data=raw, title="greeting")
+
+    out = await DocumentToTextDegrader().degrade(block)
+
+    assert len(out) == 1
+    assert isinstance(out[0], TextBlock)
+    assert "Hello World" in out[0].text  # the real extracted text, not a fabricated summary
+    assert "'greeting'" in out[0].text
+    assert "application/pdf" in out[0].text
+
+
+async def test_document_degrader_extracts_real_text_from_plain_text_media_types():
+    block = DocumentBlock(media_type="text/markdown", data=b"# A real heading\n\nBody text.")
+
+    out = await DocumentToTextDegrader().degrade(block)
+
+    assert len(out) == 1
+    assert "# A real heading" in out[0].text
+    assert "Body text." in out[0].text
+
+
+async def test_document_degrader_truncates_very_long_extracted_text_honestly():
+    long_text = "x" * 25_000
+    block = DocumentBlock(media_type="text/plain", data=long_text.encode())
+
+    out = await DocumentToTextDegrader().degrade(block)
+
+    assert "truncated to 20,000 of 25,000 characters" in out[0].text
+    # The actual extracted body really is capped, not just claimed to be
+    # -- check the body itself (after the header's own "...:]\n\n"
+    # separator), not a naive substring count over the whole message,
+    # which would also match incidental "x"s in words like "text/plain".
+    body = out[0].text.split(":]\n\n", 1)[1]
+    assert body == "x" * 20_000
+
+
+async def test_document_degrader_falls_back_cleanly_on_a_corrupt_pdf():
+    block = DocumentBlock(media_type="application/pdf", data=b"not a real pdf at all")
+
+    out = await DocumentToTextDegrader().degrade(block)
+
+    assert len(out) == 1
+    assert "could not be extracted" in out[0].text
+    assert "application/pdf" in out[0].text
+
+
+async def test_document_degrader_falls_back_cleanly_on_an_unsupported_format():
+    # e.g. .docx -- a real, named, deliberately unbuilt format (see the
+    # module's own docstring), not something silently mishandled.
+    block = DocumentBlock(
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        data=b"PK\x03\x04binary docx bytes, not actually parsed",
+    )
+
+    out = await DocumentToTextDegrader().degrade(block)
+
+    assert len(out) == 1
+    assert "could not be extracted" in out[0].text
+
+
+async def test_document_degrades_recursively_to_a_supported_modality_via_degrade_message():
+    raw = _minimal_pdf_bytes("Recursion works")
+    msg = Message(role="user", content=[DocumentBlock(media_type="application/pdf", data=raw)])
+
+    result = await degrade_message(
+        msg, supported={Modality.TEXT}, degraders={Modality.DOCUMENT: DocumentToTextDegrader()}
+    )
+
+    assert len(result.content) == 1
+    assert isinstance(result.content[0], TextBlock)
+    assert "Recursion works" in result.content[0].text
+
+
 # ---------- default_degraders ----------
 
 
-async def test_default_degraders_covers_image_audio_and_video():
+async def test_default_degraders_covers_image_audio_video_and_document():
     degraders = default_degraders()
-    assert set(degraders) == {Modality.IMAGE, Modality.AUDIO, Modality.VIDEO}
+    assert set(degraders) == {Modality.IMAGE, Modality.AUDIO, Modality.VIDEO, Modality.DOCUMENT}
     assert isinstance(degraders[Modality.IMAGE], ImageToTextDegrader)
     assert isinstance(degraders[Modality.AUDIO], AudioToTextDegrader)
     assert isinstance(degraders[Modality.VIDEO], VideoToTextDegrader)
+    assert isinstance(degraders[Modality.DOCUMENT], DocumentToTextDegrader)
 
 
 async def test_default_degraders_returns_fresh_instances_each_call():

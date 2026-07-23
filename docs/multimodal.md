@@ -92,8 +92,8 @@ each block-translation function (`_to_anthropic_message`,
 `_to_openai_messages`, `_to_gemini_content`) was a plain `if`/`elif`
 chain over the block types it knew how to handle, with no `else`
 branch — an unrecognized block type was simply skipped, not raised on.
-`DocumentBlock` (PDFs, docx, ... — typed since T0, still with no
-degrader and no adapter support) hit this every time; `ThinkingBlock`
+`DocumentBlock` (PDFs, docx, ... — typed since T0, at the time with no
+degrader and no adapter support at all) hit this every time; `ThinkingBlock`
 hit it too, on the second and later turns of any real multi-turn
 conversation with an extended-thinking model, since the agent loop
 appends the full assistant message — thinking block included — back
@@ -105,13 +105,45 @@ every adapter's translation function has an explicit
 skip, since none of the three backends currently accept a
 caller-supplied reasoning trace back on the next turn anyway (there's
 nothing meaningful to round-trip yet) — followed by a catch-all
-`else: raise ValueError(...)` for genuinely unhandled types, currently
-`DocumentBlock` and any future `ContentBlock` variant that gets added
-without adapter support catching up first. The distinction matters:
-dropping a thinking trace the model can't use anyway is harmless;
-silently omitting a document the user actually attached and having the
-model answer as though it read it is a materially misleading response,
-not a cosmetic gap — so that case fails loudly instead.
+`else: raise ValueError(...)` for genuinely unhandled types. The
+distinction matters: dropping a thinking trace the model can't use
+anyway is harmless; silently omitting a document the user actually
+attached and having the model answer as though it read it is a
+materially misleading response, not a cosmetic gap — so that case
+fails loudly instead. `DocumentBlock` now has a real degrader
+(`DocumentToTextDegrader`, below) that converts it away before it would
+ever reach this `else` branch through the normal opt-in degradation
+path — the branch still exists and still raises for the residual case
+of a `DocumentBlock` reaching an adapter directly (degradation skipped,
+or a model whose registry entry claims document support no adapter
+actually implements).
+
+## The fourth degrader: `DocumentToTextDegrader`
+
+The image/audio/video trio left the one modality named in `Degrader`'s
+own motivating docstring example completely uncovered — confirmed
+empty by grep before starting, not assumed. `DocumentToTextDegrader`
+closes it with the same honesty principle as the other three: real
+extracted text where a real extractor exists, never a fabricated
+summary. `pypdf` (pure Python, the same "commodity substrate" tier as
+Pillow/PyAV) gives real per-page PDF text extraction; plain-text-adjacent
+media types (`text/plain`, `text/markdown`, `text/csv`, `text/html`,
+`application/json`) need no library at all — a UTF-8 decode of the
+block's own bytes *is* the real content. Extracted text is capped at
+20,000 characters (the corpus pipeline's length-filter philosophy
+applied here: an attached 300-page PDF shouldn't consume a target
+model's whole context window on its own), and the degraded message
+says honestly when and how much was cut.
+
+**A scanned/image-only PDF (no embedded text layer) degrades the same
+way a read error does** — both mean "nothing could be extracted," which
+mirrors the audio degrader's own framing of an undecodable format as an
+*expected* real case, not a bug to distinguish. `.docx` and other
+binary office formats have no extractor yet — a second heavy dependency
+isn't justified by one format the way `pypdf` is justified by PDF being
+ubiquitous, so unsupported formats fall back to the same
+declared-metadata-only report the other degraders use, a real, named,
+deferred gap rather than an implicit one.
 
 ## Build it yourself
 
@@ -122,10 +154,16 @@ not a cosmetic gap — so that case fails loudly instead.
   proves the full documented chain (video → sampled image frames → text)
   via `degrade_message`'s own recursion, not just
   `VideoToTextDegrader.degrade()` checked in isolation.
-- Construct a `Message` with a `DocumentBlock` and run it through any
-  of the three adapters' translation functions directly — watch it
-  raise `ValueError` naming exactly which block type it can't
-  translate, instead of silently vanishing.
+- Construct a `Message` with a `DocumentBlock` and run it through
+  `DocumentToTextDegrader().degrade(...)` directly — a real PDF
+  produces its actual extracted text; garbage bytes or an unsupported
+  format like `.docx` fall back honestly rather than raising.
+- Then construct the same `DocumentBlock` and run it through any of the
+  three adapters' translation functions *directly*, bypassing
+  degradation — watch it raise `ValueError` naming exactly which block
+  type it can't translate, instead of silently vanishing. The
+  difference between these two paths is the whole point of this
+  chapter's "where never silently drop stops" section above.
 - Try `sarva chat "..." --image path/to/photo.png` against a
   text-only-routed model with `degraders=default_degraders()` wired in
   (see `cli.py`) and watch the real fallback: route to a text-capable

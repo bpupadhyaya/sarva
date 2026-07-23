@@ -99,11 +99,15 @@ async def _to_anthropic_message(m: Message) -> dict[str, Any]:
             continue
         else:
             # A block type this adapter has no translation for at all
-            # (e.g. DocumentBlock, which has neither a degrader nor
-            # adapter support yet). Raising here is deliberate: silently
-            # omitting it would send the request to Claude missing
-            # content the caller believes is present, and the model
-            # would answer as if it had read something it never
+            # (e.g. DocumentBlock reaching this adapter directly,
+            # unconverted -- it has a degrader now, but only
+            # degrade_message()'s opt-in fallback path uses it; a caller
+            # that skips degradation, or a model whose registry entry
+            # claims document support it doesn't actually have wire-level
+            # code for, still reaches here). Raising here is deliberate:
+            # silently omitting it would send the request to Claude
+            # missing content the caller believes is present, and the
+            # model would answer as if it had read something it never
             # received -- a materially misleading response, not a
             # cosmetic gap. See docs/multimodal.md for the fuller story.
             raise ValueError(
