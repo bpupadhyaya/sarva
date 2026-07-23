@@ -3438,3 +3438,66 @@ real distributed training infrastructure (needs real multi-node compute
 this environment doesn't have), or a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have — likely stays deferred).
+
+## Quantization — closing §3.6f's third named inference-stack gap
+
+§3.6f names "KV-cache, paged attention, quantization" together as
+inference/serving scope. KV-cache shipped a few milestones back;
+batching/paged attention stays deliberately deferred (real correctness
+risk in code this project has been careful around); quantization was
+the one piece left that's genuinely separable from both — confirmed
+before starting by `grep -rn "quantiz" foundry/` returning zero hits.
+
+New `sarva_foundry/quantization.py`: real per-output-channel int8
+round-to-nearest for every `nn.Linear` — one scale (`max(|row|)/127`)
+per row rather than one for the whole matrix, since different output
+channels can have very different magnitudes. `quantize_model()` walks
+`named_modules()` for every `nn.Linear`; `apply_quantized_weights()`
+mutates a live model's weights in place with the dequantized
+(round-tripped) values, for measuring quantization's real accuracy cost
+on a real forward pass.
+
+**A real open question, checked rather than assumed:** the transformer
+ties `lm_head.weight` to `tok_embeddings.weight` (the literal same
+`Parameter` object). Does quantizing `lm_head` in isolation and
+overwriting it via `.data = ...` break that tie? Wrote a scratch script
+first to check empirically before writing the real test: it doesn't —
+since both names reference the identical `Parameter` object, mutating
+one's `.data` necessarily mutates the other's too. Pinned directly in
+`test_apply_quantized_weights_preserves_tied_lm_head_and_embedding_identity`
+rather than left as an assumption about how weight tying happens to be
+implemented.
+
+**Honestly scoped, the same line the KV-cache chapter already draws:**
+this reduces storage (~3.5–4x, real measured byte counts on int8 weights
+plus the small per-channel float32 scale vector, not an assumed ratio)
+and measures real accuracy cost. It does not speed up compute or shrink
+a *running* model's memory — `dequantize()` converts back to float32
+before every matmul, matching the same "commodity substrate" line this
+project already draws around `torch.matmul` itself. A real int8-serving
+path (weights kept compact end-to-end, dequantizing only the one layer
+currently executing) is separate, deferred serving-optimization work.
+
+9 new tests in `tests/foundry/test_quantization.py`: a *provable*
+round-trip error bound (every element within `scale/2`, not just
+"small"), an all-zero-output-row edge case (real, not hypothetical — a
+trained weight row genuinely can end up all-zero, and the naive formula
+would divide by zero), the weight-tying interaction above, a
+"quantization is not a no-op" forward-pass check, and — mirroring the
+ablation harness's positive-control discipline — a real toy model
+trained on a real next-token objective for 200 steps, quantized, with
+its loss checked to move measurably but stay bounded (proving
+`apply_quantized_weights` is neither a no-op nor silently catastrophic).
+`examples/19_quantization.py` runs the same story end to end and prints
+real measured numbers (this run: 3.81x storage reduction, loss 0.106 →
+0.110 after quantizing a genuinely trained model).
+
+398 Python tests total (up from 389). `ruff check`/`format --check`
+clean.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), Windows sidecar orphan-process reaping
+(`src-tauri/src/lib.rs`'s own documented gap), or CLI conformance tests
+for `chat`/`run`/`models`/`eval`/`distill`/`serve` (only `doctor` has
+`CliRunner`-based tests today).

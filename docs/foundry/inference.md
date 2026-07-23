@@ -99,6 +99,11 @@ explicit `--model foundry/<name>` override.
   loop. Batching multiple concurrent requests together is the other half
   of §3.6f's "inference/serving stack" and remains separate, deferred
   scope — this adapter serves one sequence at a time.
+- **Quantization is available (`sarva_foundry.quantization`, see below),
+  but not wired into this adapter's serving path.** It exists today as a
+  standalone accuracy/storage measurement tool, not a way to make
+  `FoundryProvider` itself faster or lighter yet — a real int8-serving
+  path is separate, deferred work (see below).
 
 ## The KV-cache: real incremental decoding
 
@@ -138,6 +143,65 @@ numbers — confirmed identical token output either way, ~2.4x faster
 cached on the machine this was verified on (exact speedup varies by
 hardware; the point is a real, measured, honestly-reported number, not an
 assumed one).
+
+## Quantization: real int8 weight-only compression
+
+§3.6f's "inference/serving stack" names KV-cache, paged attention, and
+quantization together. `sarva_foundry.quantization` closes the third —
+genuinely separable from the batching/paged-attention gap left deferred
+above, since it never touches the caching internals.
+
+**What it actually is:** per-output-channel int8 round-to-nearest for
+every `nn.Linear` layer's weight — one scale (`max(|weight_row|) / 127`)
+per row, not one scale for the whole matrix, since different output
+channels can have very different magnitudes and a single global scale
+would waste int8's range on whichever channel is largest.
+
+```python
+from sarva_foundry.quantization import quantize_model, apply_quantized_weights
+
+quantized = quantize_model(model)          # dict[str, QuantizedLinear], keyed by
+                                            # the same dotted names named_modules() uses
+apply_quantized_weights(model, quantized)  # mutates the live model in place
+```
+
+**A real, non-obvious interaction, checked rather than assumed:**
+`DecoderOnlyTransformer` ties `lm_head.weight` to `tok_embeddings.weight`
+— the literal same `Parameter` object. `quantize_model` quantizes
+`lm_head` as an ordinary `nn.Linear` with no special-casing, and
+`apply_quantized_weights` overwrites it via `module.weight.data = ...`.
+Whether that breaks the tie was a real open question, not assumed either
+way — it doesn't: since both names reference the identical `Parameter`
+object, mutating one's `.data` necessarily mutates the other's too.
+Verified directly in `test_apply_quantized_weights_preserves_tied_lm_head_and_embedding_identity`
+rather than inferred from how weight tying happens to be implemented.
+
+**Honestly scoped, the same way the KV-cache chapter above draws its own
+line:** this reduces *storage* — a real, measured ~3.5–4x reduction
+(int8's 1 byte/element vs. float32's 4, minus the small per-channel scale
+vector's real overhead, checked against actual tensor byte counts, not
+assumed from the nominal 4x ratio) — and measures the real accuracy cost
+of quantizing a trained model's weights. It does **not** speed up
+compute or shrink a running model's live memory footprint:
+`dequantize()` converts back to float32 before every matmul runs, and
+`apply_quantized_weights` exists specifically to measure accuracy impact
+on a real forward pass, not to demonstrate a memory-saving serving path.
+A real quantized *inference* server — one that keeps every layer in its
+compact int8+scale form the entire time and dequantizes only the one
+layer currently executing — is separate, deferred serving-optimization
+work, the same category this chapter's own batching gap sits in.
+
+`tests/foundry/test_quantization.py` pins the three claims that actually
+matter: the round-trip error is *provably* bounded (every element of
+`|dequantize() - original| <= scale/2`, round-to-nearest's own bound,
+not just "small"), the storage reduction is a real measured byte count
+(not an assumed ratio), and — mirroring the ablation harness chapter's
+"positive control" discipline — a genuinely trained toy model's real
+loss on its real training objective moves measurably after quantization
+(proving `apply_quantized_weights` isn't a no-op) but stays bounded
+(proving it isn't silently catastrophic either).
+`examples/19_quantization.py` runs all of this against a real trained
+model and prints the real measured numbers either way.
 
 ## Verified, not just unit-tested
 
