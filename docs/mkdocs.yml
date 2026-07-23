@@ -21,6 +21,7 @@ nav:
   - Home: index.md
   - Core Engine:
       - The provider abstraction, registry, and routing: providers.md
+      - The agent loop (plan, act, verify): agent-loop.md
       - Memory (sessions + semantic recall): memory.md
       - MCP client (plugging in the ecosystem's tools): mcp.md
       - Eval (grading every model the same way): eval.md

@@ -2462,3 +2462,45 @@ written that code.
 **Next:** F1's real (non-toy) training infrastructure, agentic RL (the
 last named piece of §3.6e), or Chapter 3 (the agent loop) continuing
 the book.
+
+## Docs Chapter 3 — the agent loop, and a real stale-docstring bug caught while writing it
+
+Continuing the book started with Chapter 2. `docs/agent-loop.md` covers
+`AgentLoop`'s explicit state machine (`LEGAL`, the transition table as
+data rather than scattered `if`/`elif` control flow), concurrent tool
+execution gated by exactly one `ConfirmPolicy`, budgets as a clean
+`BUDGET_EXCEEDED` terminal state with a `Spend` receipt rather than a
+raised exception, and the multimodal-aware routing + opt-in degradation
+fallback.
+
+**A real bug caught in the course of verifying every claim against
+current source before writing it, not assumed correct from memory:**
+`loop.py`'s own module docstring still read "T2 wires *routing*, not
+yet *degradation*" — stale since the degradation-fallback entry shipped
+earlier this session. Re-reading the actual code (the `degraders`
+constructor parameter, the `LookupError` fallback path) before writing
+the chapter surfaced the mismatch directly; fixed the docstring in the
+same commit rather than writing a chapter that would have repeated a
+now-false claim the code itself still made.
+
+**Honestly scoped:** the chapter explicitly names what's *not* built —
+the design doc's own architecture section names "subagent fan-out" and
+"verifier subagent" patterns, and neither exists in code; `AgentLoop`
+today drives exactly one model conversation with one flat tool list.
+Stated directly in the chapter rather than silently omitted, matching
+this project's discipline of naming gaps rather than letting a reader
+assume more coverage than actually exists.
+
+No test changes — one doc-adjacent code fix (a docstring, not
+behavior) plus new documentation, verified by re-reading the real
+`AgentLoop`/`Budget`/`Tool` source and cross-checking every specific
+claim (state names, budget field names, the exact 6 `BUILTIN_TOOLS`,
+the CLI's `--auto` wiring) against it, and by confirming the tests named
+in the chapter's "Build it yourself" section actually exist with those
+names (`test_budget_enforcement`, `test_tool_errors_do_not_kill_the_loop`,
+`test_confirmation_gating_deny`, the four `test_degradation_fallback_*`
+tests) rather than describing tests that sound plausible.
+
+**Next:** F1's real (non-toy) training infrastructure, agentic RL (the
+last named piece of §3.6e), or continuing the book (multimodality,
+memory, and packaging for humans are Chapters 4+).

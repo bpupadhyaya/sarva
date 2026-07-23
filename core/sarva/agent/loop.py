@@ -5,12 +5,17 @@ calls (concurrently, gated by confirm policy for destructive tools),
 enforces budgets, and yields a single typed AgentEvent stream. The
 transcript is append-only JSONL so a run is inspectable and resumable.
 
-T2: the loop is now multimodal-aware at model selection — it scans the
+T2: the loop is multimodal-aware at model selection — it scans the
 initiating message(s) for the modalities actually present (text, image,
 ...) and routes to a model that supports all of them, instead of always
-assuming text-only. Full content-level degradation (e.g. auto-downgrading
-video to sampled frames for a model that can't see video) still lands with
-the multimodal I/O pipeline; T2 wires *routing*, not yet *degradation*.
+assuming text-only. Content-level degradation (e.g. auto-downgrading
+video to sampled frames for a model that can't see video) is wired in
+too, opt-in via the `degraders` constructor parameter: with none
+supplied, a conversation needing an unsupported modality still fails
+exactly as before; with degraders supplied, that failure becomes
+recoverable (fall back to the best available model, degrade the
+unsupported content into what it can actually see) instead of
+automatic. See BUILD-JOURNAL.md for the entry that closed this gap.
 
 T1 simplifications still true (documented, not hidden):
   * Tool-start/finish events for a batch of concurrent tool calls are

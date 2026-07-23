@@ -28,11 +28,17 @@ and the genuine wire-format differences writing them surfaced, and how
 `models.yaml` + the router turn "absorb a new frontier model" into a
 one-entry data edit instead of a rewrite.
 
-*(Chapters 3+ — the agent loop, multimodality, memory, and packaging
-for humans — land as their own chapters get written. Each chapter
-mirrors a module in `core/sarva/`; see the nav sidebar for what's
-already up: memory, MCP, eval, distillation, and the whole from-scratch
-foundry track.)*
+**[Chapter 3 — The Agent Loop](agent-loop.md)** is live too: the
+explicit plan/act/verify state machine every skin drives, concurrent
+tool execution gated by one confirm policy, budgets as a clean stop
+rather than an exception, and the opt-in multimodal-degradation
+fallback — plus what's honestly not built yet (subagent fan-out, named
+in the design but not in code).
+
+*(Chapters 4+ — multimodality, memory, and packaging for humans — land
+as their own chapters get written. Each chapter mirrors a module in
+`core/sarva/`; see the nav sidebar for what's already up: memory, MCP,
+eval, distillation, and the whole from-scratch foundry track.)*
 
 ## Quickstart
 
