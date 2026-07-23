@@ -2302,3 +2302,56 @@ Python tests.
 
 **Next:** F1's real (non-toy) training infrastructure, or the rest of
 §3.6e's post-training line (DPO/RLHF, agentic RL) beyond SFT.
+
+## DPO — the second F2 post-training piece (§3.6e)
+
+§3.6e: "SFT -> DPO/RLHF -> agentic RL." Direct Preference Optimization
+(Rafailov et al. 2023) teaches a model to *prefer* one response over
+another for the same prompt using nothing but which one was chosen — no
+reward model, no RL rollouts. `sarva_foundry.train.dpo.build_dpo_batch`
+reuses SFT's own `build_sft_batch` rather than a parallel encoding path
+(a DPO preference triple is exactly two SFT-shaped pairs sharing one
+prompt); `Trainer.dpo_step` is a new method rather than another
+`train_step` parameter, since DPO genuinely needs four forward passes
+(policy × {chosen, rejected}, frozen reference × {chosen, rejected})
+instead of `train_step`'s one, but shares the same optimizer/grad-clip/
+step-counting machinery.
+
+**The strongest test in this batch, and it's not a trainability test —
+it's an exact algebraic fixed point:** when the policy is literally
+identical to the reference model (true at DPO's very first step, before
+any update), the chosen and rejected log-ratio terms are identical, so
+the loss must equal `-log(sigmoid(0)) = ln(2) ≈ 0.6931` — not
+approximately, exactly, straight from the formula.
+`test_dpo_step_initial_loss_is_exactly_ln2_when_policy_equals_reference`
+checks this on the full `dpo_step` path (real model forward passes on a
+real tiny transformer, not an isolated-tensor version of the formula)
+and it holds to `1e-4`. Verified empirically before writing the test,
+not just derived on paper: a standalone script confirmed
+`trainer.dpo_step(...)` returns `0.6931471824645996` against
+`math.log(2) == 0.6931471805599453` on the very first call.
+
+Two more properties tested directly: the reference model's forward pass
+genuinely runs frozen (`p.grad is None` for every reference parameter
+after a step, regardless of the caller's own `requires_grad` settings —
+`dpo_step` wraps the reference forward in `torch.no_grad()` itself
+rather than trusting the caller froze it), and after real training the
+policy's preference *margin* (chosen log-probability minus rejected)
+must be strictly larger than at initialization — the actual thing DPO
+training exists to accomplish, not just "loss went down." 7 new tests
+in `test_dpo.py`.
+
+`examples/11_dpo_preference_tuning.py` makes the effect visible end to
+end: SFT first on *both* candidate responses (so the model can already
+produce either one, leaving preference close to neutral — the printed
+margin after SFT alone was `-0.003`), then DPO on a single preference
+pair shifts the margin to `+65.742` — no reward model, no sampled
+rollouts, one preference pair. The initial DPO loss printed by the
+example is exactly `0.6931`, the same fixed point the test pins.
+
+278 Python tests total now (271 → 278).
+
+**Next:** F1's real (non-toy) training infrastructure, or the last
+piece of §3.6e's post-training line — agentic RL (RL on long-horizon
+tool-use tasks, sandboxed coding-environment harness, distillation from
+frontier models).

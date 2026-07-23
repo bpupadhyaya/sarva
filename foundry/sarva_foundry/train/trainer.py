@@ -16,8 +16,15 @@ Also doubles as the SFT trainer (spec §3.6e's first post-training step):
 `train_step`'s optional `loss_mask` is the entire difference between
 pretraining and SFT here — same optimizer, same schedule, same
 checkpoint/resume machinery, just a masked loss instead of an unmasked
-one. See `sarva_foundry.data.sft` for building that mask from
+one. See `sarva_foundry.train.sft` for building that mask from
 (prompt, response) pairs.
+
+`dpo_step` adds the second post-training step, DPO (`sarva_foundry.
+train.dpo`) — a genuinely different shape of update (it needs four
+forward passes: policy and a frozen reference model, each on a chosen
+and a rejected response), so it's a distinct method rather than another
+`train_step` parameter, but shares the same optimizer/grad-clip/step-
+counting machinery.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from sarva_foundry.train.dpo import dpo_loss, sequence_logprobs
 from sarva_foundry.train.schedule import WarmupCosineSchedule
 
 
@@ -77,6 +85,49 @@ class Trainer:
             # predict) from dividing by zero -- loss is then exactly 0,
             # not NaN, and contributes no gradient either way.
             loss = (per_token_loss * mask_flat).sum() / mask_flat.sum().clamp_min(1.0)
+        self.optimizer.zero_grad()
+        loss.backward()
+        if self.config.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+        self.optimizer.step()
+        self.step += 1
+        return loss.item()
+
+    def dpo_step(
+        self,
+        ref_model: nn.Module,
+        chosen: tuple[Tensor, Tensor, Tensor],
+        rejected: tuple[Tensor, Tensor, Tensor],
+        beta: float = 0.1,
+    ) -> float:
+        """One DPO update (spec §3.6e). `chosen`/`rejected` are each an
+        `(input_ids, target_ids, loss_mask)` triple from `sarva_foundry.
+        train.dpo.build_dpo_batch` — the SAME shape `train_step`'s
+        `loss_mask` uses, since DPO's response log-probability is
+        exactly the SFT loss's per-token log-probability, summed instead
+        of averaged, over the same masked positions.
+
+        `ref_model` is the caller's responsibility to construct and keep
+        frozen (typically a `copy.deepcopy` of the SFT checkpoint DPO
+        starts from) — `Trainer` doesn't own or manage a second model's
+        lifecycle, matching its existing "thin, caller supplies the
+        model" contract. Its forward pass runs under `torch.no_grad()`
+        regardless of `ref_model`'s own `requires_grad` settings, so a
+        caller who forgets to freeze it still gets a correct update."""
+        self.model.train()
+        ref_model.eval()
+
+        chosen_x, chosen_y, chosen_mask = chosen
+        rejected_x, rejected_y, rejected_mask = rejected
+
+        policy_chosen_lp = sequence_logprobs(self.model, chosen_x, chosen_y, chosen_mask)
+        policy_rejected_lp = sequence_logprobs(self.model, rejected_x, rejected_y, rejected_mask)
+        with torch.no_grad():
+            ref_chosen_lp = sequence_logprobs(ref_model, chosen_x, chosen_y, chosen_mask)
+            ref_rejected_lp = sequence_logprobs(ref_model, rejected_x, rejected_y, rejected_mask)
+
+        loss = dpo_loss(policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, beta)
+
         self.optimizer.zero_grad()
         loss.backward()
         if self.config.grad_clip is not None:

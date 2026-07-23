@@ -1,17 +1,22 @@
 """sarva_foundry.train — the pretraining loop, with checkpoint/resume
 and a warmup+cosine LR schedule (spec §3.6d, single-process slice), and
-SFT data prep (spec §3.6e's first post-training step, `sft.py`) that
-turns `Trainer` into an SFT trainer via `train_step`'s `loss_mask`."""
+spec §3.6e's post-training line: SFT (`sft.py`, `train_step`'s
+`loss_mask`) and DPO (`dpo.py`, `Trainer.dpo_step`)."""
 
+from sarva_foundry.train.dpo import DPOExample, build_dpo_batch, dpo_loss, sequence_logprobs
 from sarva_foundry.train.schedule import WarmupCosineSchedule
 from sarva_foundry.train.sft import SFTExample, build_sft_batch, encode_sft_example
 from sarva_foundry.train.trainer import Trainer, TrainerConfig
 
 __all__ = [
+    "DPOExample",
     "SFTExample",
     "Trainer",
     "TrainerConfig",
     "WarmupCosineSchedule",
+    "build_dpo_batch",
     "build_sft_batch",
+    "dpo_loss",
     "encode_sft_example",
+    "sequence_logprobs",
 ]

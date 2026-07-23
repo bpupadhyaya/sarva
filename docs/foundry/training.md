@@ -238,6 +238,69 @@ distinct, correct response — proof the model learned to condition its
 answer on the actual question, not just memorize one fixed
 continuation.
 
+## DPO: teaching preference without a reward model
+
+§3.6e's post-training line continues: "SFT -> DPO/RLHF -> agentic RL."
+Direct Preference Optimization (Rafailov et al. 2023) is the second
+step. Where SFT teaches a model to produce a specific response at all,
+DPO teaches it to *prefer* one response over another for the same
+prompt — using nothing but which one was chosen, no reward model, no RL
+rollouts. The paper's central insight: the reward model an RLHF pipeline
+would ordinarily train first has a closed form directly in terms of the
+policy, so preference pairs can train the policy directly:
+
+```
+L_DPO = -log sigmoid(
+    beta * [ (log pi(y_w|x) - log ref(y_w|x))
+           - (log pi(y_l|x) - log ref(y_l|x)) ]
+)
+```
+
+`y_w`/`y_l` are the chosen ("winning") and rejected ("losing") responses
+to the same prompt `x`; `pi` is the policy being trained; `ref` is a
+frozen reference model (in practice, the SFT checkpoint DPO starts
+from) that keeps the policy from drifting arbitrarily far just to
+satisfy one preference pair.
+
+`sarva_foundry.train.dpo.build_dpo_batch` reuses `sarva_foundry.train.
+sft.build_sft_batch` rather than a parallel encoding path — a DPO
+preference triple `(prompt, chosen, rejected)` is exactly two SFT-shaped
+`(prompt, response)` pairs sharing one prompt, so `build_dpo_batch`
+calls `build_sft_batch` twice instead of reimplementing tokenization,
+padding, and loss-mask construction. `Trainer.dpo_step` is a new method
+rather than another `train_step` parameter, since DPO genuinely needs
+four forward passes (policy × {chosen, rejected}, reference ×
+{chosen, rejected}) instead of `train_step`'s one — but it shares the
+same optimizer, gradient clipping, and step counting.
+
+**A known, exact numeric fixed point, not just a plausible-looking
+number:** when the policy is identical to the reference model (true at
+the very start of DPO training, before any update), the log-ratio terms
+for chosen and rejected are identical, so the loss is exactly
+`-log(sigmoid(0)) = ln(2) ≈ 0.6931` — not approximately, exactly, a
+direct consequence of the formula. `test_dpo_step_initial_loss_is_exactly_ln2_when_policy_equals_reference`
+checks this on the full `dpo_step` path (real model forward passes, not
+an isolated-tensor version of the formula), which is a far stronger
+correctness check than "the loss is some finite, reasonable-looking
+number."
+
+Two more properties worth naming: `test_dpo_step_never_puts_a_gradient_on_the_reference_model`
+confirms the reference model's forward pass genuinely runs frozen
+regardless of what the caller's own `requires_grad` settings were, and
+`test_dpo_training_increases_the_policys_preference_margin` is the
+trainability proof — after real training, the policy must prefer the
+chosen response over the rejected one by a *larger* margin than at
+initialization, the actual thing DPO training exists to accomplish, not
+just "loss went down."
+
+`examples/11_dpo_preference_tuning.py` makes the effect visible on a
+real (if toy-scale) run: SFT first on *both* candidate responses (so the
+model can already produce either one, leaving preference roughly
+neutral — the printed margin after SFT alone is close to zero), then a
+single DPO preference pair shifts the margin dramatically toward the
+chosen response — no reward model, no sampled rollouts, just the one
+preference pair.
+
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
@@ -247,5 +310,7 @@ sourcing doesn't yet; nor does an LSH banding index, which near-duplicate
 dedup would need to scale past the current O(kept²) pairwise
 comparison), the distributed training slice of §3.6d (FSDP → 3D
 parallelism, loss-spike handling, scaling-law tooling) once a model
-worth training at that scale exists, and the rest of §3.6e's post-
-training line — DPO/RLHF and agentic RL — beyond SFT.
+worth training at that scale exists, and the last piece of §3.6e's
+post-training line — agentic RL (RL on long-horizon tool-use tasks,
+the sandboxed coding-environment harness, distillation from frontier
+models) — beyond SFT and DPO.
