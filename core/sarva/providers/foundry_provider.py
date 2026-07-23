@@ -24,12 +24,17 @@ crashing on a plain-core install.
 A checkpoint "bundle" is a directory with three files this module writes
 and reads together: `model.pt` (a `sarva_foundry.train.Trainer`
 checkpoint), `tokenizer.json` (a `ByteLevelBPETokenizer`), and
-`config.json` (the flat `TransformerConfig` fields needed to reconstruct
-the model before loading weights into it). Honestly scoped: MoE and
-long-context RoPE-scaling are real, shipped foundry features but their
-configs are NOT yet serialized here — `save_checkpoint_bundle` refuses a
-checkpoint trained with either rather than silently writing a bundle that
-would reload as a plain dense/unscaled model, a real, deferred follow-up.
+`config.json` (the `TransformerConfig` fields needed to reconstruct the
+model before loading weights into it, now including a real MoE and/or
+long-context RoPE-scaling config when the checkpoint was trained with
+either — both flat, JSON-safe dataclasses, serialized as nested
+`null`-or-object fields; a bundle saved before this existed simply has
+no such keys, and loads exactly as it always did). MoE/RoPE-scaling
+support here used to be a real, named, deferred gap (`save_checkpoint_
+bundle` refused a checkpoint trained with either rather than silently
+reloading it as a plain dense/unscaled model) — closed once the two
+config dataclasses turned out to need nothing more than a `dict` of
+their own already-JSON-safe fields.
 
 No chat template is applied when building a prompt: the prompt is just
 the concatenated text of the system prompt (if any) and every message's
@@ -95,7 +100,12 @@ def _lazy_imports() -> Any:
         import torch
         from sarva_foundry.data.dataset import DOCUMENT_SEPARATOR
         from sarva_foundry.inference import generate_with_cache
-        from sarva_foundry.model import DecoderOnlyTransformer, TransformerConfig
+        from sarva_foundry.model import (
+            DecoderOnlyTransformer,
+            MoEConfig,
+            RopeScalingConfig,
+            TransformerConfig,
+        )
         from sarva_foundry.tokenizer import ByteLevelBPETokenizer
     except ImportError as exc:
         raise ImportError(
@@ -112,9 +122,27 @@ def _lazy_imports() -> Any:
     mods.DOCUMENT_SEPARATOR = DOCUMENT_SEPARATOR
     mods.DecoderOnlyTransformer = DecoderOnlyTransformer
     mods.TransformerConfig = TransformerConfig
+    mods.MoEConfig = MoEConfig
+    mods.RopeScalingConfig = RopeScalingConfig
     mods.ByteLevelBPETokenizer = ByteLevelBPETokenizer
     mods.generate_with_cache = generate_with_cache
     return mods
+
+
+def _serialize_moe(moe: Any) -> dict[str, Any] | None:
+    if moe is None:
+        return None
+    return {
+        "n_experts": moe.n_experts,
+        "n_experts_per_tok": moe.n_experts_per_tok,
+        "n_shared_experts": moe.n_shared_experts,
+    }
+
+
+def _serialize_rope_scaling(rope_scaling: Any) -> dict[str, Any] | None:
+    if rope_scaling is None:
+        return None
+    return {"method": rope_scaling.method, "factor": rope_scaling.factor}
 
 
 def save_checkpoint_bundle(directory: Path, trainer: Any, tokenizer: Any, config: Any) -> None:
@@ -122,27 +150,39 @@ def save_checkpoint_bundle(directory: Path, trainer: Any, tokenizer: Any, config
     `trainer`/`tokenizer`/`config` are a real `sarva_foundry.train.Trainer`,
     `ByteLevelBPETokenizer`, and `TransformerConfig` — this function itself
     doesn't need `_lazy_imports()` since it only calls methods on objects
-    the caller already constructed (and imported torch to build)."""
-    if config.moe is not None or config.rope_scaling is not None:
-        raise NotImplementedError(
-            "foundry checkpoint bundles don't yet serialize MoE/RoPE-scaling "
-            "configs (real, shipped foundry features -- just not wired into "
-            "this adapter's save format yet). Train and save a dense, "
-            "unscaled checkpoint to use with FoundryProvider today."
-        )
+    the caller already constructed (and imported torch to build).
+
+    `moe`/`rope_scaling` serialize to plain nested dicts (both are flat
+    dataclasses with only JSON-safe fields) -- `null` when unset, so a
+    dense/unscaled checkpoint's `config.json` looks exactly as it did
+    before either was wired in here."""
     directory.mkdir(parents=True, exist_ok=True)
     trainer.save_checkpoint(directory / "model.pt")
     tokenizer.save(directory / "tokenizer.json")
     config_data = {field: getattr(config, field) for field in _CONFIG_FIELDS}
+    config_data["moe"] = _serialize_moe(config.moe)
+    config_data["rope_scaling"] = _serialize_rope_scaling(config.rope_scaling)
     (directory / "config.json").write_text(json.dumps(config_data, indent=2))
 
 
 def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:
     """Returns `(model, tokenizer, config)`, the model in `.eval()` mode
     with real trained weights loaded — not just a freshly-initialized
-    model of the right shape."""
+    model of the right shape.
+
+    Backward compatible with bundles saved before `moe`/`rope_scaling`
+    were wired into the save format: `.get(...)` defaults both to `None`
+    (a bundle from before this change simply never had those keys at
+    all), reconstructing exactly the dense/unscaled config it would have
+    loaded as previously."""
     mods = _lazy_imports()
     config_data = json.loads((directory / "config.json").read_text())
+    moe_data = config_data.pop("moe", None)
+    rope_scaling_data = config_data.pop("rope_scaling", None)
+    config_data["moe"] = mods.MoEConfig(**moe_data) if moe_data is not None else None
+    config_data["rope_scaling"] = (
+        mods.RopeScalingConfig(**rope_scaling_data) if rope_scaling_data is not None else None
+    )
     config = mods.TransformerConfig(**config_data)
     tokenizer = mods.ByteLevelBPETokenizer.load(directory / "tokenizer.json")
     model = mods.DecoderOnlyTransformer(config)

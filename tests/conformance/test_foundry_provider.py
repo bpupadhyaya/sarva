@@ -7,6 +7,7 @@ actually works, don't assume the shapes line up" discipline throughout."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,12 @@ from sarva.providers.foundry_provider import (
 )
 from sarva.providers.registry import Registry
 from sarva_foundry.data.dataset import DOCUMENT_SEPARATOR
-from sarva_foundry.model import DecoderOnlyTransformer, MoEConfig, TransformerConfig
+from sarva_foundry.model import (
+    DecoderOnlyTransformer,
+    MoEConfig,
+    RopeScalingConfig,
+    TransformerConfig,
+)
 from sarva_foundry.tokenizer import ByteLevelBPETokenizer
 from sarva_foundry.train import Trainer
 
@@ -71,7 +77,8 @@ def test_save_and_load_checkpoint_bundle_round_trips_real_weights(tmp_path: Path
         assert torch.equal(original, loaded_model.state_dict()[key]), f"weights diverged at {key}"
 
 
-def test_save_checkpoint_bundle_refuses_moe_configs_not_yet_serializable(tmp_path: Path):
+def test_save_and_load_checkpoint_bundle_round_trips_a_real_moe_config(tmp_path: Path):
+    torch.manual_seed(0)
     tokenizer = _tiny_tokenizer()
     config = TransformerConfig(
         vocab_size=tokenizer.vocab_size,
@@ -80,12 +87,74 @@ def test_save_checkpoint_bundle_refuses_moe_configs_not_yet_serializable(tmp_pat
         n_heads=2,
         n_kv_heads=1,
         max_seq_len=32,
-        moe=MoEConfig(n_experts=4, n_experts_per_tok=2),
+        moe=MoEConfig(n_experts=4, n_experts_per_tok=2, n_shared_experts=1),
     )
     model = DecoderOnlyTransformer(config)
     trainer = Trainer(model)
-    with pytest.raises(NotImplementedError, match="MoE"):
-        save_checkpoint_bundle(tmp_path / "moe", trainer, tokenizer, config)
+    bundle_dir = tmp_path / "moe"
+    save_checkpoint_bundle(bundle_dir, trainer, tokenizer, config)
+
+    loaded_model, _tokenizer, loaded_config = load_checkpoint_bundle(bundle_dir)
+
+    assert loaded_config.moe == config.moe
+    for key, original in model.state_dict().items():
+        assert torch.equal(original, loaded_model.state_dict()[key]), f"weights diverged at {key}"
+
+
+def test_save_and_load_checkpoint_bundle_round_trips_a_real_rope_scaling_config(tmp_path: Path):
+    torch.manual_seed(0)
+    tokenizer = _tiny_tokenizer()
+    config = TransformerConfig(
+        vocab_size=tokenizer.vocab_size,
+        dim=16,
+        n_layers=2,
+        n_heads=2,
+        n_kv_heads=1,
+        max_seq_len=32,
+        rope_scaling=RopeScalingConfig(method="ntk", factor=4.0),
+    )
+    model = DecoderOnlyTransformer(config)
+    trainer = Trainer(model)
+    bundle_dir = tmp_path / "rope"
+    save_checkpoint_bundle(bundle_dir, trainer, tokenizer, config)
+
+    _loaded_model, _tokenizer, loaded_config = load_checkpoint_bundle(bundle_dir)
+
+    assert loaded_config.rope_scaling == config.rope_scaling
+
+
+def test_loading_a_bundle_saved_before_moe_rope_scaling_existed_still_works(tmp_path: Path):
+    # A bundle written by an OLDER version of save_checkpoint_bundle has
+    # no "moe"/"rope_scaling" keys in config.json at all -- real
+    # backward compatibility, not just "the new fields default to None
+    # in the dataclass," proven by hand-writing a config.json that
+    # matches exactly what the pre-this-change code would have written.
+    torch.manual_seed(0)
+    tokenizer = _tiny_tokenizer()
+    config = _tiny_config(tokenizer)
+    model = DecoderOnlyTransformer(config)
+    trainer = Trainer(model)
+    bundle_dir = tmp_path / "legacy"
+    bundle_dir.mkdir()
+    trainer.save_checkpoint(bundle_dir / "model.pt")
+    tokenizer.save(bundle_dir / "tokenizer.json")
+    legacy_config_data = {
+        "vocab_size": config.vocab_size,
+        "dim": config.dim,
+        "n_layers": config.n_layers,
+        "n_heads": config.n_heads,
+        "n_kv_heads": config.n_kv_heads,
+        "max_seq_len": config.max_seq_len,
+        "rope_theta": config.rope_theta,
+        "norm_eps": config.norm_eps,
+        "hidden_dim": config.hidden_dim,
+    }
+    (bundle_dir / "config.json").write_text(json.dumps(legacy_config_data))
+
+    _model, _tokenizer, loaded_config = load_checkpoint_bundle(bundle_dir)
+
+    assert loaded_config.moe is None
+    assert loaded_config.rope_scaling is None
 
 
 def test_discover_checkpoint_bundles_finds_only_complete_bundles(tmp_path: Path):

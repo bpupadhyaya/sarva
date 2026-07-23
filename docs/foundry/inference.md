@@ -46,13 +46,14 @@ from sarva.providers.foundry_provider import save_checkpoint_bundle
 save_checkpoint_bundle(Path("checkpoints/my-model"), trainer, tokenizer, config)
 ```
 
-**Honestly scoped:** MoE and long-context RoPE-scaling are real, shipped
-foundry architecture features (see the transformer chapter), but their
-configs aren't serialized into `config.json` yet — `save_checkpoint_bundle`
-raises `NotImplementedError` rather than silently writing a bundle that
-would reload as a plain dense, unscaled model that doesn't match what was
-actually trained. Save a dense, unscaled checkpoint to use this adapter
-today; wiring the two nested configs through is real, deferred follow-up.
+MoE and long-context RoPE-scaling (see the transformer chapter) are
+both real, shipped foundry architecture features, and both round-trip
+through `config.json` too — `MoEConfig`/`RopeScalingConfig` are flat,
+JSON-safe dataclasses, serialized as nested `null`-or-object fields.
+`load_checkpoint_bundle` stays backward compatible with a bundle saved
+before either was wired in: a legacy `config.json` simply has no
+`"moe"`/`"rope_scaling"` keys at all, and reloads as the same
+dense/unscaled config it always did.
 
 ## Wiring a bundle into the CLI
 

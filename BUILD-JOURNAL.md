@@ -3861,3 +3861,44 @@ confirmed by direct execution here), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Foundry checkpoint bundles now serialize MoE and RoPE-scaling configs
+
+`foundry_provider.py`'s own module docstring had named this as a real,
+open gap since the adapter first shipped: MoE and long-context
+RoPE-scaling are real, trainable foundry architecture features, but
+`save_checkpoint_bundle` refused to save a checkpoint trained with
+either — `NotImplementedError`, rather than silently writing a bundle
+that would reload as a plain dense/unscaled model not matching what was
+actually trained. Closed by checking what the two config types
+actually needed: `MoEConfig` (`n_experts`/`n_experts_per_tok`/
+`n_shared_experts`) and `RopeScalingConfig` (`method`/`factor`) are both
+flat dataclasses with only JSON-safe fields — nothing about them
+resisted serialization, the refusal was really just "nobody had wired
+the two extra dict conversions through yet."
+
+`save_checkpoint_bundle` now writes `"moe"`/`"rope_scaling"` as nested
+`null`-or-object fields in `config.json`; `load_checkpoint_bundle`
+reconstructs real `MoEConfig`/`RopeScalingConfig` instances from them
+before building `TransformerConfig`. **Real backward compatibility,
+verified rather than assumed:** a dedicated test hand-writes a
+`config.json` in exactly the shape the OLD code would have produced
+(no `"moe"`/`"rope_scaling"` keys at all, not even `null` ones) and
+confirms `load_checkpoint_bundle` still reconstructs it correctly —
+proving the old-format path works, not just that the new format
+round-trips.
+
+3 test changes (the old "refuses MoE" test replaced with two real
+save-then-load round-trip tests, one per config type, plus the
+backward-compatibility test), 424 → 426 Python tests. `ruff check`/
+`format --check` clean. `docs/foundry/inference.md`'s "Checkpoint
+bundles" section updated to drop the now-resolved caveat.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Linux `espeak`-path real-runtime
+verification (written against documented CLI behavior but only macOS
+confirmed by direct execution here), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
