@@ -193,3 +193,19 @@ genuinely existed on disk with the right content afterward (then
 cleaned up), and the following `GET /doctor` call reflecting it as
 configured. `apps/desktop`'s full production build (`npm run build`,
 `tsc -b`) was run for real, not assumed to still pass.
+
+## CLI conformance tests
+
+Until now, only `doctor` had `typer.testing.CliRunner` coverage
+(confirmed by `grep -rln "CliRunner" tests/` returning exactly one
+file) — every other command was only ever exercised indirectly, through
+the library functions it wraps, never through `app` itself the way a
+real user actually invokes it. `tests/conformance/test_cli.py` runs
+`chat`, `run`, `models`, `eval`, `distill`, and `sessions list`/`clear`
+through the real Typer `app`, zero-config (Mock provider only) — the
+same "always works with no API keys" guarantee the module's own
+docstring makes, now actually exercised at the command-line boundary
+rather than only at the function-call boundary underneath it. Sessions
+are isolated per test by monkeypatching `sarva.memory.session.
+DEFAULT_SESSIONS_DIR` to a `tmp_path`, so no test ever touches a real
+`~/.sarva/sessions` on the machine running them.

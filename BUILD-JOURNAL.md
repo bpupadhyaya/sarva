@@ -3501,3 +3501,48 @@ this environment doesn't have), Windows sidecar orphan-process reaping
 (`src-tauri/src/lib.rs`'s own documented gap), or CLI conformance tests
 for `chat`/`run`/`models`/`eval`/`distill`/`serve` (only `doctor` has
 `CliRunner`-based tests today).
+
+## CLI conformance tests — closing the coverage gap on every command but `doctor`
+
+Confirmed by `grep -rln "CliRunner" tests/` before starting: exactly one
+file (`test_doctor.py`). Every other `sarva` command — `chat`, `run`,
+`models`, `eval`, `distill`, `sessions list`/`clear` — had only ever
+been exercised through the library functions underneath it (`AgentLoop`,
+`run_benchmark`, `distill()`), never through the actual `app` object a
+real user's terminal invokes. `tests/conformance/test_cli.py` closes
+that: 11 new tests running the real Typer `app` end to end, zero-config
+(no API keys — Mock provider only), matching `cli.py`'s own "always
+works" docstring guarantee.
+
+**A real isolation problem, caught before it could quietly write to a
+real home directory:** `SessionStore()` resolves `DEFAULT_SESSIONS_DIR`
+(`~/.sarva/sessions`) at construction time with no CLI-level override —
+tests for `chat --session`/`run --session`/`sessions list`/`sessions
+clear` would otherwise read and write the real `~/.sarva/sessions` on
+whatever machine runs the suite. Fixed by monkeypatching
+`sarva.memory.session.DEFAULT_SESSIONS_DIR` to a `tmp_path` in every
+test that touches a session, the same isolation discipline
+`test_config.py` already established for `~/.sarva/config.json`.
+
+Coverage highlights: `chat` verified to route to Mock with zero
+configuration and to persist a two-message transcript under
+`--session`; a wrong-media-type `--image` path verified to fail cleanly
+(non-zero exit, real error text) rather than crash; `run --auto`
+verified end to end through `BUILTIN_TOOLS` wiring (Mock's unscripted
+turn never issues tool calls, so this proves the CLI's plumbing rather
+than any specific tool); `eval --model mock` verified to report the
+honest 0% score for an untrained echo provider on the arithmetic
+benchmark, the same no-fabrication discipline as elsewhere in this
+project; `distill` verified to write a real, parseable JSONL file with
+correct prompt/completion/model fields, and to fail loudly (exit 1,
+"not configured") for a model whose provider isn't set up; `sessions
+list`/`clear` verified against a real saved-then-cleared session file.
+
+11 new tests, 398 → 409 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated with a new "CLI conformance tests"
+section.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), or Windows sidecar orphan-process
+reaping (`src-tauri/src/lib.rs`'s own documented gap).
