@@ -4256,6 +4256,38 @@ path, and the real `/api/tags` response-shape parsing; plus 2 more in
 tests. `ruff check`/`format --check` clean. `docs/providers.md`'s
 Ollama section gained a follow-up paragraph on this second, deeper fix.
 
+## FoundryProvider now raises instead of silently dropping unsupported content
+
+A real inconsistency, found by checking `foundry_provider.py` against
+the discipline the three frontier adapters already hold themselves to:
+`anthropic_provider.py`/`openai_provider.py`/`google_provider.py` all
+raise a loud `ValueError` for a content-block type they have no wire
+mapping for, with the same reasoning stated directly in each — silently
+dropping it would answer as if the content was never sent, a
+materially misleading response, not a cosmetic gap.
+`foundry_provider.py`'s own `_flatten_prompt` didn't follow that
+discipline at all: it built the prompt via `Message.text()`, which
+silently drops every non-`TextBlock` by design (the right behavior for
+its own stated job, "just give me the words," but wrong here). A
+foundry checkpoint's own registry entry declares
+`modalities_in={TEXT}`, `tool_use=False` — genuinely text-only, so an
+`ImageBlock`/`ToolCallBlock`/anything else reaching this adapter meant
+a caller's real content was being thrown away with no signal at all.
+
+Fixed by checking every block in `_flatten_prompt` and raising the
+same clear `ValueError` the other three adapters already would, naming
+the real block type that couldn't be translated. Reachable only via an
+explicit model override — the router's own modality check would never
+route an image-bearing request to a text-only-registered model on its
+own — the identical reachability note the other adapters' own guards
+already carry, so this isn't a new caveat, just consistency.
+
+1 new test (`test_foundry_provider_raises_instead_of_silently_dropping_an_image`,
+mirroring the frontier adapters' own untranslatable-block-type tests).
+434 → 435 Python tests. `ruff check`/`format --check` clean.
+`docs/foundry/inference.md`'s "What the adapter honestly does and
+doesn't do" section gained a new bullet.
+
 **Next:** batching multiple concurrent inference requests (§3.6f), F1's
 real distributed training infrastructure (needs real multi-node compute
 this environment doesn't have), a Windows TTS engine (genuinely

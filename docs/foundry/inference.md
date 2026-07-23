@@ -89,6 +89,17 @@ explicit `--model foundry/<name>` override.
   no role tags); a checkpoint trained with some other convention would
   need this adapter to match it, a real, named limitation rather than an
   assumed-universal one.
+- **Text-only, and it says so loudly, not silently.** A foundry
+  checkpoint's registry entry declares `modalities_in={TEXT}` and
+  `tool_use=False`, and the adapter means it end to end: sending it an
+  `ImageBlock`/`ToolCallBlock`/anything but plain text raises a clear
+  `ValueError` rather than silently dropping the content the way
+  `Message.text()`'s own "just give me the words" helper otherwise
+  would — the same "never answer as if unsupported content was never
+  sent" discipline the Anthropic/OpenAI/Google adapters already apply
+  to their own untranslatable block types. Reachable only via an
+  explicit model override, since the router's own modality check would
+  never route such a request here on its own.
 - **Coarse streaming, not incremental.** There's no wire protocol to
   translate the way there is for a real network API — generation runs
   synchronously (`asyncio.to_thread`, so the event loop still yields) and

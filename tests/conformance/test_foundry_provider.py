@@ -224,6 +224,35 @@ async def test_foundry_provider_generate_rejects_an_unknown_model_id(tmp_path: P
             pass
 
 
+async def test_foundry_provider_raises_instead_of_silently_dropping_an_image(tmp_path: Path):
+    # foundry checkpoints are text-only end to end (modalities_in={TEXT},
+    # tool_use=False) -- Message.text() would otherwise silently drop an
+    # ImageBlock, answering as if it had never been sent. Reachable only
+    # via an explicit model override (the router's own modality check
+    # would never route an image-bearing request here on its own), same
+    # reachability note the Anthropic/OpenAI/Google adapters' own
+    # untranslatable-block-type guards carry.
+    from sarva.multimodal.content import ImageBlock
+
+    _make_bundle(tmp_path / "toy")
+    provider = FoundryProvider(tmp_path)
+    request = GenerateRequest(
+        model="foundry/toy",
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextBlock(text="what's in this image?"),
+                    ImageBlock(media_type="image/png", data=b"\x89PNG\r\n\x1a\n"),
+                ],
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="ImageBlock"):
+        async for _ in provider.generate(request):
+            pass
+
+
 async def test_foundry_provider_is_gradable_through_the_real_eval_harness(tmp_path: Path):
     # eval/harness.py's own module docstring makes a direct claim: the
     # same run_benchmark() call "will grade a foundry-trained model too

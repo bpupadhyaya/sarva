@@ -238,10 +238,31 @@ def model_info_for_bundle(name: str, path: Path) -> ModelInfo:
 
 
 def _flatten_prompt(request: GenerateRequest) -> str:
+    """`Message.text()` silently drops every non-`TextBlock` -- exactly
+    right for a caller that only wants "just the words" from a message
+    it already knows is text-only, but wrong here: a foundry checkpoint
+    is genuinely text-only end to end (`model_info_for_bundle` declares
+    `modalities_in={Modality.TEXT}`, `tool_use=False`), so any other
+    block type reaching this function means a caller sent content (an
+    image, a tool call, ...) this adapter has no wire-format mapping
+    for at all. Silently dropping it would answer as if that content
+    were never sent -- a materially misleading response, not a cosmetic
+    gap, the same reasoning the Anthropic/OpenAI/Google adapters already
+    apply to their own untranslatable block types. Reachable today only
+    via an explicit model override (the router's own `needs` modality
+    check would otherwise never route such a request here), same as
+    those adapters' own reachability note."""
     parts: list[str] = []
     if request.system:
         parts.append(request.system)
-    parts.extend(m.text() for m in request.messages)
+    for m in request.messages:
+        for b in m.content:
+            if not isinstance(b, TextBlock):
+                raise ValueError(
+                    f"FoundryProvider cannot translate a {type(b).__name__!r} content "
+                    "block (foundry checkpoints are text-only end to end)"
+                )
+        parts.append(m.text())
     return "".join(parts)
 
 
