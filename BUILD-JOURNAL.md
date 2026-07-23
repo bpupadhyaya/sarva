@@ -4010,3 +4010,38 @@ confirmed by direct execution here), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## The espeak TTS branch verified for real too, closing the last open item from the local-speech milestone
+
+The local-speech milestone's own "Next" note named this directly: the
+Linux `espeak`/`espeak-ng` branch of `sarva.audio.synthesize()` was
+written against documented CLI behavior but only ever verified via the
+macOS `say` branch, since real macOS always takes that branch first.
+Closed by installing `espeak-ng` via Homebrew (available on macOS too,
+not Linux-exclusive) and writing a test that hides `say` specifically
+(`shutil.which` monkeypatched to return `None` only for `"say"`, every
+other command resolving normally) so the actual espeak subprocess call
+runs for real, not mocked — the same bar the `say` branch already
+cleared.
+
+Verified two levels deep, mirroring the `say` branch's own verification
+story: a raw `espeak-ng -w file.wav "..."` call confirmed the CLI shape
+this module's code uses actually produces a valid WAV, and a full
+`synthesize()` → `transcribe()` round trip (real espeak-ng speech, fed
+through real `faster-whisper`) confirmed the words come back correctly
+— "the quick brown fox jumps over the lazy dog" synthesized and
+transcribed cleanly. The only piece of `sarva.audio`'s TTS surface still
+genuinely unverified is the Windows branch, which has no engine
+implemented at all yet (a real, named, open gap, not glossed over).
+
+2 new tests, 427 → 429 Python tests. `ruff check`/`format --check`
+clean. `sarva.audio`'s own module docstring and `docs/packaging.md`
+updated with the real verification record.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

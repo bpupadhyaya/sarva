@@ -246,6 +246,16 @@ actually available. `sarva speak` is the CLI's own reachable surface
 for TTS — closing the same "fully built but unreachable by any real
 user" gap this project has named and fixed before.
 
+**Both TTS branches verified against real installed binaries, not just
+documented CLI shapes:** the `say` branch runs unconditionally on real
+macOS; the `espeak-ng` branch was verified too — installed via `brew
+install espeak-ng`, then exercised for real by a test that hides `say`
+specifically (macOS's own Darwin branch would otherwise always win)
+so the actual espeak subprocess call runs, not a mock. A full
+`espeak-ng` → `faster-whisper` round trip (real synthesized speech,
+transcribed back, words checked) passed the same way the `say` round
+trip already had.
+
 ## CLI conformance tests
 
 Until now, only `doctor` had `typer.testing.CliRunner` coverage

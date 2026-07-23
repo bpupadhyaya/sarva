@@ -35,6 +35,15 @@ passes an explicit voice for exactly this reason; letting `say` resolve
 its own default silently produced near-silent WAV files that would
 have looked like a working feature until someone actually listened to
 one.
+
+Both TTS branches are verified against real installed binaries in this
+environment, not just written to documented CLI shapes: the `say`
+branch runs unconditionally on real macOS; the `espeak-ng` branch was
+verified too, by installing it (`brew install espeak-ng`) and hiding
+`say` specifically in a dedicated test so the espeak code path actually
+runs for real (macOS's own Darwin branch would otherwise always win).
+The Windows branch genuinely has no engine at all yet — see
+`synthesize()`'s own `RuntimeError` message.
 """
 
 from __future__ import annotations
