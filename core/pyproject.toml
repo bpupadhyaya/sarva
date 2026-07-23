@@ -3,6 +3,14 @@ name = "sarva"
 version = "0.1.0.dev0"
 description = "Sarva — an open, all-in-one multimodal AGI tool"
 license = "MIT"
+# core/LICENSE is a deliberate, verified-working duplicate of the
+# repo-root LICENSE, not a stray copy -- hatchling's license-files globs
+# are sandboxed to the project directory (confirmed empirically:
+# license-files = ["../LICENSE"] built without error but silently
+# bundled nothing), so a real, independently-installable package needs
+# its own in-tree copy to actually ship the license text. Keep in sync
+# with the root LICENSE if it's ever amended.
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",

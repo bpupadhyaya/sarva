@@ -51,12 +51,21 @@ jobs:
           # a `license` field, so a real built wheel's METADATA had no
           # license info at all despite this being a real MIT-licensed repo
           # with a real LICENSE file -- confirmed by inspecting the actual
-          # wheel, not assumed. Both now declare `license = "MIT"`; this
-          # check keeps that true going forward, on the real artifact.
+          # wheel, not assumed. Both now declare `license = "MIT"` and
+          # `license-files = ["LICENSE"]` (each package keeps its own
+          # in-tree copy -- hatchling's license-files globs can't reach
+          # outside the project directory, confirmed empirically). This
+          # check verifies both the metadata AND that the real license
+          # text is bundled and byte-identical to the repo-root LICENSE,
+          # on the real artifact, every push.
           for pkg in sarva sarva_foundry; do
             metadata="$(unzip -p dist/${pkg}-*.whl "*.dist-info/METADATA")"
             if [[ "$metadata" != *"License-Expression: MIT"* ]]; then
               echo "::error::${pkg}'s built wheel METADATA is missing 'License-Expression: MIT'"
+              exit 1
+            fi
+            if ! unzip -p "dist/${pkg}-"*.whl "*.dist-info/licenses/LICENSE" | diff -q - LICENSE > /dev/null; then
+              echo "::error::${pkg}'s built wheel is missing a LICENSE file matching the repo root's"
               exit 1
             fi
           done

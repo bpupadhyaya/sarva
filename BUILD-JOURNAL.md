@@ -4183,6 +4183,24 @@ each real built wheel's `METADATA` for `License-Expression: MIT` and
 fails loudly if it's missing, run against the exact command sequence
 verified by hand first.
 
+**Update, same session:** the "real, separate, unimplemented follow-up
+work" above turned out to be closeable immediately — the actual reason
+`../LICENSE` bundled nothing wasn't some deeper limitation, it was
+specifically the `../` traversal: hatchling's `license-files` globs are
+sandboxed to the project directory, confirmed by testing the identical
+config with an in-tree copy instead (`license-files = ["LICENSE"]`,
+`core/LICENSE` physically present) — it worked immediately. Copied
+`LICENSE` into both `core/` and `foundry/` (each a real,
+independently-installable package needs its own in-tree copy; a
+comment in each `pyproject.toml` explains why this duplication is
+deliberate, not accidental, and to keep both in sync with the root
+`LICENSE` if it's ever amended). Verified thoroughly: both wheels now
+bundle a real `dist-info/licenses/LICENSE`, confirmed **byte-identical**
+to the repo-root `LICENSE` via `diff`, not just "a file exists." The CI
+check was strengthened to match — it now verifies the bundled license
+text is byte-identical to the repo root's, not just that the METADATA
+expression string is present.
+
 No Python test count change (packaging-metadata-only milestone) — 429
 stays 429. `ruff check`/`format --check` clean (unaffected).
 `docs/packaging.md`'s "Verified, not assumed" section updated.

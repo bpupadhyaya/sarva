@@ -203,9 +203,15 @@ itself: neither `pyproject.toml` declared a `license` field, so a real
 built wheel's METADATA had no license information at all despite this
 being a genuinely MIT-licensed repo with a real `LICENSE` file, found
 by inspecting the actual wheel rather than assuming the metadata
-matched the repo. Both now declare `license = "MIT"`, verified in the
-built `METADATA` (`License-Expression: MIT`) and pinned by a real CI
-check on every push.
+matched the repo. Both now declare `license = "MIT"` (verified in the
+built `METADATA`: `License-Expression: MIT`) and `license-files =
+["LICENSE"]`, each package keeping its own in-tree copy of the
+repo-root `LICENSE` — hatchling's `license-files` globs can't reach
+outside the project directory, confirmed empirically (`../LICENSE`
+built without error but silently bundled nothing) before landing on
+the working fix. The bundled text is verified byte-identical to the
+repo root's, and a CI check pins both the metadata and the file on
+every push.
 
 The onboarding flow specifically was verified beyond its own test
 suite: a real `sarva serve` process, hit with real `curl` requests —

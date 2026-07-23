@@ -3,6 +3,10 @@ name = "sarva-foundry"
 version = "0.1.0.dev0"
 description = "Sarva Foundry — from-scratch model training code (tokenizer, transformer, pretraining, post-training)"
 license = "MIT"
+# foundry/LICENSE is a deliberate duplicate of the repo-root LICENSE --
+# see core/pyproject.toml's comment for why (hatchling's license-files
+# can't reach outside the project directory).
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "torch>=2.5",
