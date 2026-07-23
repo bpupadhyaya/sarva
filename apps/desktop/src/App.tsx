@@ -1,5 +1,7 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentEvent } from "./events";
+import Onboarding, { DISMISSED_KEY, isAnyProviderConfigured } from "./Onboarding";
+import type { DoctorCheck } from "./Onboarding";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -19,6 +21,31 @@ export default function App() {
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const sessionRef = useRef("web");
   const socketRef = useRef<WebSocket | null>(null);
+
+  // null = still deciding (avoids a first-run screen flashing briefly for
+  // an already-configured install while GET /doctor is in flight).
+  const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    // localStorage can be unavailable in some embedded webview contexts
+    // (and in this project's own test environment) -- treated as "not
+    // dismissed" rather than crashing the whole app on a feature that's
+    // a pure convenience, not a correctness requirement.
+    let dismissed = false;
+    try {
+      dismissed = window.localStorage.getItem(DISMISSED_KEY) !== null;
+    } catch {
+      dismissed = false;
+    }
+    if (dismissed) {
+      setShowOnboarding(false);
+      return;
+    }
+    fetch("/doctor")
+      .then((res) => (res.ok ? (res.json() as Promise<DoctorCheck[]>) : Promise.reject()))
+      .then((checks) => setShowOnboarding(!isAnyProviderConfigured(checks)))
+      .catch(() => setShowOnboarding(false)); // server unreachable -- don't block the chat UI on it
+  }, []);
 
   const appendToLastAssistant = useCallback((suffix: string) => {
     setMessages((prev) => {
@@ -82,6 +109,13 @@ export default function App() {
     socketRef.current?.send(JSON.stringify({ approved }));
     setPending(null);
   }, []);
+
+  if (showOnboarding === null) {
+    return null; // deciding — see the effect above for why this is brief and expected
+  }
+  if (showOnboarding) {
+    return <Onboarding onComplete={() => setShowOnboarding(false)} />;
+  }
 
   return (
     <div className="app">

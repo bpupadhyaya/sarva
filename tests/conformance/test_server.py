@@ -191,3 +191,58 @@ def test_websocket_auto_true_never_blocks_on_a_client_reply(tmp_path, monkeypatc
 
     assert (tmp_path / "hi.txt").read_text() == "hi"
     assert events[-1]["state"] == "done"
+
+
+def test_doctor_endpoint_returns_the_same_checks_the_cli_command_reports(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    resp = _client().get("/doctor")
+
+    assert resp.status_code == 200
+    names = {c["name"] for c in resp.json()}
+    assert names == {
+        "Anthropic API key",
+        "OpenAI API key",
+        "Google API key",
+        "Ollama (local models)",
+        "Foundry (local from-scratch models)",
+    }
+    anthropic_check = next(c for c in resp.json() if c["name"] == "Anthropic API key")
+    assert anthropic_check["ok"] is False
+
+
+def test_post_config_persists_a_key_and_the_next_doctor_call_sees_it(tmp_path, monkeypatch):
+    # The real end-to-end proof this endpoint exists for: a key saved via
+    # POST /config must be reflected in a SEPARATE, subsequent GET
+    # /doctor call -- proving it round-tripped through a real file, not
+    # just an in-memory value that happened to still be set for this one
+    # request.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    import sarva.config as config_module
+
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+
+    client = _client()
+    resp = client.post("/config", json={"anthropic_api_key": "sk-server-test"})
+    assert resp.status_code == 200
+    saved_check = next(c for c in resp.json() if c["name"] == "Anthropic API key")
+    assert saved_check["ok"] is True
+
+    doctor_resp = client.get("/doctor")
+    fresh_check = next(c for c in doctor_resp.json() if c["name"] == "Anthropic API key")
+    assert fresh_check["ok"] is True
+
+
+def test_post_config_with_no_keys_does_not_write_a_file(tmp_path, monkeypatch):
+    import sarva.config as config_module
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    resp = _client().post("/config", json={})
+
+    assert resp.status_code == 200
+    assert not config_path.exists()

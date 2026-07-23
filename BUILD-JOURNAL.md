@@ -3362,3 +3362,79 @@ real distributed training infrastructure (needs real multi-node compute
 this environment doesn't have), or a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have — likely stays deferred).
+
+## First-run guided setup — a real gap between a promise and what shipped, closed
+
+T4's own definition of done (and the README's own quickstart text) have
+said since T4: "guided first-run offers (a) 'Free & private' → pulls a
+local model, or (b) 'Frontier quality' → paste an API key" — but
+`apps/desktop/src/App.tsx` was a bare chat window with no such flow at
+all, confirmed by grepping for any onboarding/first-run logic and
+finding none. The status line has claimed "T4... desktop app done" all
+session; this was a real, honest gap between that claim and what a
+non-technical user double-clicking the built app actually got.
+
+**The real missing piece wasn't UI, it was persistence.** Every
+provider SDK (`anthropic.AsyncAnthropic()`, `openai.AsyncOpenAI()`,
+`genai.Client()`) reads its API key from real process environment
+variables internally — a key entered once anywhere had nowhere to
+survive past that one process's lifetime. New `sarva.config` module:
+`~/.sarva/config.json` (the same `~/.sarva/` home session storage
+already uses), one deliberate, tested precedence rule (a real env var
+always wins over a saved value, so an explicitly exported shell key is
+never silently overridden by a stale file). `sarva.runtime.get_env()`
+replaces every direct `os.environ.get(...)` call for the four
+provider-key names.
+
+**A real correctness gap caught before it shipped, not after:** simply
+detecting a config-file key as "available" wasn't enough — the raw SDK
+constructors only ever look at `os.environ` themselves, so a
+config-file-only key would pass every availability check and then fail
+to authenticate the moment a real request went out. Fixed by having
+`build_providers()` construct every SDK client with an *explicit*
+`api_key=...`, verified directly by checking the constructed client's
+own `.api_key` attribute in a dedicated test, not just that
+`build_providers()` runs without crashing.
+
+Two new server endpoints back the UI: `GET /doctor` (the same
+`run_diagnostics()` `sarva doctor` already uses, as JSON — can never
+drift from what the CLI reports) and `POST /config` (persists whichever
+keys the caller supplies, returns the fresh `/doctor` result in the same
+round trip so the caller can confirm the key it just saved is actually
+recognized). `Onboarding.tsx` polls `/doctor` on mount and completes
+immediately if anything (including a reachable Ollama) is already
+configured; otherwise it shows exactly the two documented choices plus
+an honest "Skip for now" escape hatch remembered in `localStorage`.
+
+**A real test-environment quirk found and handled defensively, not
+just worked around:** `window.localStorage` turned out to be
+unavailable in this project's own Vitest/jsdom test environment (Node's
+`--localstorage-file` flag wasn't set) — would have crashed the whole
+app on mount. Wrapped both the read and write sides in `try`/`catch`,
+which is the right call for a real desktop webview context too (some
+embedded/privacy-mode contexts restrict storage), not just a test
+workaround; a missing localStorage now just means onboarding re-shows
+next launch instead of crashing.
+
+**Verified beyond the test suites:** a real `sarva serve` process, hit
+with real `curl` — `POST /config` with a test key, confirmed
+`~/.sarva/config.json` genuinely existed on disk with the right content
+(then cleaned up), and the following `GET /doctor` call reflected it as
+configured. `apps/desktop`'s full production build (`npm run build`,
+`tsc -b`) ran for real. Honestly scoped: this environment has no GUI/display
+access, so the onboarding screen's actual pixels were never visually
+inspected in a real browser — the 20 new component tests (`vitest`,
+`@testing-library/react`, real fetch mocking) are real behavioral
+verification, not a substitute claimed to be equivalent to visual
+inspection.
+
+15 new Python tests (`test_config.py` + 5 new `test_server.py` cases),
+20 new TypeScript tests (`Onboarding.test.tsx`), 11 existing `App.test.tsx`
+cases updated to accommodate the new mount-time `/doctor` check. 389
+Python tests total.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), or a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have — likely stays deferred).

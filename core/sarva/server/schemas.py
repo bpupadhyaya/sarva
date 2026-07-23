@@ -24,3 +24,20 @@ class ModelInfoOut(BaseModel):
     id: str
     display_name: str
     available: bool
+
+
+class SaveConfigRequest(BaseModel):
+    """Only the four provider-key names `sarva.config` knows about are
+    accepted — an explicit allowlist (validated in the route handler, not
+    just documented here) rather than writing arbitrary caller-supplied
+    keys straight into a config file the backend later trusts."""
+
+    anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
+    gemini_api_key: str | None = None
+
+
+class DoctorCheckOut(BaseModel):
+    name: str
+    ok: bool
+    detail: str

@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from sarva.config import get_env
 from sarva.providers.anthropic_provider import AnthropicProvider
 from sarva.providers.google_provider import GoogleProvider
 from sarva.providers.mock import MockProvider
@@ -35,8 +36,8 @@ def ollama_reachable(host: str = OLLAMA_HOST) -> bool:
         return False
 
 
-def _has_google_key() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+def _google_key() -> str | None:
+    return get_env("GEMINI_API_KEY") or get_env("GOOGLE_API_KEY")
 
 
 def foundry_checkpoints_dir() -> Path | None:
@@ -69,11 +70,11 @@ def build_router() -> Router:
     registry = Registry.load(_DATA_DIR / "models.yaml")
     routing = load_routing(_DATA_DIR / "routing.yaml")
     available = {"mock"}
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if get_env("ANTHROPIC_API_KEY"):
         available |= {m.id for m in registry.all() if m.provider == "anthropic"}
-    if os.environ.get("OPENAI_API_KEY"):
+    if get_env("OPENAI_API_KEY"):
         available |= {m.id for m in registry.all() if m.provider == "openai"}
-    if _has_google_key():
+    if _google_key():
         available |= {m.id for m in registry.all() if m.provider == "google"}
     if ollama_reachable():
         available |= {m.id for m in registry.all() if m.provider == "ollama"}
@@ -110,7 +111,7 @@ def run_diagnostics() -> list[DiagnosticCheck]:
     to fail every check here and still work fine via the Mock provider."""
     checks: list[DiagnosticCheck] = []
 
-    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    has_anthropic = bool(get_env("ANTHROPIC_API_KEY"))
     checks.append(
         DiagnosticCheck(
             "Anthropic API key",
@@ -121,7 +122,7 @@ def run_diagnostics() -> list[DiagnosticCheck]:
         )
     )
 
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    has_openai = bool(get_env("OPENAI_API_KEY"))
     checks.append(
         DiagnosticCheck(
             "OpenAI API key",
@@ -132,7 +133,7 @@ def run_diagnostics() -> list[DiagnosticCheck]:
         )
     )
 
-    has_google = _has_google_key()
+    has_google = bool(_google_key())
     checks.append(
         DiagnosticCheck(
             "Google API key",
@@ -186,13 +187,30 @@ def run_diagnostics() -> list[DiagnosticCheck]:
 
 
 def build_providers() -> dict[str, Any]:
+    # Every SDK client is constructed with an EXPLICIT api_key rather than
+    # left to the SDK's own os.environ auto-detection -- a key that only
+    # exists in sarva.config's saved file (not a real process env var)
+    # would otherwise pass every availability check above and then fail
+    # to authenticate the moment a real request went out, since the raw
+    # SDK constructors never look anywhere but os.environ themselves.
     providers: dict[str, Any] = {"mock": MockProvider()}
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        providers["anthropic"] = AnthropicProvider()
-    if os.environ.get("OPENAI_API_KEY"):
-        providers["openai"] = OpenAIProvider()
-    if _has_google_key():
-        providers["google"] = GoogleProvider()
+    anthropic_key = get_env("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        import anthropic
+
+        providers["anthropic"] = AnthropicProvider(
+            client=anthropic.AsyncAnthropic(api_key=anthropic_key)
+        )
+    openai_key = get_env("OPENAI_API_KEY")
+    if openai_key:
+        import openai
+
+        providers["openai"] = OpenAIProvider(client=openai.AsyncOpenAI(api_key=openai_key))
+    google_key = _google_key()
+    if google_key:
+        from google import genai
+
+        providers["google"] = GoogleProvider(client=genai.Client(api_key=google_key))
     if ollama_reachable():
         providers["ollama"] = OllamaProvider(host=OLLAMA_HOST)
     fdir = foundry_checkpoints_dir()

@@ -13,6 +13,8 @@ export default defineConfig({
       "/chat": "http://127.0.0.1:8000",
       "/models": "http://127.0.0.1:8000",
       "/health": "http://127.0.0.1:8000",
+      "/doctor": "http://127.0.0.1:8000",
+      "/config": "http://127.0.0.1:8000",
       "/ws": { target: "ws://127.0.0.1:8000", ws: true },
     },
   },

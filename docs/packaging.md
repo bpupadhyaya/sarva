@@ -85,11 +85,56 @@ branches on `event.type === "needs_confirmation"` and its
 matching the server side precisely. `GET /health` and `GET /models`
 round out the REST surface for basic liveness/registry checks.
 
+`GET /doctor` and `POST /config` are the two endpoints the first-run
+onboarding screen (below) depends on — `/doctor` returns exactly what
+`sarva doctor` prints, as JSON (reusing `run_diagnostics()` directly, so
+the two can never drift out of sync), and `/config` persists whichever
+provider key the caller supplies via `sarva.config.save_config`.
+
 **Serving the web UI is genuinely optional, not a hard dependency of
 the API:** if `core/sarva/server/static/` exists, it's mounted at `/`
 via `StaticFiles(..., html=True)` so `sarva serve` alone gives a
 complete browser experience; if it doesn't exist, the server is simply
 API-only, with nothing breaking either way.
+
+## First-run guided setup — a real gap between what was promised and what shipped
+
+T4's own definition of done, and the README's own quickstart text, have
+both promised "guided first-run offers (a) 'Free & private' → pulls a
+local model, or (b) 'Frontier quality' → paste an API key" since T4 —
+but until now, `App.tsx` was a bare chat window with no such flow at
+all. A non-technical user double-clicking the built app got a chat box
+with no path to configure anything, the exact opposite of the mission's
+own "non-developer completes install→first answer in <3 minutes, no
+terminal" promise.
+
+**The real missing piece wasn't the UI — it was persistence.** Every
+provider's SDK client (`anthropic.AsyncAnthropic()`, `openai.AsyncOpenAI()`,
+`genai.Client()`) reads its API key from real process environment
+variables internally; a key entered once in any UI had nowhere to
+survive past that single process's lifetime. `sarva.config` adds a real
+file, `~/.sarva/config.json` (the same `~/.sarva/` home session storage
+already uses), with one deliberate precedence rule: a real environment
+variable always wins over a saved config value, so an explicitly
+exported shell key is never silently overridden by a stale file.
+`sarva.runtime`'s `get_env()` — used everywhere `os.environ.get(...)`
+used to appear for the four provider-key names — checks both.
+
+**A config-file-only key had to actually authenticate, not just "look
+configured":** `build_providers()` now constructs every SDK client with
+an *explicit* `api_key=...` sourced via `get_env()`, rather than the raw
+SDK constructors' own (config-file-blind) `os.environ` auto-detection —
+verified directly by checking the constructed client's own `.api_key`
+attribute, not just that `build_providers()` doesn't crash.
+
+`Onboarding.tsx` is the screen this makes possible: on mount it polls
+`GET /doctor`; if any provider (including a reachable Ollama) is already
+configured, it completes immediately and the user never sees it. If
+not, it offers exactly the two documented choices — Ollama instructions
+with a live "Check again" re-poll, or a key-paste form that `POST
+/config`s and shows the fresh `/doctor` result — plus an honest "Skip
+for now" escape hatch (remembered in `localStorage`) for anyone who just
+wants the always-available Mock provider.
 
 ## The web UI and the desktop app
 
@@ -140,3 +185,11 @@ against current source (`cli.py`, `server/app.py`,
 `build-web.sh`) rather than written from memory of having built it,
 the same discipline that caught two real stale docstrings while writing
 earlier chapters.
+
+The onboarding flow specifically was verified beyond its own test
+suite: a real `sarva serve` process, hit with real `curl` requests —
+`POST /config` with a test key, confirming `~/.sarva/config.json`
+genuinely existed on disk with the right content afterward (then
+cleaned up), and the following `GET /doctor` call reflecting it as
+configured. `apps/desktop`'s full production build (`npm run build`,
+`tsc -b`) was run for real, not assumed to still pass.

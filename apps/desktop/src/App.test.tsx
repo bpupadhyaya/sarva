@@ -33,12 +33,32 @@ class MockWebSocket {
 beforeEach(() => {
   MockWebSocket.instances = [];
   vi.stubGlobal("WebSocket", MockWebSocket);
+  // App.tsx's mount effect calls GET /doctor to decide whether to show
+  // the first-run Onboarding screen (see Onboarding.test.tsx for that
+  // screen's own coverage) -- these chat-flow tests aren't testing that
+  // decision, so every test here gets an "already configured" response
+  // by default, skipping straight to the chat UI they actually exercise.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ name: "Anthropic API key", ok: true, detail: "ANTHROPIC_API_KEY is set" }],
+    }),
+  );
 });
 
 function latestSocket(): MockWebSocket {
   const ws = MockWebSocket.instances.at(-1);
   if (!ws) throw new Error("no WebSocket was constructed");
   return ws;
+}
+
+/** Renders <App /> and waits for its mount-time GET /doctor check to
+ * settle before returning, so callers land on the real chat UI instead
+ * of the brief `showOnboarding === null` (renders nothing) state. */
+async function renderApp() {
+  render(<App />);
+  await screen.findByPlaceholderText("Message Sarva…");
 }
 
 /** Simulate the server sending one AgentEvent JSON frame. Wrapped in act()
@@ -72,13 +92,13 @@ function submitMessage(text: string) {
 }
 
 describe("App", () => {
-  it("shows the empty state before any message is sent", () => {
-    render(<App />);
+  it("shows the empty state before any message is sent", async () => {
+    await renderApp();
     expect(screen.getByText("Say something to get started.")).toBeInTheDocument();
   });
 
-  it("adds a user bubble and opens a WebSocket carrying the message on submit", () => {
-    render(<App />);
+  it("adds a user bubble and opens a WebSocket carrying the message on submit", async () => {
+    await renderApp();
     submitMessage("hello sarva");
 
     expect(screen.getByText("hello sarva")).toBeInTheDocument();
@@ -89,8 +109,8 @@ describe("App", () => {
     expect(JSON.parse(ws.sent[0])).toEqual({ message: "hello sarva", session: "web" });
   });
 
-  it("accumulates text_delta events into the assistant bubble as they stream in", () => {
-    render(<App />);
+  it("accumulates text_delta events into the assistant bubble as they stream in", async () => {
+    await renderApp();
     submitMessage("what's the weather?");
 
     const ws = latestSocket();
@@ -102,8 +122,8 @@ describe("App", () => {
     expect(screen.getByText("It's sunny today.")).toBeInTheDocument();
   });
 
-  it("re-enables the composer and shows nothing extra on a clean run_done", () => {
-    render(<App />);
+  it("re-enables the composer and shows nothing extra on a clean run_done", async () => {
+    await renderApp();
     submitMessage("hi");
 
     const ws = latestSocket();
@@ -117,8 +137,8 @@ describe("App", () => {
     expect(screen.queryByText(/run ended/)).not.toBeInTheDocument();
   });
 
-  it("shows an error message when the run ends in a non-done state", () => {
-    render(<App />);
+  it("shows an error message when the run ends in a non-done state", async () => {
+    await renderApp();
     submitMessage("this will fail");
 
     const ws = latestSocket();
@@ -128,8 +148,8 @@ describe("App", () => {
     expect(screen.getByText(/run ended: failed/)).toBeInTheDocument();
   });
 
-  it("disables the composer while a response is streaming", () => {
-    render(<App />);
+  it("disables the composer while a response is streaming", async () => {
+    await renderApp();
     const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
     submitMessage("hi");
 
@@ -137,8 +157,8 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: /thinking/i })).toBeDisabled();
   });
 
-  it("shows a connection error and re-enables the composer on a socket error", () => {
-    render(<App />);
+  it("shows a connection error and re-enables the composer on a socket error", async () => {
+    await renderApp();
     submitMessage("hi");
 
     const ws = latestSocket();
@@ -149,8 +169,8 @@ describe("App", () => {
     expect(input.disabled).toBe(false);
   });
 
-  it("shows an Approve/Deny card on needs_confirmation and sends the reply on Approve", () => {
-    render(<App />);
+  it("shows an Approve/Deny card on needs_confirmation and sends the reply on Approve", async () => {
+    await renderApp();
     submitMessage("delete something");
 
     const ws = latestSocket();
@@ -167,8 +187,8 @@ describe("App", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
-  it("sends {approved: false} on Deny and dismisses the card", () => {
-    render(<App />);
+  it("sends {approved: false} on Deny and dismisses the card", async () => {
+    await renderApp();
     submitMessage("delete something");
 
     const ws = latestSocket();
@@ -183,8 +203,8 @@ describe("App", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
-  it("renders tool_started and tool_finished as inline status lines", () => {
-    render(<App />);
+  it("renders tool_started and tool_finished as inline status lines", async () => {
+    await renderApp();
     submitMessage("write a file");
 
     const ws = latestSocket();
@@ -199,8 +219,8 @@ describe("App", () => {
     expect(screen.getByText(/ok/)).toBeInTheDocument();
   });
 
-  it("clears the confirmation card on run_done even if never answered", () => {
-    render(<App />);
+  it("clears the confirmation card on run_done even if never answered", async () => {
+    await renderApp();
     submitMessage("delete something");
 
     const ws = latestSocket();

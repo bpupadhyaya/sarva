@@ -29,11 +29,18 @@ from sarva.agent.budget import Spend
 from sarva.agent.events import AgentState
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
+from sarva.config import save_config
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message, ToolCallBlock
 from sarva.multimodal.degraders import default_degraders
-from sarva.runtime import build_providers, build_router
-from sarva.server.schemas import ChatRequest, ChatResponse, ModelInfoOut
+from sarva.runtime import build_providers, build_router, run_diagnostics
+from sarva.server.schemas import (
+    ChatRequest,
+    ChatResponse,
+    DoctorCheckOut,
+    ModelInfoOut,
+    SaveConfigRequest,
+)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -66,6 +73,31 @@ def create_app() -> FastAPI:
             ModelInfoOut(id=m.id, display_name=m.display_name, available=m.id in router.available)
             for m in router.registry.all()
         ]
+
+    @app.get("/doctor", response_model=list[DoctorCheckOut])
+    async def doctor() -> list[DoctorCheckOut]:
+        """The same diagnostics `sarva doctor` prints, as JSON — what the
+        desktop app's first-run screen polls to decide whether anything is
+        configured yet, reusing `run_diagnostics()` exactly so this can
+        never drift out of sync with what the CLI reports."""
+        return [DoctorCheckOut(name=c.name, ok=c.ok, detail=c.detail) for c in run_diagnostics()]
+
+    @app.post("/config", response_model=list[DoctorCheckOut])
+    async def save_config_route(req: SaveConfigRequest) -> list[DoctorCheckOut]:
+        """Persists whichever provider keys the caller supplied to
+        `sarva.config`'s file — the desktop first-run screen's "paste an
+        API key" path writes here. Returns the fresh `/doctor` result
+        (not just {"ok": true}) so the caller can confirm the key it just
+        saved is actually recognized, in one round trip."""
+        values = {
+            "ANTHROPIC_API_KEY": req.anthropic_api_key,
+            "OPENAI_API_KEY": req.openai_api_key,
+            "GEMINI_API_KEY": req.gemini_api_key,
+        }
+        non_empty = {k: v for k, v in values.items() if v}
+        if non_empty:
+            save_config(non_empty)
+        return [DoctorCheckOut(name=c.name, ok=c.ok, detail=c.detail) for c in run_diagnostics()]
 
     @app.post("/chat", response_model=ChatResponse)
     async def chat(req: ChatRequest) -> ChatResponse:
