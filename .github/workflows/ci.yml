@@ -47,6 +47,19 @@ jobs:
         # hang, just a real one-time cost worth not being surprised by.
         run: |
           uv build --all-packages --out-dir dist
+          # A real, previously-uncaught gap: neither pyproject.toml declared
+          # a `license` field, so a real built wheel's METADATA had no
+          # license info at all despite this being a real MIT-licensed repo
+          # with a real LICENSE file -- confirmed by inspecting the actual
+          # wheel, not assumed. Both now declare `license = "MIT"`; this
+          # check keeps that true going forward, on the real artifact.
+          for pkg in sarva sarva_foundry; do
+            metadata="$(unzip -p dist/${pkg}-*.whl "*.dist-info/METADATA")"
+            if [[ "$metadata" != *"License-Expression: MIT"* ]]; then
+              echo "::error::${pkg}'s built wheel METADATA is missing 'License-Expression: MIT'"
+              exit 1
+            fi
+          done
           uv venv /tmp/sarva-clean-venv --python 3.12
           uv pip install --python /tmp/sarva-clean-venv/bin/python dist/sarva-*.whl
           uv pip install --python /tmp/sarva-clean-venv/bin/python dist/sarva_foundry-*.whl

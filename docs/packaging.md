@@ -198,7 +198,14 @@ against current source (`cli.py`, `server/app.py`,
 `src-tauri/src/lib.rs`, `release-bundle.yml`, `App.tsx`,
 `build-web.sh`) rather than written from memory of having built it,
 the same discipline that caught two real stale docstrings while writing
-earlier chapters.
+earlier chapters — and, separately, a real gap in the built artifact
+itself: neither `pyproject.toml` declared a `license` field, so a real
+built wheel's METADATA had no license information at all despite this
+being a genuinely MIT-licensed repo with a real `LICENSE` file, found
+by inspecting the actual wheel rather than assuming the metadata
+matched the repo. Both now declare `license = "MIT"`, verified in the
+built `METADATA` (`License-Expression: MIT`) and pinned by a real CI
+check on every push.
 
 The onboarding flow specifically was verified beyond its own test
 suite: a real `sarva serve` process, hit with real `curl` requests —

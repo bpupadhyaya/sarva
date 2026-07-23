@@ -2,6 +2,7 @@
 name = "sarva"
 version = "0.1.0.dev0"
 description = "Sarva — an open, all-in-one multimodal AGI tool"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",

@@ -4144,3 +4144,53 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## The built wheels had no license metadata at all — found the same way the docs config bug was
+
+Same instinct as the mkdocs config fix: check a real built artifact
+directly instead of assuming the repo's own honesty (a real `LICENSE`
+file, README saying "MIT") automatically propagates into what actually
+ships. It doesn't, automatically — neither `core/pyproject.toml` nor
+`foundry/pyproject.toml` declared a `license` field at all, confirmed
+by building a real wheel and grepping its actual `METADATA` file for
+`License`/`Classifier` lines: nothing. A real `pip install sarva` (or
+a PyPI listing, if this project ever publishes there) would have shown
+no license information whatsoever, despite this genuinely being an
+MIT-licensed project.
+
+Fixed with the modern PEP 639 form — `license = "MIT"` (an SPDX
+expression string, not the older `{text = "..."}` table) — added to
+both packages' `[project]` tables. Verified directly, not assumed:
+`uv build --all-packages` then `unzip -p *.whl "*.dist-info/METADATA"`
+now shows `License-Expression: MIT` for both `sarva` and
+`sarva-foundry`, with `Metadata-Version: 2.4` confirming the installed
+hatchling actually supports the modern field rather than silently
+ignoring it.
+
+**A real, honest limit found and not glossed over:** also tried
+`license-files = ["../LICENSE"]` to physically bundle the actual
+license text into the wheel's `dist-info/licenses/` directory (the
+other half of PEP 639) — the build didn't error, but the file never
+actually appeared in the wheel, confirmed by listing its full contents.
+Rather than leave a declaration that silently does nothing, removed it
+— the honest, verified fix is the SPDX expression alone; bundling the
+literal license text is real, separate, unimplemented follow-up work,
+not something this change gets to claim.
+
+Closed the loop with a real CI check, not just a one-time manual
+verification: the existing "Verify installable wheels" step now greps
+each real built wheel's `METADATA` for `License-Expression: MIT` and
+fails loudly if it's missing, run against the exact command sequence
+verified by hand first.
+
+No Python test count change (packaging-metadata-only milestone) — 429
+stays 429. `ruff check`/`format --check` clean (unaffected).
+`docs/packaging.md`'s "Verified, not assumed" section updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
