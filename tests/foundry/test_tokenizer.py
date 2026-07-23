@@ -85,6 +85,45 @@ def test_special_tokens_are_atomic_and_roundtrip():
     assert ids.count(special_id) == 1
 
 
+def test_decode_replaces_invalid_utf8_instead_of_raising():
+    # Real, not hypothetical: encode() always produces valid UTF-8 by
+    # construction, but decode() also has to handle arbitrary token id
+    # sequences a model might actually generate (RL rollout, an
+    # undertrained checkpoint, adversarial input) -- those aren't
+    # guaranteed to concatenate into valid UTF-8. A tokenizer used for
+    # real inference must decode gracefully, not crash the whole
+    # generation. Byte 0xCC alone is an invalid lone UTF-8 continuation
+    # byte -- confirmed directly (not assumed) by finding the vocab id
+    # that maps to that exact raw byte value.
+    tok = ByteLevelBPETokenizer()  # untrained: vocab ids 0..255 are the raw byte alphabet
+    from sarva_foundry.tokenizer.bpe import _byte_to_unicode
+
+    invalid_byte_char = _byte_to_unicode()[0xCC]
+    invalid_id = tok.vocab[invalid_byte_char]
+
+    result = tok.decode([invalid_id])  # must not raise UnicodeDecodeError
+
+    assert "�" in result  # the standard Unicode replacement character
+
+
+def test_decode_still_roundtrips_valid_text_around_invalid_bytes():
+    # The replacement behavior must be scoped to genuinely invalid bytes
+    # only -- real, validly-encoded text around them must still decode
+    # exactly, not get mangled as collateral damage.
+    tok = _trained()
+    valid_prefix = tok.encode("hello ")
+    from sarva_foundry.tokenizer.bpe import _byte_to_unicode
+
+    invalid_id = tok.vocab[_byte_to_unicode()[0xCC]]
+    valid_suffix = tok.encode(" world")
+
+    result = tok.decode(valid_prefix + [invalid_id] + valid_suffix)
+
+    assert result.startswith("hello ")
+    assert result.endswith(" world")
+    assert "�" in result
+
+
 def test_save_and_load_roundtrip(tmp_path):
     tok = _trained(vocab_size=300, special_tokens=("<|endoftext|>",))
     path = tmp_path / "tokenizer.json"

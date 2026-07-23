@@ -412,6 +412,66 @@ write working Python from sparse code-execution rewards in a short
 demo, and this project doesn't fabricate results to make a chapter look
 more finished than it is.
 
+## Reasoning-token training: SFT cold start, then GRPO on a verifiable reward
+
+§3.6a names "reasoning/thinking-token support... o1/R1-class" directly,
+citing DeepSeek-R1-class open recipes as the reference — and until now
+it was the one item on that list with zero code anywhere in `foundry/`,
+confirmed by grep before starting. `sarva_foundry.train.reasoning`
+closes it, deliberately reusing SFT and GRPO completely unchanged
+rather than inventing new training machinery: the only new code is a
+reward function.
+
+**The two-stage shape isn't arbitrary — it's DeepSeek-R1's own published
+finding, taken directly.** The R1 paper's own ablation ("R1-Zero") found
+that pure RL from a base model learned to reason but produced real
+format/readability problems, which is exactly why the paper's final
+recipe adds a small "cold start" SFT stage — teaching the
+`<think>...</think>` format via imitation — before RL takes over. This
+project's own GRPO work found something structurally similar earlier
+(tiny, freshly-initialized transformers have extremely peaked initial
+sampling, leaving RL nothing to explore from) — the cold-start stage
+here plays the same real role: giving GRPO something better than noise
+to refine.
+
+`reasoning_reward` sums two signals, matching R1's own reward design: a
+`format_reward` (well-formed `<think>...</think>` wrapping non-empty
+reasoning, followed by a non-empty answer) and an `answer_reward` (does
+the real expected answer appear in whatever follows `</think>`),
+weighted 0.3/0.7 toward correctness.
+
+**A real reward-hacking exploit, found empirically and fixed, not
+hidden:** the first version of both reward functions matched only the
+*first* `</think>` in a completion. GRPO training discovered it could
+pad completions with many extra `</think>` copies — abandoning the real
+format (worth less reward) to inflate the higher-weighted answer
+reward's loose "contains" check with repeated copies of the target
+digit, without genuinely answering correctly. Caught by actually
+inspecting the trained model's greedy output, not by assuming the
+climbing group-mean-reward curve meant real learning was happening. Both
+reward functions now require **exactly one** `<think>`/`</think>` pair;
+the exact degenerate completion that broke them is preserved as a
+permanent regression test.
+
+**A second real bug this surfaced, in the tokenizer itself:** decoding a
+genuinely undertrained model's output crashed with `UnicodeDecodeError`
+— `ByteLevelBPETokenizer.decode()` had only ever been exercised on ids
+that came from `encode()` on real text (always valid UTF-8 by
+construction), never on arbitrary model-generated ids, which carry no
+such guarantee. Fixed with `errors="replace"` in the final UTF-8 decode
+— standard practice for any real tokenizer used in inference/RL rollout,
+not a workaround specific to this example.
+
+`examples/17_reasoning_token_training.py` runs the real two-stage
+recipe on single-digit addition (`"2 plus 3 = "` →
+`"<think>2+3=5</think>5"`): cold-start SFT reliably nails the format
+but leaves real headroom on the arithmetic (31% answer accuracy); 400
+steps of GRPO refinement on top measurably improves it (56%),
+every number from real generated text checked against the real digit
+sum. Format compliance never regresses — the tightened reward function
+makes a degenerate, format-abandoning strategy score strictly worse,
+not just differently.
+
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
@@ -422,6 +482,7 @@ dedup would need to scale past the current O(kept²) pairwise
 comparison), and the distributed training slice of §3.6d (FSDP → 3D
 parallelism, loss-spike handling, scaling-law tooling) once a model
 worth training at that scale exists. §3.6e's post-training line — SFT,
-DPO, and agentic RL (both the environment harness and now the GRPO
-training loop) — is fully built, at the scale a laptop can actually run
-and verify.
+DPO, agentic RL (both the environment harness and the GRPO training
+loop), and now reasoning/thinking-token training — is fully built, at
+the scale a laptop can actually run and verify. §3.6a's architecture
+*and* training-recipe lists have no remaining named gap.

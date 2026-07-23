@@ -73,7 +73,17 @@ def _text_to_symbols(text: str) -> str:
 
 
 def _symbols_to_text(symbols: str) -> str:
-    return bytes(_UNICODE_TO_BYTE[c] for c in symbols).decode("utf-8")
+    # errors="replace" (U+FFFD for whatever bytes don't form valid UTF-8),
+    # not the default strict mode: `decode()` round-trips against real
+    # encoded text perfectly (encode() always produces valid UTF-8 by
+    # construction), but a genuinely undertrained or adversarial model
+    # can emit ANY token id sequence, including ones whose concatenated
+    # bytes are not valid UTF-8 -- a real case, not hypothetical (hit
+    # directly while sampling from an early-training-step reasoning-
+    # token model; see sarva_foundry.train.reasoning). A tokenizer used
+    # for real inference/RL rollouts must decode gracefully in that case,
+    # not raise and abort the whole generation.
+    return bytes(_UNICODE_TO_BYTE[c] for c in symbols).decode("utf-8", errors="replace")
 
 
 def _get_pair_counts(word_freqs: dict[tuple[str, ...], int]) -> Counter[tuple[str, str]]:

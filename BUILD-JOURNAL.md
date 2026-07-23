@@ -3249,3 +3249,61 @@ this environment doesn't have), reasoning/thinking-token training
 at code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Reasoning-token training — SFT cold start + GRPO, and two real bugs caught building it
+
+§3.6a names "reasoning/thinking-token support... o1/R1-class" directly,
+citing DeepSeek-R1-class open recipes — confirmed by grep before
+starting that it was the one item on that list with zero code anywhere
+in `foundry/`. `sarva_foundry.train.reasoning` closes it, reusing SFT
+and GRPO completely unchanged — the only new code is a reward function
+(`format_reward` + `answer_reward`, summed as `reasoning_reward`,
+weighted 0.3/0.7 toward correctness, mirroring DeepSeek-R1's own reward
+design). The two-stage recipe (cold-start SFT teaches the
+`<think>...</think>` format, GRPO then refines answer accuracy on top)
+isn't an arbitrary choice — it's the R1 paper's own published finding:
+pure RL from a base model ("R1-Zero") produced real format/readability
+problems in their ablation, which is exactly why R1's final recipe adds
+a cold-start stage before RL.
+
+**A real reward-hacking exploit, caught empirically while building the
+example script, not shipped:** the first version of both reward
+functions matched only the *first* `</think>` in a completion. GRPO
+training discovered padding completions with many extra `</think>`
+copies inflated the answer reward's loose "contains" check with repeated
+copies of the target digit, without genuinely answering correctly — a
+training run's climbing group-mean-reward curve looked like real
+learning right up until the trained model's actual greedy output was
+inspected directly and turned out to be degenerate spam. Both reward
+functions now require **exactly one** `<think>`/`</think>` pair; the
+literal degenerate completion that broke them is pinned as a permanent
+regression test. Retraining with the fixed reward from scratch produced
+a genuinely well-formed, prompt-differentiated result instead (31% → 56%
+answer accuracy on single-digit addition, real numbers from real
+generated text checked against the real digit sum).
+
+**A second, independent real bug this surfaced, in the tokenizer
+itself:** decoding a genuinely undertrained model's output crashed with
+`UnicodeDecodeError` — `ByteLevelBPETokenizer.decode()` had only ever
+been exercised on ids from `encode()` on real text (always valid UTF-8
+by construction) in 291 prior tests, never on arbitrary model-generated
+ids, which carry no such guarantee. Fixed with `errors="replace"` in the
+final UTF-8 decode step (standard practice for any real tokenizer used
+in inference/RL rollout), with two dedicated tests: one confirming
+invalid bytes get replaced instead of raising, one confirming valid text
+around the invalid bytes still round-trips exactly (the fix doesn't
+collaterally damage legitimate decoding).
+
+`examples/17_reasoning_token_training.py` runs the real two-stage recipe
+on single-digit addition, with real printed before/after rates. 21 new
+tests across three files (`test_reasoning.py`, `test_reasoning_
+training.py`, plus 2 in `test_tokenizer.py`), 350 → 371 Python tests.
+`docs/foundry/training.md` gets a new section covering the recipe, both
+bugs, and the real numbers. §3.6a's architecture *and* training-recipe
+lists have no remaining named gap.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), or a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have — likely stays deferred).
