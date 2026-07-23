@@ -218,6 +218,40 @@ async def _eval(model_filter: str | None) -> None:
         console.print(f"{model_id:25s} {report.accuracy:.0%}  ({correct}/{len(report.results)})")
 
 
+@app.command("distill")
+def distill_cmd(
+    prompts_file: Path = typer.Argument(..., help="Text file, one prompt per line."),
+    model: str = typer.Option(..., "--model", help="Model id to distill from."),
+    out: Path = typer.Option(..., "--out", help="Output JSONL path (prompt/completion/model)."),
+    system: str | None = typer.Option(
+        None, "--system", help="Optional system prompt applied to every request."
+    ),
+) -> None:
+    """Generate (prompt, completion) pairs from a real model — frontier-
+    as-teacher synthetic data (spec §3.6c) for foundry SFT training."""
+    asyncio.run(_distill(prompts_file, model, out, system))
+
+
+async def _distill(prompts_file: Path, model: str, out: Path, system: str | None) -> None:
+    from sarva.distill import distill, save_jsonl
+
+    router = _build_router()
+    providers = _build_providers()
+    info = router.registry.get(model)
+    provider = providers.get(info.provider)
+    if provider is None:
+        console.print(
+            f"[red]provider {info.provider!r} for model {model!r} is not configured[/red]"
+        )
+        raise typer.Exit(1)
+
+    prompts = [line.strip() for line in prompts_file.read_text().splitlines() if line.strip()]
+    console.print(f"Distilling {len(prompts)} prompts from {model}...")
+    records = await distill(prompts, provider, model=model, system=system)
+    save_jsonl(records, out)
+    console.print(f"Wrote {len(records)} records to {out}")
+
+
 @sessions_app.command("list")
 def sessions_list() -> None:
     """List saved chat sessions and how many messages each holds."""

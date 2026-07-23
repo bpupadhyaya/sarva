@@ -23,6 +23,7 @@ nav:
       - Memory (sessions + semantic recall): memory.md
       - MCP client (plugging in the ecosystem's tools): mcp.md
       - Eval (grading every model the same way): eval.md
+      - Distillation (frontier-as-teacher synthetic data): distillation.md
   - Foundry:
       - The tokenizer, from scratch: foundry/tokenizer.md
       - The transformer, from scratch: foundry/transformer.md

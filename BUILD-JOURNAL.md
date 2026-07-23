@@ -2355,3 +2355,64 @@ example is exactly `0.6931`, the same fixed point the test pins.
 piece of §3.6e's post-training line — agentic RL (RL on long-horizon
 tool-use tasks, sandboxed coding-environment harness, distillation from
 frontier models).
+
+## Distillation — frontier-as-teacher synthetic data (§3.6c), and core meets foundry for the first time
+
+§3.6c: "synthetic-data generation (frontier-as-teacher via the provider
+layer)." `sarva.distill` (core) generates `(prompt, completion)` pairs
+from any real `Provider` — the same abstraction `sarva.eval.harness.
+run_benchmark` already uses to grade every registered model
+identically, reused here to *generate* data instead of scoring it, so
+whichever provider is configured (Anthropic, OpenAI, Google, a local
+Ollama model) can serve as the teacher with zero backend-specific code.
+
+**A real architectural decision, made deliberately, not by default:**
+`distill()` returns plain `DistillationRecord`s (prompt/completion/
+model), not `sarva_foundry.train.sft.SFTExample` objects directly.
+`core`'s and `sarva_foundry`'s `pyproject.toml`s name completely
+disjoint dependency sets (`anthropic`/`openai`/`google-genai`/`fastapi`/
+... vs. `torch`/`numpy`), and until now neither package has ever
+imported the other. Keeping it that way here means a caller who wants
+foundry SFT data writes one line of glue
+(`SFTExample(prompt=r.prompt, response=r.completion)`) in their own
+script rather than either package taking on the other's entire
+dependency tree just to pass a dataclass across a boundary.
+`examples/12_distillation_to_sft.py` is that glue script, made runnable
+end to end — the first example in this project to import from both
+`sarva` and `sarva_foundry` in the same file, at the script level where
+that kind of composition belongs.
+
+**A deliberate difference from the eval harness's error handling, named
+explicitly, not just implemented differently:** `run_benchmark` scores
+a failing case as incorrect and keeps going, since one bad benchmark
+case shouldn't hide every other case's real result. `distill()` does
+the opposite — a `ProviderError` on any prompt propagates immediately.
+Distillation output becomes training data; a silently-missing or
+garbage record is a worse outcome than a loud failure a caller can
+retry or investigate.
+
+Wired into the CLI as `sarva distill prompts.txt --model ID --out
+out.jsonl`, smoke-tested for real end to end against the zero-config
+Mock provider (no API key needed to verify the command itself works —
+`sarva distill` correctly read a 2-line prompts file, generated 2
+records, and wrote valid JSONL). 7 new tests in `test_distill.py`,
+covering generation ordering, model-id tagging, the error-propagation
+difference from the eval harness, and a JSONL round-trip.
+
+**Honestly scoped, not silently claimed verified:** `examples/12`
+itself requires a real API key this environment doesn't have — unlike
+every provider adapter before its first live run, it can't be exercised
+end to end here. Verified everything that's verifiable without one: the
+no-key path prints a clear message and exits cleanly (matching
+`examples/05_web_fetch.py`'s established gating pattern), and every
+cross-package import (`sarva.distill`, `sarva.providers.
+anthropic_provider`, `sarva_foundry.*` all in one file) resolves with no
+import errors — confirmed by actually running the script and observing
+it reach the API-key check, not just reading the code and assuming it
+would.
+
+285 Python tests total now (278 → 285).
+
+**Next:** F1's real (non-toy) training infrastructure, or the last
+piece of §3.6e's post-training line — agentic RL (RL on long-horizon
+tool-use tasks, sandboxed coding-environment harness).
