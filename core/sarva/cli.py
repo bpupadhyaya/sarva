@@ -21,7 +21,7 @@ from rich.markup import escape
 
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, Tool, always_allow
-from sarva.mcp_client import connect_stdio_mcp_server, list_mcp_tools
+from sarva.mcp_client import connect_http_mcp_server, connect_stdio_mcp_server, list_mcp_tools
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message
 from sarva.multimodal.degraders import default_degraders
@@ -114,9 +114,11 @@ def run(
     mcp_server: list[str] = typer.Option(
         [],
         "--mcp-server",
-        help="Connect an MCP server over stdio and add its tools to this run, e.g. "
-        '--mcp-server "npx -y @modelcontextprotocol/server-filesystem /tmp" '
-        "(repeatable).",
+        help="Connect an MCP server and add its tools to this run (repeatable). "
+        'A shell command connects over stdio, e.g. --mcp-server "npx -y '
+        '@modelcontextprotocol/server-filesystem /tmp"; an http:// or https:// '
+        "URL connects over Streamable HTTP instead, e.g. "
+        "--mcp-server https://example.com/mcp.",
     ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
@@ -137,10 +139,13 @@ async def _run(
     async with AsyncExitStack() as stack:
         tools: list[Tool] = list(BUILTIN_TOOLS)
         for server_cmd in mcp_servers:
-            command, *args = shlex.split(server_cmd)
-            mcp_session = await stack.enter_async_context(
-                connect_stdio_mcp_server(command, args=args)
-            )
+            if server_cmd.startswith(("http://", "https://")):
+                mcp_session = await stack.enter_async_context(connect_http_mcp_server(server_cmd))
+            else:
+                command, *args = shlex.split(server_cmd)
+                mcp_session = await stack.enter_async_context(
+                    connect_stdio_mcp_server(command, args=args)
+                )
             mcp_tools = await list_mcp_tools(mcp_session)
             console.print(
                 f"[dim]mcp: {server_cmd!r} -> {', '.join(t.spec.name for t in mcp_tools)}[/dim]"

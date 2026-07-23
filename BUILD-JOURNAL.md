@@ -3191,3 +3191,61 @@ inference-server gap), F1's real distributed training infrastructure
 thinking-token training (§3.6a names it; nothing in `foundry/` builds it
 yet), or MCP's HTTP/SSE transport (the client docstring names stdio-only
 as real, deferred scope).
+
+## MCP's Streamable HTTP transport — the gap the client's own docstring named
+
+`sarva.mcp_client`'s module docstring has said "HTTP/SSE transports are
+real, deferred scope" since the day the stdio transport shipped. This
+closes it with `connect_http_mcp_server`, speaking Streamable HTTP — MCP
+spec revision 2025-03-26's current standard HTTP transport, superseding
+the older separate SSE transport (which the `mcp` SDK still ships as
+`mcp.client.sse` for servers that haven't moved off it, deliberately not
+wired up here: "current standard transport," not "every historical
+variant"). Nothing downstream — `list_mcp_tools`, `McpToolAdapter`, the
+agent loop — knows or cares which transport a given `ClientSession` came
+from; both connectors just hand one back.
+
+**A real API-version gotcha caught immediately, not shipped:** the first
+version used `mcp.client.streamable_http.streamablehttp_client(url,
+headers=...)`, which worked but emitted a real `DeprecationWarning`
+("Use `streamable_http_client` instead") the moment tests ran — the
+installed SDK version (1.28.1) has moved to a form that takes an
+explicit `httpx.AsyncClient` instead of `headers`/`timeout` kwargs
+directly. Fixed by building that client via the SDK's own `create_mcp_
+http_client` helper (30s timeout, redirects followed — its own
+documented defaults), imported from the same `mcp.client.streamable_
+http` module rather than its private `mcp.shared._httpx_utils` origin,
+since the public module already re-exports it.
+
+Wired all the way to the CLI, not left as a library-only capability
+(the exact gap named in an earlier degradation-fallback entry this
+session — "fully built and fully tested but completely unreachable by
+any real user"): `--mcp-server` now dispatches by shape — an
+`http://`/`https://` value connects over HTTP, anything else is
+shell-split and run as a stdio command — so both transports mix freely
+in one `sarva run` invocation. Verified against a real running server,
+not just pytest: started `mcp_http_echo_server.py` by hand and ran
+`sarva run "..." --mcp-server http://127.0.0.1:.../mcp --auto`, watching
+the real HTTP session negotiate, list tools, and cleanly terminate
+(`DELETE /mcp` → `200 OK`) in the server's own logs.
+
+**Test fixtures mirror the stdio precedent exactly:**
+`tests/fixtures/mcp_http_echo_server.py` is the same two tools
+(`echo`/`fail`) as the stdio fixture, launched as a genuine subprocess
+serving real MCP-over-HTTP on a real, OS-assigned free port (picked by
+binding to port 0 and reading the result back — avoids CI port
+collisions from a hardcoded value) rather than a mock of the protocol.
+`test_mcp_client_http.py` mirrors every one of `test_mcp_client.py`'s
+cases (tool listing, a real round trip, real error propagation, a real
+`AgentLoop.run()`), plus a dedicated header-passthrough test and a
+plain-HTTP reachability check that isolates "server never started" from
+"MCP handshake failed" as distinct failure modes. 6 new tests, 344 → 350
+Python tests. `docs/mcp.md` rewritten for both transports.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), reasoning/thinking-token training
+(§3.6a names it; nothing in `foundry/` builds it yet), or a first pass
+at code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
