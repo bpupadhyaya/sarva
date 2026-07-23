@@ -143,3 +143,108 @@ def test_checkpoint_resume_is_bit_identical_with_a_schedule_active(tmp_path):
 
     for key in final_a:
         assert torch.allclose(final_a[key], final_c[key], atol=1e-6), f"mismatch at {key}"
+
+
+def test_train_step_with_no_mask_is_bit_identical_to_before_the_parameter_existed():
+    # Regression guard: loss_mask=None (the default, and every call site
+    # before SFT support was added) must produce exactly the same loss
+    # as calling train_step with no third argument at all.
+    config = _config()
+    x, y = _fixed_batch(config)
+
+    trainer_a = Trainer(_seeded_model(config))
+    loss_a = trainer_a.train_step(x, y)
+
+    trainer_b = Trainer(_seeded_model(config))
+    loss_b = trainer_b.train_step(x, y, loss_mask=None)
+
+    assert loss_a == loss_b
+
+
+def test_loss_mask_makes_masked_target_values_irrelevant_to_the_loss():
+    # The defining correctness property of SFT masking: two batches that
+    # differ ONLY at masked-out target positions must produce the exact
+    # same loss, proving those positions genuinely don't contribute --
+    # not just that the returned loss is "reasonable."
+    config = _config()
+    x, y_a = _fixed_batch(config)
+    y_b = y_a.clone()
+    mask = torch.tensor([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]])
+    # Corrupt only the masked-out (prompt-like) positions.
+    y_b[0, :3] = (y_b[0, :3] + 7) % config.vocab_size
+    assert not torch.equal(y_a, y_b)  # sanity: the corruption actually changed something
+
+    trainer_a = Trainer(_seeded_model(config))
+    loss_a = trainer_a.train_step(x, y_a, loss_mask=mask)
+
+    trainer_b = Trainer(_seeded_model(config))
+    loss_b = trainer_b.train_step(x, y_b, loss_mask=mask)
+
+    assert loss_a == loss_b
+
+
+def test_loss_mask_makes_unmasked_target_values_still_matter():
+    # The complementary property: changing a target at an UNMASKED
+    # (response-like) position must change the loss -- otherwise the
+    # mask could trivially "pass" the test above by excluding
+    # everything, which would make SFT training a no-op instead of
+    # actually training on the response.
+    config = _config()
+    x, y_a = _fixed_batch(config)
+    y_b = y_a.clone()
+    mask = torch.tensor([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]])
+    y_b[0, 3] = (y_b[0, 3] + 7) % config.vocab_size  # an UNMASKED position this time
+
+    trainer_a = Trainer(_seeded_model(config))
+    loss_a = trainer_a.train_step(x, y_a, loss_mask=mask)
+
+    trainer_b = Trainer(_seeded_model(config))
+    loss_b = trainer_b.train_step(x, y_b, loss_mask=mask)
+
+    assert loss_a != loss_b
+
+
+def test_sft_style_masked_training_still_decreases_loss_on_the_real_objective():
+    # An end-to-end trainability proof using an SFT-shaped batch built
+    # through the real sarva_foundry.train.sft pipeline, not a synthetic
+    # mask -- mirrors every other trainability test in this suite (loss
+    # must actually decrease), but on the masked objective specifically.
+    from sarva_foundry.data import DOCUMENT_SEPARATOR
+    from sarva_foundry.tokenizer import ByteLevelBPETokenizer
+    from sarva_foundry.train.sft import SFTExample, build_sft_batch
+
+    torch.manual_seed(0)
+    tokenizer = ByteLevelBPETokenizer()
+    tokenizer.train(
+        ["what is 2 2", "four", "hello world"],
+        vocab_size=280,
+        special_tokens=[DOCUMENT_SEPARATOR],
+    )
+    example = SFTExample(prompt="what is 2 2 ", response="four")
+    x, y, mask = build_sft_batch([example], tokenizer)
+
+    config = TransformerConfig(
+        vocab_size=tokenizer.vocab_size,
+        dim=32,
+        n_layers=2,
+        n_heads=2,
+        n_kv_heads=1,
+        max_seq_len=32,
+    )
+    model = DecoderOnlyTransformer(config)
+    trainer = Trainer(model)
+
+    losses = [trainer.train_step(x, y, loss_mask=mask) for _ in range(60)]
+    assert losses[-1] < losses[0] * 0.5
+
+    # And the model must have actually learned to predict the response
+    # tokens specifically, not just driven the masked loss to zero by
+    # some degenerate shortcut -- check the model's own greedy
+    # prediction at the first response position now matches the real
+    # response token.
+    model.eval()
+    with torch.no_grad():
+        logits = model(x)
+    response_start = int((mask[0] == 1).nonzero()[0].item())
+    predicted = logits[0, response_start].argmax().item()
+    assert predicted == y[0, response_start].item()

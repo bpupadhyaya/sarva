@@ -2242,3 +2242,63 @@ RoPE scaling, native multimodal input) is now built.
 
 **Next:** F1's real (non-toy) training infrastructure, or F2
 post-training (§3.6e: SFT/DPO/agentic RL).
+
+## Supervised fine-tuning — the first F2 post-training piece (§3.6e)
+
+§3.6e: "SFT -> DPO/RLHF -> agentic RL... this, not pretraining, is what
+turns a base model into a Fable/K3-class agent." SFT is that line's
+first piece, built as a composable addition to the *existing* `Trainer`
+rather than a parallel implementation — same pattern MoE and RoPE
+scaling established for the model architecture side, now applied to the
+training loop: `Trainer.train_step` gained one optional `loss_mask`
+parameter, and that alone is the entire difference between pretraining
+and SFT here. `loss_mask=None` (the default, and every call site before
+this existed) is exactly the original unmasked behavior — confirmed
+bit-identical by a dedicated regression test, not just "the diff looks
+safe."
+
+`sarva_foundry.train.sft` builds that mask from `(prompt, response)`
+pairs: `encode_sft_example` concatenates prompt + response +
+`end_of_turn` (reusing `DOCUMENT_SEPARATOR`, the same document-boundary
+special token plain pretraining already uses, rather than inventing a
+second one for the same role), with the mask covering only the response
+(so the model learns to predict answers, never to reproduce prompts —
+the entire point of SFT versus plain next-token training on the same
+text). `build_sft_batch` pads a batch to its longest example and shifts
+for next-token prediction; right-padding is safe under causal attention
+by construction (the causal mask already guarantees a padded position
+can't influence an earlier real position), not by convention.
+
+**The property the tests check directly, not just "shapes are right":**
+two training batches whose targets differ *only* at masked-out (prompt)
+positions must produce bit-identical loss —
+`test_loss_mask_makes_masked_target_values_irrelevant_to_the_loss`
+proves this directly by corrupting only masked-out targets and
+confirming the loss doesn't move. The complementary test confirms an
+*unmasked* target change does move the loss, ruling out the trivial
+failure mode where a mask that excludes everything would "pass" the
+first test while making SFT training a complete no-op.
+
+**A real, non-mocked pathological-input test:** `build_sft_batch`
+guards against a batch too short to form even one training pair after
+the shift. Rather than fabricate that scenario, the test constructs it
+for real — `SFTExample(prompt="", response="")` genuinely encodes to
+exactly one token (the `end_of_turn` marker; both `encode("")` calls
+return empty lists), which is a real, reachable input through the
+documented API, not a contrived mock.
+
+`examples/10_sft_toy_assistant.py` runs the full two-stage pipeline on a
+toy model: after plain pretraining alone, greedy-decoding from any of
+three different questions produces the *same* generic babbled
+continuation (the base model has no notion of "answer this specific
+question" yet); after SFT on three `(prompt, response)` pairs,
+greedy-decoding from each distinct prompt produces its own distinct,
+correct response — real, printed proof the model learned to condition
+its answer on the actual question, not just memorize one fixed
+continuation regardless of what's asked.
+
+11 new tests (7 in `test_sft.py`, 4 in `test_trainer.py`). 260 → 271
+Python tests.
+
+**Next:** F1's real (non-toy) training infrastructure, or the rest of
+§3.6e's post-training line (DPO/RLHF, agentic RL) beyond SFT.

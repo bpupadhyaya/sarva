@@ -11,6 +11,13 @@ only restores weights silently restarts momentum from zero, which trains
 differently than the run it claims to be resuming, with no error to catch
 the difference. `tests/foundry/test_trainer.py` verifies bit-identical
 resume directly rather than assuming `state_dict()` round-trips correctly.
+
+Also doubles as the SFT trainer (spec §3.6e's first post-training step):
+`train_step`'s optional `loss_mask` is the entire difference between
+pretraining and SFT here — same optimizer, same schedule, same
+checkpoint/resume machinery, just a masked loss instead of an unmasked
+one. See `sarva_foundry.data.sft` for building that mask from
+(prompt, response) pairs.
 """
 
 from __future__ import annotations
@@ -45,14 +52,31 @@ class Trainer:
         )
         self.step = 0
 
-    def train_step(self, x: Tensor, y: Tensor) -> float:
+    def train_step(self, x: Tensor, y: Tensor, loss_mask: Tensor | None = None) -> float:
+        """`loss_mask` (same shape as `y`, 1.0 = include in loss, 0.0 =
+        exclude) is what SFT training uses (spec §3.6e) to exclude prompt
+        tokens from the objective — the model must learn to predict the
+        *response*, never the prompt. `None` (the default, and every call
+        site before this parameter existed) is exactly the original
+        unmasked behavior: every position contributes equally."""
         self.model.train()
         if self.config.schedule is not None:
             lr = self.config.schedule.lr_at(self.step)
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
         logits = self.model(x)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+        if loss_mask is None:
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+        else:
+            per_token_loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), y.reshape(-1), reduction="none"
+            )
+            mask_flat = loss_mask.reshape(-1).float()
+            # clamp_min guards an all-masked-out batch (e.g. every
+            # example padded to the same length with nothing left to
+            # predict) from dividing by zero -- loss is then exactly 0,
+            # not NaN, and contributes no gradient either way.
+            loss = (per_token_loss * mask_flat).sum() / mask_flat.sum().clamp_min(1.0)
         self.optimizer.zero_grad()
         loss.backward()
         if self.config.grad_clip is not None:

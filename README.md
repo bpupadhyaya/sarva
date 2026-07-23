@@ -26,14 +26,20 @@ gaps. The from-scratch model-training track (`foundry/`) has a runnable
 (toy-scale) pretraining pipeline: local-file corpus sourcing (exact +
 near-duplicate dedup, quality filtering, provenance/license tracking), a
 byte-level BPE tokenizer, a dense decoder-only transformer (RoPE,
-RMSNorm, SwiGLU, GQA) with an optional Mixture-of-Experts feedforward
-(fine-grained experts, a shared expert, aux-loss-free load balancing),
-and a training loop with a warmup+cosine LR schedule and bit-identical
-checkpoint/resume — see `examples/04_pretrain_and_resume.py`, or
-`examples/06_real_corpus_pretraining.py` for the same pipeline run
-against real, sourced, licensed public-domain text instead of toy
-sentences. Web-scale corpus sourcing and distributed training aren't
-built yet. See `BUILD-JOURNAL.md` for progress.
+RMSNorm, SwiGLU, GQA) with optional Mixture-of-Experts (fine-grained
+experts, a shared expert, aux-loss-free load balancing), long-context
+RoPE scaling (linear interpolation + NTK-aware), and native multimodal
+input (vision encoder + projector) — every frontier-class architecture
+extension in the design doc's §3.6a list is built, each composable and
+opt-in. A training loop with a warmup+cosine LR schedule, bit-identical
+checkpoint/resume, and supervised fine-tuning (a masked loss that trains
+only on responses, never prompts) rounds out F0/F2's first slice — see
+`examples/04_pretrain_and_resume.py`, `examples/06_real_corpus_pretraining.py`
+(the same pipeline on real, sourced, licensed public-domain text),
+`examples/09_multimodal_vision_transformer.py`, or
+`examples/10_sft_toy_assistant.py`. Web-scale corpus sourcing and
+distributed training aren't built yet. See `BUILD-JOURNAL.md` for
+progress.
 
 ## Quickstart
 

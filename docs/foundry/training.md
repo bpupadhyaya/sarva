@@ -195,6 +195,49 @@ few dozen. Requires network access for the download step only —
 everything after that (dedup, tokenizer training, model training) is
 fully offline, same as every other example.
 
+## Supervised fine-tuning: turning a base model into an assistant
+
+§3.6e: "SFT -> DPO/RLHF -> agentic RL... this, not pretraining, is what
+turns a base model into a Fable/K3-class agent." SFT is the first piece
+of that line, and it needed no new trainer — `Trainer.train_step` gained
+one optional parameter, `loss_mask`, and that's the entire difference
+between pretraining and SFT here: same optimizer, same warmup+cosine
+schedule, same bit-identical checkpoint/resume, just a masked loss
+instead of an unmasked one. `loss_mask=None` (the default, and every
+call site before this existed) is exactly the original behavior — a
+regression test confirms it's bit-identical, not just "close."
+
+`sarva_foundry.train.sft` builds that mask from `(prompt, response)`
+pairs: `encode_sft_example` tokenizes prompt then response then an
+`end_of_turn` marker (reusing `DOCUMENT_SEPARATOR`, the same boundary
+token plain pretraining uses between documents, rather than inventing a
+second special token for the same purpose), with `loss_mask[i] == 1`
+iff position `i` is part of the response. `build_sft_batch` pads a batch
+to its longest example and shifts for next-token prediction — right-
+padding is safe under causal attention *by construction*, not by
+convention: a padded position can never influence an earlier position's
+output (already guaranteed by the causal mask), and its own output is
+excluded from the loss via the mask.
+
+**The property that actually matters, and what the tests check
+directly:** two training batches whose targets differ *only* at
+masked-out (prompt) positions must produce bit-identical loss —
+`test_loss_mask_makes_masked_target_values_irrelevant_to_the_loss`
+proves the masked positions genuinely don't contribute, not just that
+the returned loss looks reasonable. The complementary test confirms
+changing an *unmasked* target does change the loss, so the mask can't
+trivially "pass" by excluding everything (which would make SFT a no-op
+instead of actually training the response).
+
+`examples/10_sft_toy_assistant.py` runs the full two-stage pipeline: a
+plain-pretrained toy model babbles the *same* generic continuation for
+every question it's asked (no notion yet of "answer this specific
+question"); after SFT on three `(prompt, response)` pairs, greedy-
+decoding from each of the three distinct prompts produces its own
+distinct, correct response — proof the model learned to condition its
+answer on the actual question, not just memorize one fixed
+continuation.
+
 ## What's next
 
 Web/code/books/math-scale corpus sourcing and mixing recipes (local
@@ -202,6 +245,7 @@ files, exact + near-duplicate dedup, length filtering, and provenance/license
 tracking including per-file manifests all exist now — larger-scale
 sourcing doesn't yet; nor does an LSH banding index, which near-duplicate
 dedup would need to scale past the current O(kept²) pairwise
-comparison), and the distributed training slice of §3.6d (FSDP → 3D
+comparison), the distributed training slice of §3.6d (FSDP → 3D
 parallelism, loss-spike handling, scaling-law tooling) once a model
-worth training at that scale exists.
+worth training at that scale exists, and the rest of §3.6e's post-
+training line — DPO/RLHF and agentic RL — beyond SFT.
