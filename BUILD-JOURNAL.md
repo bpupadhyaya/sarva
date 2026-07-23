@@ -2849,3 +2849,73 @@ unknown-model-id error path, and the full `runtime.py` wiring). 305 →
 KV-cache reuse around `DecoderOnlyTransformer`), the foundry recipes
 directory (§3.6h: named/costed configs starting at the 125M laptop
 scale), or continuing the book (Chapter 6: packaging for humans).
+
+## KV-cache — real incremental decoding, and a real bug it took empirical verification to catch
+
+Closes the KV-cache half of the gap the foundry provider's own docstring
+named ("no batching, no KV-cache reuse across calls — one naive forward
+pass per generated token"). `sarva_foundry.model.kv_cache.KVCache`
+pre-allocates a `(n_layers, batch, n_kv_heads, max_seq_len, head_dim)`
+buffer per key/value; `GroupedQueryAttention.forward` and
+`DecoderOnlyTransformer.forward` both gained an optional `cache`
+parameter (`None` — the default, and every call site before this
+parameter existed — is exactly the original unchanged behavior, pinned
+by a dedicated regression test). With a cache, `token_ids` means "the
+NEW tokens since the cache was last advanced," and only those tokens'
+key/value get freshly projected — every previously-generated position's
+key/value is read straight out of the buffer instead of being
+recomputed. `sarva_foundry.inference.generate_with_cache` is the
+KV-cached counterpart to `sarva_foundry.train.rl.sample_completion` —
+same contract (same greedy/temperature semantics, same "returns only the
+new tokens" behavior), deliberately kept a drop-in match so the two can
+be compared token-for-token as a correctness proof.
+
+**A real bug, caught by comparing against known-correct output, not by
+re-reading documentation harder:** the first version leaned on
+`F.scaled_dot_product_attention(..., is_causal=True)` even when the new
+query length was shorter than the cached key length, on the assumption
+that `is_causal` bottom-right-aligns a shorter query against a longer
+key the way several other inference codebases' cache implementations do.
+Wrong for this PyTorch version — confirmed empirically: cached generation
+diverged from known-correct full-recompute generation starting at the
+very first cached token, with differences too large (multiple full units
+on raw logits) to be floating-point noise. Isolated systematically, not
+guessed at: verified the cache's stored key/value buffer content matched
+a manual full recomputation exactly (it did — the storage itself was
+never the bug), then verified the *attention output* diverged even
+though its inputs were provably correct, which narrowed the bug to the
+masking call itself. Manually testing `is_causal=True` vs an explicit
+mask vs `is_causal=False` against a hand-built reference for both a
+single-new-token case and a multi-new-token case (`start_pos=5`, 2 new
+queries) confirmed the actual fix: build the causal mask explicitly via
+`torch.ones(seq_len, total_len, dtype=torch.bool).tril(diagonal=start_pos)`
+— row `i` (of the new tokens, at absolute position `start_pos + i`)
+attends to every key at absolute position `<= start_pos + i`. This
+subsumes the no-cache case exactly (`start_pos=0`, query length equals
+key length reduces to the ordinary causal mask), so it's one code path
+handling both, not a cache-specific special case bolted on.
+
+**Tests pin the property that actually matters, not just shapes:**
+`test_forward_with_cache_matches_full_recompute_across_incremental_steps`
+compares cached, step-by-step logits against full-recompute logits at
+*every* incremental step (not just the first), and
+`test_generate_with_cache_matches_naive_greedy_generation_token_for_token`
+proves `generate_with_cache` and `sample_completion` produce the
+identical token sequence under greedy decoding — the actual guarantee a
+caller depends on. 8 new tests in `test_kv_cache.py`.
+
+`sarva.providers.foundry_provider.FoundryProvider.generate` now calls
+`generate_with_cache` instead of the naive `sample_completion`, closing
+the loop for the adapter that motivated this work.
+`examples/15_kv_cache_inference.py` runs both generation paths on a
+128-dim, 4-layer model for 200 tokens and prints real measured
+wall-clock numbers — confirmed identical token output either way, ~2.4x
+faster cached on the machine this was verified on (honestly reported as
+hardware-dependent, not asserted as a universal number). 8 new tests,
+315 → 323 Python tests. `docs/foundry/inference.md` updated with the
+full story, including the `is_causal` bug.
+
+**Next:** batching multiple concurrent requests (the other half of
+§3.6f's inference-server gap), the foundry recipes directory (§3.6h:
+named/costed configs starting at the 125M laptop scale), or continuing
+the book (Chapter 6: packaging for humans).

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from torch import Tensor, nn
 
 from sarva_foundry.model.attention import GroupedQueryAttention
+from sarva_foundry.model.kv_cache import KVCache
 from sarva_foundry.model.layers import RMSNorm, RopeScalingConfig, SwiGLU, default_swiglu_hidden_dim
 from sarva_foundry.model.moe import MoEConfig, MoEFeedForward
 
@@ -62,8 +63,8 @@ class TransformerBlock(nn.Module):
         else:
             self.mlp = SwiGLU(config.dim, config.hidden_dim)
 
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.attn(self.attn_norm(x))
+    def forward(self, x: Tensor, cache: KVCache | None = None, layer_idx: int = 0) -> Tensor:
+        x = x + self.attn(self.attn_norm(x), cache=cache, layer_idx=layer_idx)
         x = x + self.mlp(self.mlp_norm(x))
         return x
 
@@ -86,8 +87,15 @@ class DecoderOnlyTransformer(nn.Module):
         # cuts embedding-table parameters in half with no quality loss.
         self.lm_head.weight = self.tok_embeddings.weight
 
-    def forward(self, token_ids: Tensor) -> Tensor:
-        return self._forward_embeds(self.tok_embeddings(token_ids))
+    def forward(self, token_ids: Tensor, cache: KVCache | None = None) -> Tensor:
+        """`cache=None` (the default, and every call site before this
+        parameter existed) is exactly the original behavior: every
+        position in `token_ids` is recomputed from scratch. Passing a
+        `KVCache` (see `sarva_foundry.model.kv_cache`) makes `token_ids`
+        mean "the NEW tokens since the cache was last advanced" rather
+        than the full sequence — the caller's responsibility, matching
+        how `generate_with_cache` (`sarva_foundry.inference`) uses this."""
+        return self._forward_embeds(self.tok_embeddings(token_ids), cache=cache)
 
     def embed_multimodal(
         self, token_ids: Tensor, image_embeds: Tensor, image_token_id: int
@@ -128,9 +136,18 @@ class DecoderOnlyTransformer(nn.Module):
         image."""
         return self._forward_embeds(self.embed_multimodal(token_ids, image_embeds, image_token_id))
 
-    def _forward_embeds(self, x: Tensor) -> Tensor:
-        for layer in self.layers:
-            x = layer(x)
+    def _forward_embeds(self, x: Tensor, cache: KVCache | None = None) -> Tensor:
+        new_len = x.shape[1]
+        for layer_idx, layer in enumerate(self.layers):
+            x = layer(x, cache=cache, layer_idx=layer_idx)
+        if cache is not None:
+            # Advanced exactly once per forward call, after every layer
+            # has written its own key/value at the SAME starting offset
+            # (`cache.seq_len` read once at the top of each layer's
+            # attention call) -- advancing per-layer instead would shift
+            # every subsequent layer's write position by however many
+            # layers came before it, corrupting the cache.
+            cache.advance(new_len)
         x = self.norm(x)
         return self.lm_head(x)
 

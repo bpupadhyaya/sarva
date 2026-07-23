@@ -17,9 +17,11 @@ patches the way it is for a left-to-right token sequence.
 
 from __future__ import annotations
 
+import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from sarva_foundry.model.kv_cache import KVCache
 from sarva_foundry.model.layers import RopeScalingConfig, apply_rope, precompute_rope
 
 
@@ -67,9 +69,20 @@ class GroupedQueryAttention(nn.Module):
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, cache: KVCache | None = None, layer_idx: int = 0) -> Tensor:
         batch, seq_len, _ = x.shape
-        if seq_len > self.rope_cos.shape[0]:
+        # `start_pos` is where in the full sequence this call's tokens
+        # actually sit — 0 for a plain (uncached) call or a cache's first
+        # (prefill) call, `cache.seq_len` for every subsequent incremental
+        # call. RoPE is a *relative*-position encoding (see layers.py), so
+        # generating token 500 must use position 500's rotation even
+        # though `x` here is a single new token at sequence index 0 — the
+        # bug this would otherwise cause (every generated token silently
+        # rotated as if it were position 0) would still produce
+        # plausible-looking, syntactically valid text, making it exactly
+        # the kind of error a shape-only test can't catch.
+        start_pos = cache.seq_len if cache is not None else 0
+        if start_pos + seq_len > self.rope_cos.shape[0]:
             # Without this check, slicing rope_cos/rope_sin past their
             # length silently returns a shorter table than seq_len instead
             # of raising, and the real error only surfaces several calls
@@ -78,7 +91,7 @@ class GroupedQueryAttention(nn.Module):
             # generation loop that grows past max_seq_len, not by the
             # shape-only unit tests, which all used a fixed sequence length.
             raise ValueError(
-                f"sequence length {seq_len} exceeds max_seq_len "
+                f"sequence length {start_pos + seq_len} exceeds max_seq_len "
                 f"{self.rope_cos.shape[0]} the RoPE tables were precomputed for"
             )
 
@@ -86,23 +99,49 @@ class GroupedQueryAttention(nn.Module):
         k = self.wk(x).view(batch, seq_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.wv(x).view(batch, seq_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        cos = self.rope_cos[:seq_len]
-        sin = self.rope_sin[:seq_len]
+        cos = self.rope_cos[start_pos : start_pos + seq_len]
+        sin = self.rope_sin[start_pos : start_pos + seq_len]
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
+
+        if cache is not None:
+            # Every position already generated has its key/value sitting
+            # in the cache from a previous call -- only this call's NEW
+            # position(s) need a fresh key/value projection at all.
+            k, v = cache.write(layer_idx, k, v)
 
         k = repeat_kv(k, self.n_rep)
         v = repeat_kv(v, self.n_rep)
 
-        # The fused attention kernel itself (QK^T, softmax, causal mask,
-        # the V weighting) is PyTorch/CUDA substrate, not model logic — see
-        # layers.py's module docstring for where the "from scratch" line is
-        # drawn. `is_causal=True` is what makes this a decoder: position i
-        # can only attend to positions <= i (verified directly in
-        # tests/foundry/test_model.py, not just assumed from the flag).
-        # `self.causal=False` (vision.py's bidirectional encoder) lets
-        # every position attend to every other position instead.
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        # The fused attention kernel itself (QK^T, softmax, masking, the V
+        # weighting) is PyTorch/CUDA substrate, not model logic — see
+        # layers.py's module docstring for where the "from scratch" line
+        # is drawn. Without a cache, q_len == k_len always (start_pos=0),
+        # so SDPA's own `is_causal=True` is the ordinary, well-known
+        # "position i attends to positions <= i" mask (verified directly
+        # in tests/foundry/test_model.py). WITH a cache, q_len can be
+        # SHORTER than k_len (only the new tokens vs. every cached
+        # position) — `is_causal=True` does NOT handle that the way an
+        # offset causal mask would (confirmed empirically while building
+        # this, not assumed from the docs: it produced visibly wrong
+        # logits, caught by `test_kv_cache.py` comparing cached generation
+        # against plain full-recompute generation token-for-token). The
+        # correct mask for row i (of the L new query positions, absolute
+        # position start_pos+i) is "attend to every key at absolute
+        # position <= start_pos+i" — built explicitly below via
+        # `tril(diagonal=start_pos)` rather than relying on `is_causal`'s
+        # own (non-offset) alignment assumption. This also subsumes the
+        # no-cache case exactly: start_pos=0, q_len==k_len reduces to the
+        # ordinary causal mask.
+        if self.causal:
+            total_len = k.shape[2]
+            mask = x.new_ones((seq_len, total_len), dtype=torch.bool).tril(diagonal=start_pos)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        else:
+            # `self.causal=False` (vision.py's bidirectional encoder) lets
+            # every position attend to every other position — unaffected
+            # by any of the above, since vision never uses a cache.
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
 
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, self.n_heads * self.head_dim)
         return self.wo(out)

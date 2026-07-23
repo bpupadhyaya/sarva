@@ -43,10 +43,13 @@ Also honestly scoped: generation runs synchronously (`asyncio.to_thread`,
 so the event loop keeps yielding to other work, but there is no wire-level
 streaming protocol to translate the way there is for a real network API) —
 the whole completion is decoded once and streamed as a single
-`TextDeltaEvent`, not true incremental per-token streaming. And there is
-no batching or KV-cache reuse across calls — one naive forward pass per
-generated token, the exact gap a real foundry inference server (deferred,
-separate scope) would close.
+`TextDeltaEvent`, not true incremental per-token streaming. Generation
+itself now uses `sarva_foundry.inference.generate_with_cache` (real
+KV-cache reuse across steps — see `sarva_foundry.model.kv_cache` — rather
+than the naive full-recompute-per-token `sample_completion` this adapter
+used before), but there is still no batching across concurrent requests —
+one sequence at a time, the remaining named gap a real foundry inference
+server (deferred, separate scope) would close.
 """
 
 from __future__ import annotations
@@ -91,9 +94,9 @@ def _lazy_imports() -> Any:
     try:
         import torch
         from sarva_foundry.data.dataset import DOCUMENT_SEPARATOR
+        from sarva_foundry.inference import generate_with_cache
         from sarva_foundry.model import DecoderOnlyTransformer, TransformerConfig
         from sarva_foundry.tokenizer import ByteLevelBPETokenizer
-        from sarva_foundry.train.rl import sample_completion
     except ImportError as exc:
         raise ImportError(
             "FoundryProvider needs the optional 'foundry' extra (torch + "
@@ -110,7 +113,7 @@ def _lazy_imports() -> Any:
     mods.DecoderOnlyTransformer = DecoderOnlyTransformer
     mods.TransformerConfig = TransformerConfig
     mods.ByteLevelBPETokenizer = ByteLevelBPETokenizer
-    mods.sample_completion = sample_completion
+    mods.generate_with_cache = generate_with_cache
     return mods
 
 
@@ -253,7 +256,7 @@ class FoundryProvider:
 
         max_new = min(request.config.max_tokens, budget)
         completion_ids = await asyncio.to_thread(
-            mods.sample_completion, model, prompt_ids, max_new, 0.0, stop_token_id
+            mods.generate_with_cache, model, prompt_ids, max_new, 0.0, stop_token_id
         )
 
         hit_stop = bool(completion_ids) and completion_ids[-1] == stop_token_id

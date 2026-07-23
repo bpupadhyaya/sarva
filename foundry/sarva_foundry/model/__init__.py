@@ -8,6 +8,7 @@ via `DecoderOnlyTransformer.forward_multimodal`).
 """
 
 from sarva_foundry.model.attention import GroupedQueryAttention, repeat_kv
+from sarva_foundry.model.kv_cache import KVCache
 from sarva_foundry.model.layers import (
     RMSNorm,
     RopeScalingConfig,
@@ -26,6 +27,7 @@ from sarva_foundry.model.vision import PatchEmbed, Projector, VisionEncoder, Vis
 __all__ = [
     "DecoderOnlyTransformer",
     "GroupedQueryAttention",
+    "KVCache",
     "MoEConfig",
     "MoEFeedForward",
     "PatchEmbed",
