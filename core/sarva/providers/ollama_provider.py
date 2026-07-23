@@ -50,6 +50,22 @@ def _to_ollama_message(m: Message) -> dict[str, Any]:
         elif isinstance(b, ToolResultBlock):
             # Ollama has no dedicated tool-result role; render as a tool message.
             text_parts.append("".join(c.text for c in b.content if isinstance(c, TextBlock)))
+        else:
+            # A block type this adapter has no translation for at all
+            # (e.g. ImageBlock -- real vision-capable Ollama models do
+            # accept images via a separate `images: [base64, ...]` wire
+            # field this adapter doesn't build yet, real, named, deferred
+            # follow-up, not a silent no-op). Raising here is deliberate,
+            # matching the Anthropic/OpenAI/Google/Foundry adapters'
+            # own guards: silently omitting it would send the request
+            # missing content the caller believes is present, and the
+            # model would answer as if it had read something it never
+            # received -- a materially misleading response, not a
+            # cosmetic gap.
+            raise ValueError(
+                f"OllamaProvider cannot translate a {type(b).__name__!r} content block "
+                "(no wire-format mapping exists for it yet)"
+            )
     out: dict[str, Any] = {"role": m.role, "content": "".join(text_parts)}
     if tool_calls:
         out["tool_calls"] = tool_calls

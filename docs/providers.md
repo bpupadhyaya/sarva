@@ -86,6 +86,13 @@ knowing if you're adding a fifth:
   drops it (as before) only when no signature is present. Neither
   OpenAI's nor Gemini's reasoning content has an equivalent requirement
   to translate.
+- **Ollama has no dedicated tool-result role at all.** Anthropic/OpenAI/
+  Gemini each have a real wire shape for "here's what the tool
+  returned" (a `tool_result` content block, a `role="tool"` message, a
+  `function_response` part, respectively). Ollama's chat API doesn't —
+  `_to_ollama_message` renders a `ToolResultBlock`'s text as the plain
+  `content` of an ordinary message instead, the honest translation for
+  a wire format with no dedicated concept for it.
 
 None of this is exposed to callers. `AgentLoop`, `run_benchmark`, and
 `distill()` all just call `provider.generate(request)` and get back the
@@ -138,6 +145,17 @@ Re-ran the identical failing command afterward and it correctly fell
 back to Mock instead. `sarva doctor`'s Ollama check gained the same
 real data in its detail message (`pulled: qwen2.5:0.5b`, or an
 explicit "no models pulled yet" when the server's up but empty).
+
+**A third bug this same adapter had, unrelated to availability:**
+`_to_ollama_message`'s translation loop had no `else` branch at all —
+an `ImageBlock` (or any other block type this adapter has no wire
+mapping for) was silently skipped, the model answering as if it had
+never received it. Fixed to raise the same loud `ValueError` the
+Anthropic/OpenAI/Google/Foundry adapters already do for exactly this
+case. Real vision-capable Ollama models do accept images via a
+separate `images: [base64, ...]` wire field this adapter doesn't build
+yet — named directly as real, deferred follow-up, not silently
+assumed unreachable.
 
 ## The model registry: adding a model is a YAML edit, not a code change
 

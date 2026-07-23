@@ -4295,3 +4295,46 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Ollama adapter: the same silent-drop bug just fixed in Foundry, plus its first-ever unit tests
+
+Immediately after fixing `foundry_provider.py`'s silent content drop,
+checked the one other adapter without a loud-failure guard for
+untranslatable content — `ollama_provider.py`. Same bug, same shape:
+`_to_ollama_message`'s translation loop handled `TextBlock`/
+`ToolCallBlock`/`ToolResultBlock` explicitly but had no `else` branch
+at all, so an `ImageBlock` (or anything else) reaching it was silently
+skipped, the model answering as if it had never received it. Fixed
+with the same `ValueError` guard the Anthropic/OpenAI/Google/Foundry
+adapters already carry. **Named directly, not silently assumed
+unreachable:** real vision-capable Ollama models (llava, qwen2-vl, ...)
+do accept images via a separate `images: [base64, ...]` field in
+Ollama's own chat API this adapter has never built — real, deferred
+follow-up, distinct from the "this adapter genuinely can't" case
+`foundry_provider.py`'s equivalent guard describes.
+
+**A second, real gap found while fixing the first:** `_to_ollama_
+message` had zero unit-test coverage anywhere in the conformance
+suite — the only thing exercising it at all was
+`tests/live/test_live_providers.py`, skipped without a real running
+server, unlike every other adapter's own dedicated translation-test
+file. New `tests/conformance/test_ollama_provider.py`: text/tool-call/
+tool-result translation, the new unsupported-block-type guard (two
+block types, not just one, to prove it's genuinely general), and
+`_strip_local_prefix`'s namespace-stripping — all hermetic, no
+network. Re-ran the real live Ollama test afterward against the
+still-running local server to confirm the fix didn't disturb the real
+working path.
+
+8 new tests, 435 → 443 Python tests. `ruff check`/`format --check`
+clean. `docs/providers.md`'s "every backend disagrees" section gained
+a new bullet (Ollama's own tool-result shape), and its Ollama section
+gained a paragraph on this third fix.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
