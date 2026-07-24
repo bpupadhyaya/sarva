@@ -53,6 +53,65 @@ async def test_web_fetch_rejects_non_http_schemes(ctx):
     assert "unsupported URL scheme" in result.content[0].text
 
 
+@pytest.mark.asyncio
+async def test_web_fetch_blocks_loopback_addresses(ctx):
+    # A real SSRF risk, not hypothetical: confirmed directly against a
+    # real local Ollama server (http://127.0.0.1:11434/api/tags)
+    # returning its response with zero confirmation before this fix,
+    # since WebFetchTool is marked non-destructive. No mocking needed --
+    # 127.0.0.1 needs no DNS lookup or listening server to test the
+    # block itself.
+    tool = WebFetchTool()
+    result = await tool.run({"url": "http://127.0.0.1:11434/api/tags"}, ctx)
+    assert result.is_error
+    assert "non-public address" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_blocks_the_cloud_metadata_address(ctx):
+    # 169.254.169.254 is the well-known cloud-metadata endpoint
+    # (AWS/GCP/Azure) -- a classic SSRF target for exfiltrating
+    # credentials when a service runs in a cloud VM.
+    tool = WebFetchTool()
+    result = await tool.run({"url": "http://169.254.169.254/latest/meta-data/"}, ctx)
+    assert result.is_error
+    assert "non-public address" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_blocks_private_rfc1918_addresses(ctx):
+    tool = WebFetchTool()
+    result = await tool.run({"url": "http://192.168.1.1/admin"}, ctx)
+    assert result.is_error
+    assert "non-public address" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_ensure_public_host_rejects_a_redirect_to_an_internal_address(ctx, monkeypatch):
+    # The real reason follow_redirects was replaced with a manual,
+    # per-hop-validated loop: a caller-supplied URL can be a legitimate
+    # public site whose server issues a redirect straight to an
+    # internal address. A validate-the-caller's-URL-once check would
+    # never catch that. Simulated here (no real attacker-controlled
+    # public redirector available to test against) by monkeypatching
+    # httpx.AsyncClient.get to return a real Response object carrying a
+    # redirect Location header pointing at localhost.
+    import httpx
+
+    async def fake_get(self, url, *a, **kw):
+        return httpx.Response(
+            302,
+            headers={"location": "http://127.0.0.1:11434/api/tags"},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    tool = WebFetchTool()
+    result = await tool.run({"url": "https://example.com/redirector"}, ctx)
+    assert result.is_error
+    assert "non-public address" in result.content[0].text
+
+
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_web_fetch_live(ctx):
@@ -61,6 +120,19 @@ async def test_web_fetch_live(ctx):
     result = await tool.run({"url": "https://example.com"}, ctx)
     assert not result.is_error
     assert "Example Domain" in result.content[0].text
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_web_fetch_live_follows_a_real_redirect_to_a_public_site(ctx):
+    """Requires network access — skipped by default. http://github.com
+    redirects to https://github.com/; proves the manual redirect loop
+    genuinely follows a real redirect to another real public site, not
+    just that it blocks internal ones."""
+    tool = WebFetchTool()
+    result = await tool.run({"url": "http://github.com"}, ctx)
+    assert not result.is_error
+    assert len(result.content[0].text) > 0
 
 
 @pytest.mark.asyncio

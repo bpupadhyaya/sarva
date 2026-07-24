@@ -4450,3 +4450,61 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## A real SSRF gap in WebFetchTool, found by security-auditing the built-in tools
+
+After several rounds of finding real bugs by re-checking specific
+claims, stepped back to security-audit the built-in tools directly
+(`ReadFileTool`/`WriteFileTool`/`RunShellTool`/`WebFetchTool`).
+`_within_workdir`'s path-traversal guard checked out clean — verified
+directly with a real symlink escape attempt and a real `../../../../`
+traversal attempt, both correctly blocked. `WebFetchTool` didn't:
+marked `destructive=False` (so it runs with **zero confirmation**, even
+in the CLI's default non-`--auto` mode), it would fetch any http(s)
+URL with no restriction at all. Confirmed directly, not hypothetical:
+`web_fetch` on `http://127.0.0.1:11434/api/tags` — this environment's
+own real running Ollama server — succeeded and returned the response
+straight into the model's context. The identical request shape reaches
+a cloud metadata endpoint (`http://169.254.169.254/...`, a well-known
+SSRF target for exfiltrating cloud credentials) or any other internal
+service with the same ease — a real OWASP-listed vulnerability class
+(SSRF), reachable by a tool the model can call with no human in the
+loop at all.
+
+**Fixed with the standard mitigation, not a partial one:** before every
+fetch, the target hostname is resolved and every returned IP checked
+against `ipaddress`'s `is_global` property — covers RFC 1918 private
+ranges, loopback, link-local (which includes the metadata address),
+and other reserved ranges, for both IPv4 and IPv6, in one check.
+`follow_redirects=True` was replaced with a bounded (5-hop) manual
+redirect loop that re-validates the target host on **every** hop, not
+just the caller-supplied URL — a validate-once-up-front check would
+miss a legitimate public site's own server redirecting straight to an
+internal address, a real bypass this project didn't want to leave
+open. Relative/protocol-relative/absolute `Location` headers resolved
+via `urllib.parse.urljoin` against the current URL, the standard
+RFC 3986 resolution.
+
+**Verified against real addresses, not just unit-level assertions:**
+the real local Ollama server, the real cloud-metadata IP, a real
+private-range IP, and a simulated redirect-to-internal-address (no
+real attacker-controlled public redirector was available to test
+against, so this one case used a monkeypatched `httpx.AsyncClient.get`
+returning a real `httpx.Response` object). Real public traffic
+verified unaffected too: a real `https://example.com` fetch, and a
+real `http://github.com` → `https://github.com/` redirect chain, both
+still work exactly as before.
+
+5 new tests: 4 hermetic (loopback block, cloud-metadata block,
+private-range block, simulated redirect-to-internal-address), 448 → 452
+in the default run, plus 1 live-only test (a real redirect to a real
+public site) not counted in that default total. `ruff check`/`format
+--check` clean. `docs/agent-loop.md` gained a new section on this fix.
+
+**Next:** batching multiple concurrent inference requests (§3.6f), F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have), a Windows TTS engine (genuinely
+unimplemented, not just unverified), or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

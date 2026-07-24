@@ -68,6 +68,36 @@ A tool that raises never crashes the loop — the exception becomes an
 same as any other tool failure it needs to react to. An unrecognized
 tool name gets the identical treatment rather than a hard stop.
 
+### `WebFetchTool` and a real SSRF gap it had, found and closed
+
+`WebFetchTool` is marked `destructive=False` — deliberately, since
+fetching a URL changes no state — which means it runs with **zero
+confirmation**, even in the CLI's default (non-`--auto`) mode. That
+made a real, not hypothetical, SSRF (server-side request forgery) gap:
+confirmed directly against a real local Ollama server running in this
+environment, `web_fetch` on `http://127.0.0.1:11434/api/tags`
+succeeded and returned the response straight into the model's own
+context — the same shape of request would reach a cloud metadata
+endpoint (`http://169.254.169.254/...`, a classic SSRF target for
+exfiltrating cloud credentials) or any other internal service with
+identical ease.
+
+Closed with the standard mitigation: before every fetch, the target
+hostname is resolved and every returned IP is checked against
+`ipaddress`'s `is_global` (covers RFC 1918 private ranges, loopback,
+link-local — which includes the metadata address — and other reserved
+ranges, for both IPv4 and IPv6, in one check). `follow_redirects=True`
+was replaced with a bounded manual redirect loop that re-validates the
+target host on **every** hop, not just the caller-supplied URL — a
+legitimate public site's own server issuing a redirect straight to an
+internal address is exactly the bypass a validate-once-up-front check
+would miss. Verified against real addresses (a real running local
+Ollama server, the real cloud-metadata IP, a real private-range IP,
+and a simulated redirect to an internal address) and against real
+public traffic (a real `https://example.com` fetch, and a real
+`http://github.com` → `https://github.com/` redirect chain) — both
+still work exactly as before.
+
 ## Budgets: exceeding one is a clean stop, not an exception
 
 ```python

@@ -8,11 +8,12 @@ to gate on confirmation. This keeps the security policy in one place: an
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -21,6 +22,7 @@ from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.providers.base import ToolSpec
 
 _MAX_FETCH_CHARS = 50_000
+_MAX_REDIRECTS = 5
 
 
 class ToolContext:
@@ -142,6 +144,37 @@ class RunShellTool:
         )
 
 
+async def _ensure_public_host(url: str) -> None:
+    """Raises `ValueError` if `url`'s hostname resolves to anything but a
+    globally-routable public IP address — the standard SSRF mitigation
+    for a tool that fetches caller-supplied URLs. A real risk, not a
+    hypothetical one: without this, `WebFetchTool` (marked
+    non-destructive, so it runs with zero confirmation) would happily
+    fetch `http://127.0.0.1:11434/api/tags` — confirmed directly
+    against the real local Ollama server this environment runs — or a
+    cloud metadata endpoint (`http://169.254.169.254/...`), landing
+    internal service data or cloud credentials straight into the
+    model's own context. `ipaddress`'s `is_global` covers private
+    (RFC 1918), loopback, link-local (which includes the cloud metadata
+    address), and other reserved ranges in one check, for both IPv4 and
+    IPv6."""
+    host = urlparse(url).hostname
+    if host is None:
+        raise ValueError(f"URL has no hostname: {url!r}")
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None)
+    except OSError as e:
+        raise ValueError(f"could not resolve host {host!r}: {e}") from e
+    for _family, _type, _proto, _canonname, sockaddr in infos:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if not ip.is_global:
+            raise ValueError(
+                f"refusing to fetch {url!r}: host {host!r} resolves to "
+                f"a non-public address ({ip}) -- possible SSRF"
+            )
+
+
 class WebFetchTool:
     """Non-destructive: read-only network access, no state changed."""
 
@@ -168,17 +201,39 @@ class WebFetchTool:
                 is_error=True,
             )
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                text = resp.text[:_MAX_FETCH_CHARS]
-                if len(resp.text) > _MAX_FETCH_CHARS:
-                    text += "\n\n[truncated]"
-                return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
+            # follow_redirects is deliberately off and replaced with a
+            # bounded manual loop that re-validates the target host on
+            # EVERY hop, not just the caller-supplied URL -- an initial
+            # URL can be a legitimate public site whose server issues a
+            # redirect straight to an internal address, which a
+            # validate-once-up-front check would never catch.
+            async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as client:
+                for _ in range(_MAX_REDIRECTS + 1):
+                    await _ensure_public_host(url)
+                    resp = await client.get(url)
+                    if resp.is_redirect and resp.has_redirect_location:
+                        url = urljoin(str(resp.url), resp.headers["location"])
+                        continue
+                    resp.raise_for_status()
+                    text = resp.text[:_MAX_FETCH_CHARS]
+                    if len(resp.text) > _MAX_FETCH_CHARS:
+                        text += "\n\n[truncated]"
+                    return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=f"too many redirects fetching {args['url']!r}")],
+                is_error=True,
+            )
         except httpx.HTTPError as e:
             return ToolResultBlock(
                 tool_call_id="",
                 content=[TextBlock(text=f"fetch failed: {e}")],
+                is_error=True,
+            )
+        except ValueError as e:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=str(e))],
                 is_error=True,
             )
 
