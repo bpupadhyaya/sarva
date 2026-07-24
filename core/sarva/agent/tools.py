@@ -23,6 +23,7 @@ from sarva.providers.base import ToolSpec
 
 _MAX_FETCH_CHARS = 50_000
 _MAX_REDIRECTS = 5
+_SHELL_TIMEOUT_SECONDS = 60
 
 
 class ToolContext:
@@ -136,7 +137,31 @@ class RunShellTool:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_SHELL_TIMEOUT_SECONDS)
+        except TimeoutError:
+            # A real bug found by actually running a long-lived shell
+            # command against a shortened timeout: asyncio.wait_for()
+            # only cancels the *awaiting* communicate() call -- it never
+            # touches the child process itself, confirmed directly with
+            # a real `sleep`-then-`echo` command still alive (and its
+            # trailing side effect still completing) seconds after the
+            # "timeout." That matters specifically because this tool is
+            # `destructive=True` -- the whole confirmation gate exists to
+            # stop unwanted side effects, and a silent timeout defeated
+            # it by leaving the command running unattended regardless of
+            # what the user actually approved.
+            proc.kill()
+            await proc.wait()
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[
+                    TextBlock(
+                        text=f"command timed out after {_SHELL_TIMEOUT_SECONDS}s and was killed"
+                    )
+                ],
+                is_error=True,
+            )
         return ToolResultBlock(
             tool_call_id="",
             content=[TextBlock(text=stdout.decode(errors="replace"))],

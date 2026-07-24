@@ -68,6 +68,25 @@ A tool that raises never crashes the loop — the exception becomes an
 same as any other tool failure it needs to react to. An unrecognized
 tool name gets the identical treatment rather than a hard stop.
 
+**A real bug found in `RunShellTool`'s own timeout, not just an
+uncaught exception:** `asyncio.wait_for(proc.communicate(),
+timeout=...)` only cancels the *awaiting* coroutine on expiry — it
+never touches the child process itself. Confirmed directly: a shell
+command with a `sleep`-then-side-effect tail, run against a shortened
+timeout, left both the shell and the sleeping process alive (and the
+trailing side effect completed) seconds after the reported "timeout."
+This is specifically dangerous for `RunShellTool` because it's the one
+built-in tool marked `destructive=True` — the whole confirmation gate
+exists to stop unwanted side effects, and a timeout was silently
+defeating that guarantee by leaving the command running unattended
+regardless of what was approved. Fixed by catching the `TimeoutError`,
+calling `proc.kill()` then `await proc.wait()` before returning a real
+`is_error=True` result naming the timeout — never a blank message the
+way a bare `TimeoutError`'s own `str()` would produce. Verified live: a
+real timed-out command's side-effect file genuinely never appears,
+confirmed with the process both killed and reaped, not just reported
+as failed.
+
 ### `WebFetchTool` and a real SSRF gap it had, found and closed
 
 `WebFetchTool` is marked `destructive=False` — deliberately, since

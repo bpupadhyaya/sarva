@@ -5740,3 +5740,58 @@ defeats that guarantee. Batching (§3.6f), F1's distributed training
 infra, Gemini's Files API for long video, and desktop
 code-signing/notarization remain deferred for the reasons already
 logged above.
+
+## `RunShellTool`'s timeout never actually killed the child process — the last real candidate from the image_base64/file-path sweep
+
+`RunShellTool` had zero conformance test coverage at all before this
+milestone (confirmed by grepping `tests/` for `run_shell`/`RunShellTool`
+and finding nothing) — a surprising gap for the one built-in tool
+marked `destructive=True`, the flag that gates every confirmation
+prompt. Investigating it directly confirmed the real bug the last
+Explore-agent sweep had flagged: `asyncio.wait_for(proc.communicate(),
+timeout=60)` only cancels the *awaiting* `communicate()` coroutine when
+it expires — it never sends the child process itself a signal.
+Reproduced directly: a real `sleep 2 && echo done > marker` command,
+run against a shortened timeout via a new monkeypatchable
+`_SHELL_TIMEOUT_SECONDS` module constant, left the shell process alive
+and the `marker` file genuinely written a few seconds after the tool
+had already reported a timeout — the command's real side effect kept
+happening completely unattended. This is a meaningfully worse gap than
+a blank error message: `RunShellTool.spec.destructive = True` exists
+specifically so a confirmation gate can stop unwanted side effects, and
+a silent timeout defeated that guarantee regardless of what the user
+had actually approved.
+
+**Fixed by catching the timeout and actually terminating the process,
+not just wording the error better:** `except TimeoutError: proc.kill();
+await proc.wait()` before returning a real `is_error=True` result whose
+message names the timeout explicitly (`"command timed out after 60s
+and was killed"`) — never the blank text a bare, uncaught
+`TimeoutError`'s own `str()` would have produced (it propagated through
+the loop's generic exception handling before this fix, rendered as
+`TimeoutError: ` with nothing after the colon). `await proc.wait()`
+after `kill()` matters, not just the kill signal itself — it's what
+actually reaps the child rather than merely requesting its death.
+
+**Verified the new test is real, not just green:** reverted the fix
+back to the bare `asyncio.wait_for` call and re-ran the new regression
+test, watched it fail with `AttributeError: _SHELL_TIMEOUT_SECONDS`
+(the constant not existing pre-fix) before re-applying — same
+discipline as every fix in this journal since the MCP tool-name
+escaping milestone. Also added a basic sanity test for
+`RunShellTool` itself (combined stdout+stderr, nonzero exit → error),
+since none existed at all.
+
+2 new tests, 519 → 521 Python tests. `ruff check`/`format --check`
+clean. `docs/agent-loop.md` updated. **This closes out both real
+candidates from the last Explore-agent sweep (bad file paths,
+`RunShellTool`'s timeout) — worth another such sweep next time a fresh
+angle is needed.**
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral — real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have — likely stays deferred).

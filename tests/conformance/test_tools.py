@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 import pytest
+import sarva.agent.tools as tools_module
 from sarva.agent.tools import (
     ReadFileTool,
     RecallMemoryTool,
     RememberTool,
+    RunShellTool,
     ToolContext,
     WebFetchTool,
     WriteFileTool,
@@ -43,6 +48,46 @@ async def test_path_escape_is_rejected(ctx):
     read = ReadFileTool()
     with pytest.raises(ValueError, match="escapes workdir"):
         await read.run({"path": "../../etc/passwd"}, ctx)
+
+
+@pytest.mark.asyncio
+async def test_run_shell_returns_combined_stdout_stderr_and_exit_status(ctx):
+    shell = RunShellTool()
+    result = await shell.run({"command": "echo out; echo err >&2; exit 1"}, ctx)
+    assert result.is_error
+    assert "out" in result.content[0].text
+    assert "err" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_run_shell_timeout_kills_the_child_process_and_its_side_effects(ctx, monkeypatch):
+    # A real bug found by actually running a long-lived shell command
+    # against a shortened timeout: asyncio.wait_for() only cancels the
+    # *awaiting* communicate() call on expiry -- it never touches the
+    # child process itself, confirmed directly with a real `sleep`
+    # process still alive (and its trailing side effect still
+    # completing) seconds after the "timeout." This matters
+    # specifically because this tool is `destructive=True` -- the whole
+    # confirmation gate exists to stop unwanted side effects, and a
+    # silent timeout defeated it regardless of what was approved.
+    monkeypatch.setattr(tools_module, "_SHELL_TIMEOUT_SECONDS", 0.2)
+    shell = RunShellTool()
+    marker = ctx.workdir + "/side-effect.txt"
+
+    result = await shell.run({"command": f"sleep 2 && echo done > {marker}"}, ctx)
+
+    assert result.is_error
+    assert "timed out" in result.content[0].text
+    # Not blank the way a bare TimeoutError's own str() would be -- the
+    # actual reason must be visible to the model/user, not just an
+    # is_error flag with nothing behind it.
+    assert result.content[0].text.strip() != ""
+
+    # The real proof this isn't just a nicer message: the process (and
+    # therefore its side effect) must actually be dead, not merely
+    # reported as timed out while still running unattended.
+    await asyncio.sleep(3)
+    assert not os.path.exists(marker)
 
 
 @pytest.mark.asyncio
