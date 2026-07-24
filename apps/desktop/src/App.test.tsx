@@ -15,6 +15,7 @@ class MockWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
   closed = false;
 
   constructor(public url: string) {
@@ -27,6 +28,11 @@ class MockWebSocket {
 
   close() {
     this.closed = true;
+    // Real WebSockets fire onclose after close(), whether the client or
+    // the server initiated it -- mirrored here so App.tsx's own
+    // ws.close() call (after a clean run_done) exercises the exact same
+    // onclose path a server-initiated close does, not a separate one.
+    this.onclose?.();
   }
 }
 
@@ -94,6 +100,16 @@ function open(ws: MockWebSocket) {
 function triggerError(ws: MockWebSocket) {
   act(() => {
     ws.onerror?.();
+  });
+}
+
+/** Simulates the server (or network) closing the connection directly --
+ * no prior onerror, no prior run_done -- the raw-close case that used to
+ * leave the composer stuck disabled forever with no onclose handler at
+ * all. */
+function triggerRawClose(ws: MockWebSocket) {
+  act(() => {
+    ws.onclose?.();
   });
 }
 
@@ -363,5 +379,53 @@ describe("App", () => {
     expect(
       screen.getByText(/run ended: failed — unknown model 'bogus'/),
     ).toBeInTheDocument();
+  });
+
+  it("recovers from a raw connection close with no prior run_done or error", async () => {
+    // The real bug this pins: before onclose existed at all, a socket
+    // that closed for any reason that doesn't reliably fire onerror
+    // first (server killed mid-stream, a proxy idle timeout, a TCP
+    // reset) left `streaming` stuck true forever -- every composer
+    // control is gated on it, so the whole UI locked up with no
+    // recovery short of a page reload.
+    await renderApp();
+    submitMessage("this connection will just die");
+
+    const ws = latestSocket();
+    open(ws);
+    triggerRawClose(ws);
+
+    const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+    expect(screen.getByText(/connection closed before the run finished/)).toBeInTheDocument();
+  });
+
+  it("does not overwrite onerror's message with a generic one when close follows an error", async () => {
+    await renderApp();
+    submitMessage("this will error then close");
+
+    const ws = latestSocket();
+    open(ws);
+    triggerError(ws);
+    triggerRawClose(ws); // real WebSockets fire close after error too
+
+    expect(screen.getByText(/connection error/)).toBeInTheDocument();
+    expect(screen.queryByText(/connection closed before the run finished/)).not.toBeInTheDocument();
+  });
+
+  it("does not show a spurious close error after a clean run_done", async () => {
+    await renderApp();
+    submitMessage("hi");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, { type: "run_done", state: "done", final_message: null });
+
+    // App.tsx's own ws.close() call after a clean run_done fires
+    // onclose too (see MockWebSocket.close()) -- settled must already
+    // be true by then so this doesn't show a spurious error.
+    expect(screen.queryByText(/connection closed before the run finished/)).not.toBeInTheDocument();
+    const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
+    expect(input.disabled).toBe(false);
   });
 });

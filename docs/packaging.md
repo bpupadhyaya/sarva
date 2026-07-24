@@ -203,6 +203,31 @@ now (a real gap from the image-attach milestone, noticed and closed
 while touching this same UI area) — both it and the new `.model-picker`
 are styled consistently with the rest of the app, dark-mode included.
 
+**A hung "Thinking…" state with no recovery, found the same way — by
+sweeping for one bug class already fixed elsewhere in this codebase
+applied to code that hadn't been checked yet.** `App.tsx`'s WebSocket
+handling set `onopen`/`onmessage`/`onerror`, but never `onclose` —
+`streaming` only ever flipped back to `false` inside the `run_done` or
+`onerror` branches. A socket that closes for any reason that doesn't
+reliably fire `onerror` first (the server process killed mid-stream, a
+reverse-proxy idle timeout, a raw TCP reset) left `streaming` stuck
+`true` forever, and every composer control — the text input,
+attach-image button, model picker, and send button — is gated on it,
+so the *entire* UI locked up with no recovery except a full page
+reload. Fixed with a real `onclose` handler, guarded by a `settled`
+flag set by whichever of `run_done`/`onerror` fires first so a normal
+completion or a real error is never overwritten by a redundant, less
+specific close message — real WebSockets fire `onclose` after *any*
+close, including a clean one the client itself initiated via its own
+`ws.close()` call. **Verified the new regression test is real, not
+just green:** reverted the fix and watched the exact new test fail for
+the right reason (`streaming` still `true`, composer still disabled)
+before re-applying, the same discipline already applied to the MCP
+tool-name-escaping fix. 3 new tests (the raw-close recovery itself,
+that `onerror`'s own message isn't overwritten by a later close, and
+that a clean `run_done` never shows a spurious close error), 28 → 31
+TypeScript tests.
+
 `GET /doctor` and `POST /config` are the two endpoints the first-run
 onboarding screen (below) depends on — `/doctor` returns exactly what
 `sarva doctor` prints, as JSON (reusing `run_diagnostics()` directly, so

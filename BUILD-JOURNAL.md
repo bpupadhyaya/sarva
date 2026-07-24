@@ -5520,3 +5520,63 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## The desktop app's "Thinking…" state could hang forever with no recovery — no `onclose` handler existed at all
+
+Delegated a broader sweep (an Explore agent, since this session's own
+quick look kept circling back to the CLI/server it had already
+combed) for the next real gap of a similar shape/severity to what's
+already been fixed. It found `App.tsx`'s WebSocket handling set
+`onopen`/`onmessage`/`onerror`, but never `onclose` — confirmed by
+reading the file directly, not assumed from a description.
+`streaming` (the flag every composer control — text input,
+attach-image button, model picker, send button — is gated on) only
+ever flipped back to `false` inside the `run_done` or `onerror`
+branches. A socket that closes for any reason that doesn't reliably
+fire `onerror` first first — the server process killed mid-stream, a
+reverse-proxy idle timeout, a raw TCP reset, all real production
+scenarios, not contrived — left `streaming` stuck `true` forever, and
+the entire chat UI locked up with no recovery short of a full page
+reload.
+
+**Fixed with a real `onclose` handler, careful not to regress the two
+paths that already handle this correctly:** a `settled` flag, set by
+whichever of `run_done`/`onerror` fires first, gates `onclose` so it
+only ever acts on the genuinely-new case — a real WebSocket fires
+`onclose` after *any* close, including the clean one the client itself
+already triggers via `ws.close()` after a successful `run_done`, and
+naively showing a close message there would have overwritten a correct
+completion with a spurious error, or overwritten `onerror`'s own more
+specific message if `onclose` fires shortly after it (both real
+browser behaviors, not hypothetical).
+
+**Verified the new regression test is real, not just green, the same
+way the MCP tool-name-escaping fix was:** reverted the `onclose`
+handler and re-ran the new test, watched it fail for the right reason
+(`streaming` still `true`, the composer still disabled, no recovery
+message shown) before re-applying the fix. `MockWebSocket.close()` was
+also updated to fire `onclose` itself, matching real `WebSocket`
+semantics — the same object real browsers give `App.tsx`, not a
+partial stand-in that would let this exact bug slip past the test
+suite again in the future.
+
+3 new tests (the raw-close recovery itself, that `onerror`'s message
+survives a subsequent close instead of being overwritten, and that a
+clean `run_done` never shows a spurious close error), 28 → 31
+TypeScript tests. `tsc -b` clean, real production build, static bundle
+rebuilt and committed. **Verified beyond the test suite too:** a real
+`sarva serve` process hit with a real `websockets` client that reads
+one frame and then disconnects abruptly — confirming the server itself
+handles an abrupt client disconnect gracefully, the real-world trigger
+this fix is for (the fix itself lives entirely in the client's React
+state machine, which is what the vitest suite actually exercises).
+`docs/packaging.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

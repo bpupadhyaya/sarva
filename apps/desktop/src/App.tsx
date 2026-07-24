@@ -120,6 +120,15 @@ export default function App() {
     socketRef.current = ws;
 
     let lastDetail: string | null = null;
+    // Set by run_done (clean or failed completion) or onerror (a real
+    // WebSocket error) -- onclose only acts when NEITHER already fired,
+    // the raw-close case (server process killed mid-stream, a proxy
+    // idle timeout, a TCP reset) that used to leave `streaming` stuck
+    // true forever with no onclose handler at all: every composer
+    // control (text input, attach-image button, model picker, send) is
+    // gated on it, so a hung raw close silently locked the entire UI
+    // with no recovery short of a page reload.
+    let settled = false;
 
     ws.onopen = () => {
       // auto: false (the default) — every destructive tool call pauses for
@@ -152,6 +161,7 @@ export default function App() {
       } else if (event.type === "state_changed" && event.detail) {
         lastDetail = event.detail;
       } else if (event.type === "run_done") {
+        settled = true;
         setStreaming(false);
         setPending(null);
         if (event.state !== "done") {
@@ -165,7 +175,16 @@ export default function App() {
     };
 
     ws.onerror = () => {
+      settled = true;
       setError("connection error — is `sarva serve` running?");
+      setStreaming(false);
+      setPending(null);
+    };
+
+    ws.onclose = () => {
+      if (settled) return; // already handled by run_done or onerror above
+      settled = true;
+      setError("connection closed before the run finished — is `sarva serve` still running?");
       setStreaming(false);
       setPending(null);
     };
