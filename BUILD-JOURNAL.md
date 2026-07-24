@@ -5580,3 +5580,56 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## `sarva speak --voice bogus-name` crashed with a raw subprocess error, found against the real espeak-ng binary
+
+The last real candidate from the same investigative sweep that found
+the session-name and desktop `onclose` bugs: `synthesize()`'s Linux
+espeak branch (and the Windows/macOS branches by the same code shape)
+calls `subprocess.run(..., check=True)`, which raises a plain
+`subprocess.CalledProcessError` on a nonzero exit — and `cli.py`'s
+`speak` command only ever caught `RuntimeError` (the "no engine
+detected at all" case). Confirmed against the real installed
+`espeak-ng` binary, not assumed: `espeak-ng -v bogus-name "hello"`
+genuinely exits 1 with `Error: The specified espeak-ng voice does not
+exist.`, and driving `sarva speak --voice bogus-name` through the real
+CLI (forcing the espeak branch, since macOS's own `say` always wins
+otherwise) printed a full Rich traceback instead of a clean message.
+
+**Fixed in `synthesize()` itself, not with a second `except` clause
+scattered into the CLI:** any `subprocess.CalledProcessError` from
+whichever engine branch actually ran is caught in one place and
+re-raised as `RuntimeError`, carrying the engine's own real captured
+`stderr` — the one piece of information that actually explains what
+broke, decoded and included rather than dropped. This means the fix
+covers all three engine branches (`say`, `espeak`/`espeak-ng`,
+Windows' PowerShell/SAPI) with one change, not one per platform, and
+the CLI's existing `except RuntimeError` handler needed no changes at
+all to pick it up.
+
+**Verified the new tests are real, not just green, the same discipline
+already applied to the MCP tool-name and desktop `onclose` fixes:**
+reverted the `try`/`except` and re-ran both the library-level and
+CLI-level tests, watched them fail with the real raw
+`CalledProcessError` for the right reason, then re-applied the fix.
+Verified live beyond the tests too: both a direct `synthesize()` call
+and the actual `sarva speak` command, run against the real installed
+`espeak-ng` binary with a genuinely bad voice name, now produce the
+clean message `text-to-speech engine failed: Error: The specified
+espeak-ng voice does not exist.` and exit 1 — never a traceback.
+
+2 new tests (one at the `sarva.audio` library level, one through the
+real CLI), 511 → 513 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred). The three real bugs found by the last broad Explore-agent
+sweep (session names, desktop `onclose`, TTS engine failures) are now
+all closed — worth another such sweep next time a fresh angle is
+needed rather than incremental ad-hoc searching.

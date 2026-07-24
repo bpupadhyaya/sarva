@@ -115,10 +115,32 @@ def tts_engine_available() -> bool:
 def synthesize(text: str, voice: str | None = None) -> bytes:
     """Real local text-to-speech, returned as WAV bytes. Raises
     RuntimeError with a clear, actionable message if no engine is
-    detected on this platform — never fabricates silent or empty audio
-    as a fallback, the same no-fabrication discipline the multimodal
+    detected on this platform, or if a detected engine actually runs
+    but fails (e.g. an unrecognized `voice` -- a real, reproducible
+    case: `espeak-ng` genuinely exits 1 for an unknown voice name,
+    confirmed directly against the real installed binary in this
+    environment) — never fabricates silent or empty audio as a
+    fallback, the same no-fabrication discipline the multimodal
     degraders already apply to what they report, not what they
     synthesize."""
+    try:
+        return _synthesize_with_detected_engine(text, voice)
+    except subprocess.CalledProcessError as e:
+        # A real bug found by actually running `synthesize(text,
+        # voice="bogus")` against the real espeak-ng branch: the raw
+        # CalledProcessError propagated uncaught, and the CLI's `speak`
+        # command only ever caught RuntimeError -- a raw Python
+        # traceback instead of a clean, actionable message. `e.stderr`
+        # carries the engine's own real diagnostic (e.g. "Error: The
+        # specified espeak-ng voice does not exist."), decoded and
+        # included here rather than dropped, since it's the one piece
+        # of information that actually explains what went wrong.
+        stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+        detail = f": {stderr}" if stderr else ""
+        raise RuntimeError(f"text-to-speech engine failed{detail}") from e
+
+
+def _synthesize_with_detected_engine(text: str, voice: str | None) -> bytes:
     if platform.system() == "Darwin" and shutil.which("say"):
         with tempfile.TemporaryDirectory() as tmp:
             out_path = Path(tmp) / "speech.wav"

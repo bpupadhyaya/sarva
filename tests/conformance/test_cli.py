@@ -11,6 +11,7 @@ provider only), the same "always works with no API keys" guarantee
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 import sys
 from contextlib import asynccontextmanager
@@ -606,6 +607,44 @@ def test_speak_fails_cleanly_with_no_engine_available(tmp_path, monkeypatch):
 
     assert result.exit_code == 1
     assert "no local text-to-speech engine detected" in result.stdout
+    assert not (tmp_path / "out.wav").exists()
+
+
+@pytest.mark.skipif(
+    not (shutil.which("espeak-ng") or shutil.which("espeak")),
+    reason="espeak/espeak-ng not installed",
+)
+def test_speak_with_a_bad_voice_fails_cleanly_instead_of_a_raw_traceback(tmp_path, monkeypatch):
+    # A real bug found by actually running `sarva speak --voice
+    # bogus-name` against the real installed espeak-ng: it exits 1 for
+    # an unrecognized voice, and the raw subprocess.CalledProcessError
+    # propagated uncaught through the CLI -- confirmed with a real
+    # terminal invocation before this fix. `speak` only ever caught
+    # RuntimeError, so synthesize() needed to translate the engine
+    # failure into one, not the CLI command needing a second except
+    # clause.
+    import sarva.audio as audio_module
+
+    real_which = shutil.which
+    monkeypatch.setattr(
+        audio_module.shutil, "which", lambda cmd: None if cmd == "say" else real_which(cmd)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "speak",
+            "hello",
+            "--voice",
+            "totally-bogus-voice-xyz",
+            "--out",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "text-to-speech engine failed" in result.stdout
+    assert "Traceback" not in result.stdout
     assert not (tmp_path / "out.wav").exists()
 
 

@@ -13,6 +13,7 @@ same proof."""
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,31 @@ def test_synthesize_falls_back_to_espeak_when_say_is_unavailable(monkeypatch):
     assert audio_bytes.startswith(b"RIFF")
     assert b"WAVE" in audio_bytes[:16]
     assert len(audio_bytes) > 1000
+
+
+@pytest.mark.skipif(not _has_espeak, reason="espeak/espeak-ng not installed")
+def test_synthesize_raises_a_clean_runtime_error_when_the_engine_itself_fails(monkeypatch):
+    # A real bug found by actually running this against the real
+    # installed espeak-ng binary: an unrecognized --voice name makes
+    # espeak-ng genuinely exit 1 ("Error: The specified espeak-ng voice
+    # does not exist."), and the raw subprocess.CalledProcessError
+    # propagated uncaught -- a bare Python traceback instead of the
+    # same clean RuntimeError the "no engine at all" case already
+    # raises, and which the CLI's `speak` command specifically catches.
+    import sarva.audio as audio_module
+
+    real_which = shutil.which
+    monkeypatch.setattr(
+        audio_module.shutil, "which", lambda cmd: None if cmd == "say" else real_which(cmd)
+    )
+
+    with pytest.raises(RuntimeError, match="text-to-speech engine failed") as excinfo:
+        synthesize("hello", voice="totally-bogus-voice-name-xyz")
+
+    # The engine's own real diagnostic must survive into the message --
+    # the one piece of information that actually explains what broke.
+    assert "does not exist" in str(excinfo.value)
+    assert not isinstance(excinfo.value, subprocess.CalledProcessError)
 
 
 def test_windows_branch_never_puts_raw_text_on_the_command_line(monkeypatch):

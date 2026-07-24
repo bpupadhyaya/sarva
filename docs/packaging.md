@@ -438,6 +438,25 @@ mock. A full `espeak-ng` → `faster-whisper` round trip (real
 synthesized speech, transcribed back, words checked) passed the same
 way the `say` round trip already had.
 
+**`synthesize()` itself could crash with a raw subprocess error, found
+by actually running it against the real `espeak-ng` binary with a bad
+`--voice`.** `espeak-ng` genuinely exits 1 for an unrecognized voice
+name (confirmed directly: `espeak-ng -v bogus-name "hello"` → `Error:
+The specified espeak-ng voice does not exist.`), and the raw
+`subprocess.CalledProcessError` propagated uncaught all the way
+through `sarva speak --voice bogus-name` — a bare Python traceback,
+since `speak`'s own CLI command only ever caught `RuntimeError` (the
+"no engine at all" case). Fixed in `synthesize()` itself, not with a
+second `except` clause in the CLI: any `CalledProcessError` from
+whichever engine actually ran becomes a `RuntimeError` carrying the
+engine's own real captured stderr (`"text-to-speech engine failed:
+Error: The specified espeak-ng voice does not exist."`) — the one
+piece of information that actually explains what broke, not dropped in
+translation. Verified against the real installed binary both at the
+library level and through the actual CLI, and confirmed the new tests
+are real by reverting the fix and watching both fail for the right
+reason before re-applying.
+
 **Windows had no engine at all until now** — this module's own
 docstring named it as genuinely unimplemented, not just unverified.
 It's closed the same way the other two branches are: shell out to an
