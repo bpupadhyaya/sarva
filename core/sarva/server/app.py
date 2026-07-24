@@ -45,14 +45,14 @@ from sarva.server.schemas import (
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
-def _extra_content_from(req: ChatRequest) -> list[ContentBlock]:
-    if req.image_base64 and req.image_media_type:
-        return [
-            ImageBlock(
-                media_type=req.image_media_type,
-                data=base64.b64decode(req.image_base64),
-            )
-        ]
+def _extra_content_blocks(
+    image_base64: str | None, image_media_type: str | None
+) -> list[ContentBlock]:
+    """Shared by /chat (a validated ChatRequest) and /ws/chat (a raw JSON
+    frame with no schema of its own) so the two request paths can't drift
+    apart on what "an attached image" means."""
+    if image_base64 and image_media_type:
+        return [ImageBlock(media_type=image_media_type, data=base64.b64decode(image_base64))]
     return []
 
 
@@ -103,7 +103,7 @@ def create_app() -> FastAPI:
     async def chat(req: ChatRequest) -> ChatResponse:
         store = SessionStore()
         history = store.load(req.session) if req.session else []
-        extra_content = _extra_content_from(req)
+        extra_content = _extra_content_blocks(req.image_base64, req.image_media_type)
 
         loop = AgentLoop(
             router=build_router(),
@@ -144,6 +144,12 @@ def create_app() -> FastAPI:
         not `sarva chat`). The client sends one
         {"message": ..., "session": ..., "auto": false} frame and receives
         streamed AgentEvent JSON frames ending with a run_done frame.
+        Optional "image_base64"/"image_media_type" attach one image to the
+        turn, the same shape and meaning as /chat's own fields -- this is
+        the desktop app's only chat surface (it never calls /chat), so
+        until this existed there was genuinely no way to send an image
+        through the web UI at all despite the CLI and REST endpoint both
+        already supporting it.
 
         When a destructive tool needs approval, the loop's `NeedsConfirmationEvent`
         arrives as usual, and the *next* value the client sends on this same
@@ -171,6 +177,9 @@ def create_app() -> FastAPI:
             message = payload.get("message", "")
             session = payload.get("session")
             auto = bool(payload.get("auto", False))
+            extra_content = _extra_content_blocks(
+                payload.get("image_base64"), payload.get("image_media_type")
+            )
 
             async def ws_confirm(call: ToolCallBlock) -> bool:
                 reply = await websocket.receive_json()
@@ -189,7 +198,11 @@ def create_app() -> FastAPI:
             state = AgentState.FAILED
             transcript: list[Message] = []
             async for event in loop.run(
-                message, history=history, transcript_out=transcript, session_id=session
+                message,
+                history=history,
+                extra_content=extra_content,
+                transcript_out=transcript,
+                session_id=session,
             ):
                 await websocket.send_text(event.model_dump_json())
                 if event.type == "run_done":

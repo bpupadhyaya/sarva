@@ -233,4 +233,68 @@ describe("App", () => {
 
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
+
+  it("attaching an image shows a chip and sends it base64-encoded alongside the message", async () => {
+    await renderApp();
+
+    const bytes = new Uint8Array([137, 80, 78, 71]); // real bytes, not text-encoded
+    const file = new File([bytes], "photo.png", { type: "image/png" });
+    const input = screen.getByTestId("attach-image-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    expect(screen.getByText(/photo\.png/)).toBeInTheDocument();
+
+    submitMessage("what's in this image?");
+    const ws = latestSocket();
+    open(ws);
+
+    const sent = JSON.parse(ws.sent[0]);
+    expect(sent.message).toBe("what's in this image?");
+    expect(sent.session).toBe("web");
+    expect(sent.image_media_type).toBe("image/png");
+    expect(atob(sent.image_base64)).toBe(String.fromCharCode(...bytes));
+  });
+
+  it("omits image_base64/image_media_type entirely when nothing is attached", async () => {
+    await renderApp();
+    submitMessage("no image here");
+
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "no image here", session: "web" });
+  });
+
+  it("Remove image clears the attachment and it is not sent on the next message", async () => {
+    await renderApp();
+
+    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", { type: "image/png" });
+    const input = screen.getByTestId("attach-image-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+    expect(screen.getByText(/photo\.png/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /remove image/i }));
+    expect(screen.queryByText(/photo\.png/)).not.toBeInTheDocument();
+
+    submitMessage("hi again");
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "hi again", session: "web" });
+  });
+
+  it("rejects a non-image file with a clear error and does not attach it", async () => {
+    await renderApp();
+
+    const file = new File(["not an image"], "notes.txt", { type: "text/plain" });
+    const input = screen.getByTestId("attach-image-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    expect(screen.getByText(/doesn't look like an image/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /remove image/i })).not.toBeInTheDocument();
+  });
 });

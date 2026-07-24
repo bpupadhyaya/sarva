@@ -4711,3 +4711,69 @@ limitation as the rest of the Google adapter); or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## The desktop app had no way to send an image, even though three of the four layers already supported it
+
+Found by checking what the desktop app actually *calls*, not what the
+server merely *supports* — the same "verify against actual behavior,
+not the API surface" discipline that caught the Ollama image gap a
+milestone ago. `sarva chat --image` and `POST /chat`'s
+`image_base64`/`image_media_type` fields have existed for a while. But
+`apps/desktop/src/App.tsx` (the desktop app's entire chat UI) only ever
+calls `WS /ws/chat`, never `/chat` — and `ws_chat` never read those two
+fields from the incoming frame at all, confirmed by grepping the
+handler before assuming otherwise. Three of the four surfaces (CLI,
+`/chat`, the underlying `AgentLoop.run(extra_content=...)` mechanism)
+supported images; the one surface an actual browser user touches did
+not, silently.
+
+**Fixed by sharing one helper, not duplicating the field-parsing
+logic:** `_extra_content_blocks(image_base64, image_media_type)`
+replaces the REST-only `_extra_content_from(req: ChatRequest)`, called
+from both `/chat` (with the validated `ChatRequest` fields) and
+`/ws/chat` (with the same two keys read straight from the raw JSON
+frame — WebSocket payloads have no schema of their own). `ws_chat` now
+builds `extra_content` and threads it into `loop.run()` exactly the way
+`/chat` already does.
+
+**The desktop app itself needed real UI, not just a wire-format fix:**
+`App.tsx` gained a hidden file input behind a 📎 button, an
+`AttachedImage` piece of state, and a removable chip showing the
+attached file's name before it's sent. `fileToBase64` reads via
+`File.arrayBuffer()` rather than `FileReader.readAsDataURL` —
+deliberately, so the exact same code path works identically in a real
+browser and in this project's own jsdom-backed Vitest environment,
+with no `data:...;base64,` prefix to strip. A non-image file selection
+fails with a clear inline error and is never attached, matching the
+CLI's own `--image` failure-mode discipline.
+
+**Verified beyond both test suites:** a real `sarva serve` process, hit
+with a real `websockets` Python client sending a real image over a real
+WebSocket connection, completed the run cleanly end to end — confirmed
+against the server's own request log, not just an absence of thrown
+exceptions in a test. On the Python side, a new `_CapturingProvider`
+(a `MockProvider` subclass recording the real `GenerateRequest` it's
+handed) proves an attached image reaches the provider as a genuine
+`ImageBlock` with the exact original bytes and media type — for both
+`/chat` (which had zero image-path test coverage before this, despite
+the field existing) and the newly-wired `/ws/chat`.
+
+7 new Python tests (2 REST/WS positive paths, 1 WS negative-path check
+that no image block appears when none is attached), 460 → 463 Python
+tests. 5 new TypeScript tests (attach + send, omitted-when-absent,
+Remove clears it, non-image rejected), 19 → 24 TypeScript tests.
+`ruff check`/`format --check` clean, `tsc -b` clean, a real production
+`npm run build` run and its output copied into
+`core/sarva/server/static/` via `scripts/build-web.sh` (checked into
+git deliberately — see the mkdocs/docs-site milestone entry for why a
+stale built artifact is a real, previously-hit risk in this repo).
+`docs/packaging.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

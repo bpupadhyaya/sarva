@@ -4,12 +4,14 @@ running server process."""
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sarva.memory import session as session_module
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import ToolCallBlock
+from sarva.multimodal.content import ImageBlock, ToolCallBlock
+from sarva.providers.base import GenerateRequest
 from sarva.providers.mock import MockProvider, ScriptedTurn
 from sarva.providers.registry import Registry, Router, load_routing
 from sarva.server import app as app_module
@@ -34,6 +36,29 @@ def _use_scripted_mock(monkeypatch, script: list[ScriptedTurn]) -> MockProvider:
     sarva.runtime doesn't reach it — the patch target must be the names as
     bound inside sarva.server.app."""
     provider = MockProvider(script=script)
+    monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
+    monkeypatch.setattr(app_module, "build_router", _mock_only_router)
+    return provider
+
+
+class _CapturingProvider(MockProvider):
+    """Records the real GenerateRequest each call receives, on top of
+    MockProvider's own default echo behavior -- proves an attached image
+    actually reached the provider as a real ImageBlock, not just that the
+    endpoint returned 200/a run_done frame without erroring."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_request: GenerateRequest | None = None
+
+    async def generate(self, request: GenerateRequest):
+        self.last_request = request
+        async for event in super().generate(request):
+            yield event
+
+
+def _use_capturing_mock(monkeypatch) -> _CapturingProvider:
+    provider = _CapturingProvider()
     monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
     monkeypatch.setattr(app_module, "build_router", _mock_only_router)
     return provider
@@ -105,6 +130,28 @@ def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
     assert SessionStore().list_sessions() == []
 
 
+def test_chat_with_an_attached_image_reaches_the_provider_as_a_real_image_block(monkeypatch):
+    provider = _use_capturing_mock(monkeypatch)
+    raw = b"\x89PNG\r\n\x1a\nreal enough bytes for this test"
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "what's in this image?",
+            "image_base64": base64.b64encode(raw).decode(),
+            "image_media_type": "image/png",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert provider.last_request is not None
+    user_msg = next(m for m in provider.last_request.messages if m.role == "user")
+    images = [b for b in user_msg.content if isinstance(b, ImageBlock)]
+    assert len(images) == 1
+    assert images[0].data == raw
+    assert images[0].media_type == "image/png"
+
+
 def test_websocket_streams_events_and_ends_with_run_done(monkeypatch):
     _force_mock_only(monkeypatch)
     client = _client()
@@ -133,6 +180,48 @@ def test_websocket_with_session_persists(tmp_path, monkeypatch):
             pass
 
     assert len(SessionStore().load("ws-test")) == 2
+
+
+def test_websocket_with_an_attached_image_reaches_the_provider_as_a_real_image_block(monkeypatch):
+    # The real gap this closes: the desktop app's ONLY chat surface is
+    # /ws/chat (see App.tsx -- it never calls /chat), and until this,
+    # ws_chat never read image_base64/image_media_type from the frame at
+    # all, so there was genuinely no way to send an image through the web
+    # UI despite the CLI and /chat both already supporting it.
+    provider = _use_capturing_mock(monkeypatch)
+    raw = b"\x89PNG\r\n\x1a\nreal enough bytes for this websocket test"
+
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json(
+            {
+                "message": "what's in this image?",
+                "image_base64": base64.b64encode(raw).decode(),
+                "image_media_type": "image/png",
+            }
+        )
+        while ws.receive_json()["type"] != "run_done":
+            pass
+
+    assert provider.last_request is not None
+    user_msg = next(m for m in provider.last_request.messages if m.role == "user")
+    images = [b for b in user_msg.content if isinstance(b, ImageBlock)]
+    assert len(images) == 1
+    assert images[0].data == raw
+    assert images[0].media_type == "image/png"
+
+
+def test_websocket_without_an_image_sends_no_image_block(monkeypatch):
+    provider = _use_capturing_mock(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "no image here"})
+        while ws.receive_json()["type"] != "run_done":
+            pass
+
+    assert provider.last_request is not None
+    user_msg = next(m for m in provider.last_request.messages if m.role == "user")
+    assert not any(isinstance(b, ImageBlock) for b in user_msg.content)
 
 
 def test_websocket_tool_confirmation_approved_runs_the_tool(tmp_path, monkeypatch):

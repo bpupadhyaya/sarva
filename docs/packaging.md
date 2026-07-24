@@ -90,6 +90,26 @@ branches on `event.type === "needs_confirmation"` and its
 matching the server side precisely. `GET /health` and `GET /models`
 round out the REST surface for basic liveness/registry checks.
 
+**A real gap found by checking what the desktop app actually calls, not
+what the server merely supports:** `/chat` has taken optional
+`image_base64`/`image_media_type` fields since images were wired into
+the CLI, but `/ws/chat` — the *only* endpoint `App.tsx` ever calls —
+never read them from the incoming frame at all. Since the desktop app
+never calls `/chat`, this meant there was genuinely no way to attach an
+image through the web UI, despite the CLI and the REST endpoint both
+already supporting it. Closed by sharing one helper
+(`_extra_content_blocks`) between both endpoints so they can't drift
+apart again, wiring the same optional fields into `/ws/chat`'s frame,
+and giving `App.tsx` an actual attach-image control: a hidden file
+input behind a 📎 button, a removable chip showing the attached file's
+name, and the image sent base64-encoded (via `File.arrayBuffer()`, not
+`FileReader.readAsDataURL` — one fewer prefix-parsing step, and the
+same path both real browsers and this project's own jsdom test
+environment support identically) alongside the next message. **Verified
+beyond the test suites:** a real `sarva serve` process hit with a real
+`websockets` client sending a real image over `/ws/chat` completed
+cleanly end to end, confirmed against the server's own request log.
+
 `GET /doctor` and `POST /config` are the two endpoints the first-run
 onboarding screen (below) depends on — `/doctor` returns exactly what
 `sarva doctor` prints, as JSON (reusing `run_diagnostics()` directly, so

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { AgentEvent } from "./events";
 import Onboarding, { DISMISSED_KEY, isAnyProviderConfigured } from "./Onboarding";
 import type { DoctorCheck } from "./Onboarding";
@@ -13,14 +13,36 @@ interface PendingConfirmation {
   arguments: Record<string, unknown>;
 }
 
+interface AttachedImage {
+  base64: string;
+  mediaType: string;
+  name: string;
+}
+
+/** Reads a File's raw bytes and base64-encodes them without going through
+ * FileReader.readAsDataURL -- avoids the extra data:...;base64, prefix
+ * parsing step, and File.arrayBuffer() is the one path this project's own
+ * jsdom-backed test environment and every real browser both support
+ * identically. */
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
+  const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
   const sessionRef = useRef("web");
   const socketRef = useRef<WebSocket | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // null = still deciding (avoids a first-run screen flashing briefly for
   // an already-configured install while GET /doctor is in flight).
@@ -60,8 +82,14 @@ export default function App() {
     const text = input.trim();
     if (!text || streaming) return;
 
-    setMessages((prev) => [...prev, { role: "user", text }, { role: "assistant", text: "" }]);
+    const image = attachedImage;
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", text: image ? `${text} [${image.name}]` : text },
+      { role: "assistant", text: "" },
+    ]);
     setInput("");
+    setAttachedImage(null);
     setStreaming(true);
     setError(null);
     setPending(null);
@@ -74,7 +102,16 @@ export default function App() {
       // auto: false (the default) — every destructive tool call pauses for
       // an explicit Approve/Deny in the UI before it runs. See
       // core/sarva/server/app.py's ws_chat docstring for the protocol.
-      ws.send(JSON.stringify({ message: text, session: sessionRef.current }));
+      // image_base64/image_media_type are omitted entirely (not sent as
+      // null) when nothing's attached, matching the REST /chat request
+      // schema's own optional-field shape.
+      ws.send(
+        JSON.stringify({
+          message: text,
+          session: sessionRef.current,
+          ...(image ? { image_base64: image.base64, image_media_type: image.mediaType } : {}),
+        }),
+      );
     };
 
     ws.onmessage = (raw: MessageEvent<string>) => {
@@ -103,11 +140,24 @@ export default function App() {
       setStreaming(false);
       setPending(null);
     };
-  }, [input, streaming, appendToLastAssistant]);
+  }, [input, streaming, attachedImage, appendToLastAssistant]);
 
   const respondToConfirmation = useCallback((approved: boolean) => {
     socketRef.current?.send(JSON.stringify({ approved }));
     setPending(null);
+  }, []);
+
+  const handleFileChange = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError(`"${file.name}" doesn't look like an image (${file.type || "unknown type"})`);
+      return;
+    }
+    const base64 = await fileToBase64(file);
+    setAttachedImage({ base64, mediaType: file.type, name: file.name });
+    setError(null);
   }, []);
 
   if (showOnboarding === null) {
@@ -151,6 +201,15 @@ export default function App() {
         </div>
       )}
 
+      {attachedImage && (
+        <div className="attached-image">
+          <span>📎 {attachedImage.name}</span>
+          <button type="button" onClick={() => setAttachedImage(null)}>
+            Remove image
+          </button>
+        </div>
+      )}
+
       <form
         className="composer"
         onSubmit={(e) => {
@@ -158,6 +217,22 @@ export default function App() {
           send();
         }}
       >
+        <input
+          type="file"
+          accept="image/*"
+          ref={fileInputRef}
+          onChange={handleFileChange}
+          style={{ display: "none" }}
+          data-testid="attach-image-input"
+        />
+        <button
+          type="button"
+          disabled={streaming}
+          onClick={() => fileInputRef.current?.click()}
+          aria-label="Attach image"
+        >
+          📎
+        </button>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
