@@ -90,6 +90,24 @@ startup and merged into the same tool registry as the built-ins
 sees one flat set of tools, with no way to tell which ones came from
 where or which transport carried them.
 
+**The startup tool-listing line escapes what it prints, not just what
+it processes.** A real gap found by auditing this file's own CLI
+command for the same "unescaped externally-sourced text" bug class
+already fixed for `sarva doctor`/`sarva transcribe`: the connected
+server's own reported tool names were being interpolated straight into
+a Rich-markup string with no `escape()` at all — for an `http(s)://`
+server, that name comes from a remote, untrusted source, so a
+malicious or buggy server naming a tool with embedded Rich markup
+could spoof this project's own terminal output (fake status lines,
+hidden text). Fixed with `escape()` on both the tool names and the
+echoed `--mcp-server` value itself; pinned with a test that fakes a
+tool named `"[red]FAKE ERROR[/red] normal_tool"` and asserts it prints
+*verbatim*, not interpreted, and confirmed the test genuinely catches
+a regression by reverting the fix and watching it fail before
+re-applying. Verified against a real stdio MCP server too (the
+project's own `echo`/`fail` fixture) to confirm ordinary tool names
+still render exactly as before.
+
 `--mcp-header` (also repeatable, `"Name: Value"`) applies to every
 `http(s)://` `--mcp-server` in the same invocation alike — a real,
 named limit, not silently glossed over: the (rare) case of two HTTP

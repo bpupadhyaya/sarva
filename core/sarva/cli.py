@@ -250,9 +250,14 @@ async def _run(
                     connect_stdio_mcp_server(command, args=args)
                 )
             mcp_tools = await list_mcp_tools(mcp_session)
-            console.print(
-                f"[dim]mcp: {server_cmd!r} -> {', '.join(t.spec.name for t in mcp_tools)}[/dim]"
-            )
+            # escape(): tool names come from the connected MCP server's own
+            # response -- for an http(s):// server that's a remote,
+            # untrusted source (a malicious/buggy server could name a tool
+            # with embedded Rich markup and spoof this project's own
+            # terminal output). Same discipline every other externally-
+            # sourced string in this file already gets.
+            tool_names = ", ".join(escape(t.spec.name) for t in mcp_tools)
+            console.print(f"[dim]mcp: {escape(repr(server_cmd))} -> {tool_names}[/dim]")
             tools.extend(mcp_tools)
 
         loop = AgentLoop(

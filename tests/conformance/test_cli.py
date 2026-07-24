@@ -20,6 +20,7 @@ import sarva.runtime as runtime
 from sarva.audio import stt_extra_installed, tts_engine_available
 from sarva.cli import _parse_mcp_headers, app
 from sarva.memory.session import SessionStore
+from sarva.providers.base import ToolSpec
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -219,6 +220,51 @@ def test_run_mcp_header_actually_reaches_connect_http_mcp_server(monkeypatch, tm
     assert result.exit_code == 0, result.output
     assert captured["url"] == "https://example.invalid/mcp"
     assert captured["headers"] == {"Authorization": "Bearer test-token"}
+
+
+def test_run_mcp_tool_names_with_markup_characters_are_escaped_not_swallowed(monkeypatch, tmp_path):
+    # Tool names come from the connected MCP server's own response -- for
+    # an http(s):// server that's a remote, untrusted source. A real bug
+    # found by auditing this file for the same "unescaped external text"
+    # class already fixed elsewhere (doctor's detail text, transcribe's
+    # error message): this line printed tool names with no escape() at
+    # all, so a malicious/buggy server naming a tool with embedded Rich
+    # markup could spoof this project's own terminal output. Pinned here
+    # without a real MCP round trip -- list_mcp_tools is the one function
+    # that turns a session's raw response into Tool objects, so patching
+    # it directly is the precise unit for what this test checks.
+    _clear_provider_env(monkeypatch)
+
+    @asynccontextmanager
+    async def fake_connect_stdio_mcp_server(command, args=None):
+        yield object()
+
+    class _FakeTool:
+        spec = ToolSpec(
+            name="[red]FAKE ERROR[/red] normal_tool",
+            description="a fake tool for this test",
+            input_schema={"type": "object", "properties": {}},
+        )
+
+        async def run(self, args, ctx):
+            raise AssertionError("never actually called in this test")
+
+    async def fake_list_mcp_tools(session):
+        return [_FakeTool()]
+
+    monkeypatch.setattr(cli_module, "connect_stdio_mcp_server", fake_connect_stdio_mcp_server)
+    monkeypatch.setattr(cli_module, "list_mcp_tools", fake_list_mcp_tools)
+
+    result = runner.invoke(
+        app,
+        ["run", "do something", "--workdir", str(tmp_path), "--mcp-server", "fake-cmd", "--auto"],
+    )
+
+    assert result.exit_code == 0, result.output
+    # The raw brackets and their contents must survive verbatim in the
+    # captured output -- not interpreted as a real [red]...[/red] tag
+    # (which would instead show only "FAKE ERROR normal_tool", styled).
+    assert "[red]FAKE ERROR[/red] normal_tool" in result.stdout
 
 
 def test_run_with_mock_provider_completes_with_no_tool_calls(monkeypatch, tmp_path):

@@ -5274,3 +5274,55 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Sweeping for the bracket-swallowing bug class found a third instance: MCP tool names, from a remote and untrusted source this time
+
+After finding and fixing the same Rich-markup-swallowing bug twice in
+one milestone (`transcribe`'s error message, its own docstring),
+swept `cli.py` for every other `console.print(f"...")` call carrying
+dynamic content, rather than waiting to trip over a fourth instance by
+accident. Found one real, more serious case: `sarva run`'s startup
+line announcing each connected MCP server's tools interpolated
+`t.spec.name` straight into a Rich-markup f-string with no `escape()`
+at all. Unlike the earlier two instances (both this project's own
+error strings), tool names for an `http(s)://` `--mcp-server` come
+from a **remote, untrusted server's own response** — a malicious or
+buggy MCP server could name a tool with embedded Rich markup and spoof
+this project's own terminal output (fake status lines, hidden or
+altered text), the closest thing to a real integrity issue this
+particular bug class has produced so far.
+
+Fixed with `escape()` on both the tool names and the echoed
+`--mcp-server` value (the latter is user-supplied, not attacker-
+controlled, but the identical swallowing bug would still be a real,
+if lower-stakes, usability surprise). **Verified the test is real, not
+just green:** wrote a hermetic test faking a connected server with a
+tool literally named `"[red]FAKE ERROR[/red] normal_tool"`, confirmed
+it prints back verbatim — then deliberately reverted the fix and
+re-ran the test to watch it fail for the right reason before
+re-applying, the same "prove the test actually catches the bug"
+discipline this project applies to positive/negative test pairs
+elsewhere (the SFT masking tests, the ablation harness's positive
+control). Verified against a real MCP server too, not just the fake
+one: launched the project's own `echo`/`fail` stdio fixture through
+the real CLI and confirmed ordinary tool names still render exactly as
+before.
+
+1 new test, 491 → 492 Python tests. `ruff check`/`format --check`
+clean. `docs/mcp.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred). The bracket-swallowing bug class is now checked across
+every `console.print` call in `cli.py`, **and** confirmed genuinely
+inapplicable to `apps/desktop/src/`: `grep -rn "dangerouslySetInnerHTML\|innerHTML"`
+returns nothing, so every rendered string (tool names, model names,
+error details) goes through React's own default JSX auto-escaping —
+the equivalent bug class doesn't exist there by construction, not
+just unverified. This specific issue is now closed across both
+surfaces.
