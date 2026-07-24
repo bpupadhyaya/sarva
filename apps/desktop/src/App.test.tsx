@@ -30,6 +30,11 @@ class MockWebSocket {
   }
 }
 
+const DEFAULT_MODELS = [
+  { id: "mock", display_name: "Mock Provider", available: true },
+  { id: "claude-opus-4-8", display_name: "Claude Opus 4.8", available: false },
+];
+
 beforeEach(() => {
   MockWebSocket.instances = [];
   vi.stubGlobal("WebSocket", MockWebSocket);
@@ -38,11 +43,19 @@ beforeEach(() => {
   // screen's own coverage) -- these chat-flow tests aren't testing that
   // decision, so every test here gets an "already configured" response
   // by default, skipping straight to the chat UI they actually exercise.
+  // A second mount effect calls GET /models for the model picker --
+  // URL-aware so each endpoint gets its own real shape, not one mock
+  // response papering over both.
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => [{ name: "Anthropic API key", ok: true, detail: "ANTHROPIC_API_KEY is set" }],
+    vi.fn().mockImplementation((url: string) => {
+      if (url === "/models") {
+        return Promise.resolve({ ok: true, json: async () => DEFAULT_MODELS });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => [{ name: "Anthropic API key", ok: true, detail: "ANTHROPIC_API_KEY is set" }],
+      });
     }),
   );
 });
@@ -296,5 +309,59 @@ describe("App", () => {
 
     expect(screen.getByText(/doesn't look like an image/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /remove image/i })).not.toBeInTheDocument();
+  });
+
+  it("populates the model picker from GET /models, defaulting to Auto", async () => {
+    await renderApp();
+
+    const select = (await screen.findByLabelText("Model")) as HTMLSelectElement;
+    await screen.findByText("Claude Opus 4.8 (unavailable)");
+    expect(select.value).toBe("");
+    expect(screen.getByText("Mock Provider")).toBeInTheDocument();
+    expect(screen.getByText("Claude Opus 4.8 (unavailable)")).toBeInTheDocument();
+  });
+
+  it("sends the selected model in the WS payload, omitted when left on Auto", async () => {
+    await renderApp();
+    await screen.findByText("Mock Provider");
+
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "mock" } });
+    submitMessage("hello with a model");
+
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({
+      message: "hello with a model",
+      session: "web",
+      model: "mock",
+    });
+  });
+
+  it("omits model from the payload when left on Auto", async () => {
+    await renderApp();
+    await screen.findByText("Mock Provider");
+    submitMessage("hello without a model");
+
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "hello without a model", session: "web" });
+  });
+
+  it("shows the state_changed detail message alongside a failed run", async () => {
+    await renderApp();
+    submitMessage("this will fail with a reason");
+
+    const ws = latestSocket();
+    open(ws);
+    emit(ws, {
+      type: "state_changed",
+      state: "failed",
+      detail: "unknown model 'bogus' -- see 'sarva models' for the full list",
+    });
+    emit(ws, { type: "run_done", state: "failed", final_message: null });
+
+    expect(
+      screen.getByText(/run ended: failed — unknown model 'bogus'/),
+    ).toBeInTheDocument();
   });
 });

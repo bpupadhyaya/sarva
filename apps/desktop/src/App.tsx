@@ -19,6 +19,12 @@ interface AttachedImage {
   name: string;
 }
 
+interface ModelInfo {
+  id: string;
+  display_name: string;
+  available: boolean;
+}
+
 /** Reads a File's raw bytes and base64-encodes them without going through
  * FileReader.readAsDataURL -- avoids the extra data:...;base64, prefix
  * parsing step, and File.arrayBuffer() is the one path this project's own
@@ -40,6 +46,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  // "" means auto (no override) -- the exact meaning omitting the CLI's
+  // own --model flag has, kept consistent rather than inventing a
+  // separate "auto" sentinel value the server would need to know about.
+  const [selectedModel, setSelectedModel] = useState("");
   const sessionRef = useRef("web");
   const socketRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -67,6 +78,16 @@ export default function App() {
       .then((res) => (res.ok ? (res.json() as Promise<DoctorCheck[]>) : Promise.reject()))
       .then((checks) => setShowOnboarding(!isAnyProviderConfigured(checks)))
       .catch(() => setShowOnboarding(false)); // server unreachable -- don't block the chat UI on it
+  }, []);
+
+  useEffect(() => {
+    // Best-effort: an empty list just means the "Model" picker only ever
+    // offers "Auto" -- the same graceful-degradation instinct as the
+    // doctor fetch above, not a reason to block the chat UI.
+    fetch("/models")
+      .then((res) => (res.ok ? (res.json() as Promise<ModelInfo[]>) : Promise.reject()))
+      .then(setModels)
+      .catch(() => {});
   }, []);
 
   const appendToLastAssistant = useCallback((suffix: string) => {
@@ -98,18 +119,21 @@ export default function App() {
     const ws = new WebSocket(`${proto}://${window.location.host}/ws/chat`);
     socketRef.current = ws;
 
+    let lastDetail: string | null = null;
+
     ws.onopen = () => {
       // auto: false (the default) — every destructive tool call pauses for
       // an explicit Approve/Deny in the UI before it runs. See
       // core/sarva/server/app.py's ws_chat docstring for the protocol.
-      // image_base64/image_media_type are omitted entirely (not sent as
-      // null) when nothing's attached, matching the REST /chat request
+      // image_base64/image_media_type/model are omitted entirely (not
+      // sent as null) when unset, matching the REST /chat request
       // schema's own optional-field shape.
       ws.send(
         JSON.stringify({
           message: text,
           session: sessionRef.current,
           ...(image ? { image_base64: image.base64, image_media_type: image.mediaType } : {}),
+          ...(selectedModel ? { model: selectedModel } : {}),
         }),
       );
     };
@@ -125,11 +149,16 @@ export default function App() {
         appendToLastAssistant(event.result.is_error ? "  error" : "  ok");
       } else if (event.type === "needs_confirmation") {
         setPending({ name: event.call.name, arguments: event.call.arguments });
+      } else if (event.type === "state_changed" && event.detail) {
+        lastDetail = event.detail;
       } else if (event.type === "run_done") {
         setStreaming(false);
         setPending(null);
         if (event.state !== "done") {
-          setError(`run ended: ${event.state}`);
+          // The real reason (e.g. an unknown --model equivalent) used to
+          // be silently dropped here -- state_changed.detail carries it,
+          // the same fix the CLI and /chat's own response got.
+          setError(lastDetail ? `run ended: ${event.state} — ${lastDetail}` : `run ended: ${event.state}`);
         }
         ws.close();
       }
@@ -140,7 +169,7 @@ export default function App() {
       setStreaming(false);
       setPending(null);
     };
-  }, [input, streaming, attachedImage, appendToLastAssistant]);
+  }, [input, streaming, attachedImage, selectedModel, appendToLastAssistant]);
 
   const respondToConfirmation = useCallback((approved: boolean) => {
     socketRef.current?.send(JSON.stringify({ approved }));
@@ -209,6 +238,24 @@ export default function App() {
           </button>
         </div>
       )}
+
+      <div className="model-picker">
+        <label htmlFor="model-select">Model</label>
+        <select
+          id="model-select"
+          value={selectedModel}
+          onChange={(e) => setSelectedModel(e.target.value)}
+          disabled={streaming}
+        >
+          <option value="">Auto</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.display_name}
+              {m.available ? "" : " (unavailable)"}
+            </option>
+          ))}
+        </select>
+      </div>
 
       <form
         className="composer"

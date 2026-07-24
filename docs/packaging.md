@@ -143,10 +143,28 @@ in the `state_changed` frame's own `detail` field, since the full
 event stream reaches the client regardless. Verified live against a
 real running `sarva serve` process with real `curl` requests, not just
 the test suite — a valid `"model": "mock"` and a bogus id both behave
-exactly as documented. `App.tsx` doesn't expose a model picker yet —
-a genuinely different, more deliberate UI design decision than adding
-a wire-protocol field was, named as real follow-up rather than
-attempted here.
+exactly as documented.
+
+**`App.tsx` now has a real model picker, closing that follow-up.** A
+`<select>` next to the composer, populated from a new mount-time `GET
+/models` fetch (best-effort — an unreachable server just leaves it
+empty, the same graceful-degradation instinct as the `/doctor` fetch),
+defaulting to "Auto" (`""`, sent as no `model` field at all — the exact
+meaning omitting `--model` has on the CLI, not a separate sentinel the
+server would need to know about). Unavailable models are listed too,
+suffixed `(unavailable)`, rather than hidden — selecting one and
+getting a real provider error back is more honest than a picker that
+silently disagrees with what `sarva doctor`/`GET /doctor` would say.
+**Wiring this in surfaced a small, separate, real gap in the same
+file:** `App.tsx`'s `run_done` handler on a non-`DONE` state only ever
+showed the generic `"run ended: <state>"` — `state_changed`'s own
+`detail` field (the actual reason, e.g. an unknown model id) reaches
+the client in the WS event stream already, it was just never read.
+Fixed alongside the picker, the same fix the CLI and `/chat`'s
+response already got. `.attached-image` also had no CSS at all until
+now (a real gap from the image-attach milestone, noticed and closed
+while touching this same UI area) — both it and the new `.model-picker`
+are styled consistently with the rest of the app, dark-mode included.
 
 `GET /doctor` and `POST /config` are the two endpoints the first-run
 onboarding screen (below) depends on — `/doctor` returns exactly what

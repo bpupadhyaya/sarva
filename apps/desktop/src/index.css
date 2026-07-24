@@ -150,6 +150,46 @@ header h1 {
   color: white;
 }
 
+.attached-image {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.8rem;
+  margin: 0.5rem 0 0;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--user-bubble);
+  font-size: 0.85rem;
+}
+
+.attached-image button {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.model-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.model-picker select {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.85rem;
+}
+
 .composer {
   display: flex;
   gap: 0.5rem;

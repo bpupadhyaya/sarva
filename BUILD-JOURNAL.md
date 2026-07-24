@@ -5169,3 +5169,49 @@ real signing identity this environment doesn't have — likely stays
 deferred); or a real model-picker UI in the desktop app (`App.tsx`
 now has an equivalent server field to call, just no control to call it
 with).
+
+## The desktop app's model picker, plus two small real gaps found while building it
+
+Closed the follow-up named in each of the last two entries: `App.tsx`
+had the server-side `model` field to call but no UI to call it with.
+A `<select>` next to the composer, populated from a new mount-time
+`GET /models` fetch, sends `model` in the WS payload only when the
+user picks something other than "Auto" (`""` — omitted entirely, the
+same "no field at all" meaning skipping `--model` has on the CLI, not
+a new sentinel value the server needs to special-case). Unavailable
+models are listed too (suffixed `(unavailable)`) rather than hidden —
+letting a user select one and see the real provider error is more
+honest than a picker that silently disagrees with `GET /doctor`.
+
+**Two small, real, separate gaps found while touching this exact code,
+both fixed in the same pass:**
+
+- `App.tsx`'s `run_done` handler only ever showed the generic `"run
+  ended: <state>"` on failure — `state_changed`'s own `detail` field
+  (the real reason, e.g. the new `UnknownModelError` message) has
+  reached the client in the WS event stream since `/ws/chat` first
+  shipped; nothing in the UI ever read it. The exact same class of fix
+  the CLI and `/chat`'s own response already got, just never applied
+  to this third consumer of the identical event stream.
+- `.attached-image` (the image-attach milestone's own chip) had no CSS
+  at all — confirmed by grep, not assumed — since that milestone
+  landed. Both it and the new `.model-picker` are now styled
+  consistently with the rest of the app (dark-mode aware, via the same
+  CSS custom properties every other component already uses).
+
+4 new TypeScript tests (picker population/default, model included in
+the payload, model omitted on Auto, the surfaced detail message on
+failure), 24 → 28 TypeScript tests. `tsc -b` clean, a real production
+`npm run build` run, and its output copied into
+`core/sarva/server/static/` via `scripts/build-web.sh`. No Python
+changes this milestone (server-side `model` support already shipped
+last entry) — full suite re-run anyway, 488 passed, unaffected.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).
