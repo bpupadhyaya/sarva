@@ -116,14 +116,18 @@ def create_app() -> FastAPI:
         state = AgentState.FAILED
         final_message: Message | None = None
         spend = Spend()
+        last_detail: str | None = None
         transcript: list[Message] = []
         async for event in loop.run(
             req.message,
             history=history,
+            model_override=req.model,
             extra_content=extra_content,
             transcript_out=transcript,
             session_id=req.session,
         ):
+            if event.type == "state_changed" and event.detail:
+                last_detail = event.detail
             if event.type == "run_done":
                 state = event.state
                 final_message = event.final_message
@@ -136,6 +140,7 @@ def create_app() -> FastAPI:
             state=state,
             message=final_message.text() if final_message else None,
             spend=spend,
+            detail=last_detail if state != AgentState.DONE else None,
         )
 
     @app.websocket("/ws/chat")
@@ -149,7 +154,14 @@ def create_app() -> FastAPI:
         the desktop app's only chat surface (it never calls /chat), so
         until this existed there was genuinely no way to send an image
         through the web UI at all despite the CLI and REST endpoint both
-        already supporting it.
+        already supporting it. Optional "model" forces a specific model
+        id (same meaning as the CLI's own --model), bypassing the
+        router's default selection entirely -- an unknown id surfaces as
+        a real, visible `state_changed` frame with a `detail` message
+        naming it, then a `run_done` frame with state "failed", never a
+        silent fallback to a different model (see UnknownModelError in
+        sarva.providers.registry for why that distinction needed its own
+        exception type).
 
         When a destructive tool needs approval, the loop's `NeedsConfirmationEvent`
         arrives as usual, and the *next* value the client sends on this same
@@ -177,6 +189,7 @@ def create_app() -> FastAPI:
             message = payload.get("message", "")
             session = payload.get("session")
             auto = bool(payload.get("auto", False))
+            model = payload.get("model")
             extra_content = _extra_content_blocks(
                 payload.get("image_base64"), payload.get("image_media_type")
             )
@@ -200,6 +213,7 @@ def create_app() -> FastAPI:
             async for event in loop.run(
                 message,
                 history=history,
+                model_override=model,
                 extra_content=extra_content,
                 transcript_out=transcript,
                 session_id=session,

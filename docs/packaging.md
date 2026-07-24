@@ -130,6 +130,24 @@ beyond the test suites:** a real `sarva serve` process hit with a real
 `websockets` client sending a real image over `/ws/chat` completed
 cleanly end to end, confirmed against the server's own request log.
 
+**Both endpoints also gained an optional `model` field**, the REST/WS
+counterpart to the CLI's own `--model` (see the agent-loop/providers
+chapters for the `UnknownModelError` safety fix that motivated
+building this properly rather than a bare pass-through): `ChatRequest`
+and the WS frame both accept `"model": "<id>"`, threaded straight into
+`AgentLoop.run(model_override=...)`. An unknown id is never a 500 or a
+silent fallback to a different model — `/chat` now returns a new
+`detail` field on `ChatResponse` (`null` on success) naming exactly
+what went wrong, and `/ws/chat` clients already see the same message
+in the `state_changed` frame's own `detail` field, since the full
+event stream reaches the client regardless. Verified live against a
+real running `sarva serve` process with real `curl` requests, not just
+the test suite — a valid `"model": "mock"` and a bogus id both behave
+exactly as documented. `App.tsx` doesn't expose a model picker yet —
+a genuinely different, more deliberate UI design decision than adding
+a wire-protocol field was, named as real follow-up rather than
+attempted here.
+
 `GET /doctor` and `POST /config` are the two endpoints the first-run
 onboarding screen (below) depends on — `/doctor` returns exactly what
 `sarva doctor` prints, as JSON (reusing `run_diagnostics()` directly, so

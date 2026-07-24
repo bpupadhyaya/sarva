@@ -130,6 +130,32 @@ def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
     assert SessionStore().list_sessions() == []
 
 
+def test_chat_with_model_forces_that_exact_model(monkeypatch):
+    provider = _use_capturing_mock(monkeypatch)
+
+    resp = _client().post("/chat", json={"message": "hi", "model": "mock"})
+
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "done"
+    assert provider.last_request.model == "mock"
+
+
+def test_chat_with_an_unknown_model_fails_cleanly_with_a_detail_message(monkeypatch):
+    # The REST counterpart to the CLI's --model safety fix: an unknown
+    # model must be a visible, clean failure -- not a 500, not a silent
+    # fallback to a different model -- and (new) the actual reason must
+    # reach the response body, not just a generic "failed" state.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post("/chat", json={"message": "hi", "model": "not-a-real-model"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert body["message"] is None
+    assert "not-a-real-model" in body["detail"]
+
+
 def test_chat_with_an_attached_image_reaches_the_provider_as_a_real_image_block(monkeypatch):
     provider = _use_capturing_mock(monkeypatch)
     raw = b"\x89PNG\r\n\x1a\nreal enough bytes for this test"
@@ -222,6 +248,35 @@ def test_websocket_without_an_image_sends_no_image_block(monkeypatch):
     assert provider.last_request is not None
     user_msg = next(m for m in provider.last_request.messages if m.role == "user")
     assert not any(isinstance(b, ImageBlock) for b in user_msg.content)
+
+
+def test_websocket_with_model_forces_that_exact_model(monkeypatch):
+    provider = _use_capturing_mock(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "model": "mock"})
+        while ws.receive_json()["type"] != "run_done":
+            pass
+
+    assert provider.last_request is not None
+    assert provider.last_request.model == "mock"
+
+
+def test_websocket_with_an_unknown_model_fails_cleanly_with_a_detail_frame(monkeypatch):
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "model": "not-a-real-model"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert "not-a-real-model" in state_changed["detail"]
+    assert events[-1]["state"] == "failed"
 
 
 def test_websocket_tool_confirmation_approved_runs_the_tool(tmp_path, monkeypatch):

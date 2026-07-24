@@ -5120,3 +5120,52 @@ deferred); a model picker in the server/desktop app (the CLI now has
 design decision than the CLI flag was, named rather than attempted
 here); or investigating the moondream terse-prompt quirk named above,
 if it turns out to matter beyond this one observation.
+
+## `--model`'s server-side counterpart: `/chat` and `/ws/chat` gained the same field
+
+Immediately after wiring `--model` into the CLI, checked whether the
+server had the same gap — it did: neither `ChatRequest` nor `ws_chat`'s
+frame parsing accepted a `model` field, the exact "CLI got a fix,
+server surface didn't" shape this project has closed before (`--image`
+landed in `/chat` before `/ws/chat`; `--mcp-header` never reached the
+server at all — deliberately, given the RCE question named in that
+entry). Adding this one was low-risk: no new attacker-reachable
+surface, just a caller naming a model id the same way `sarva models`
+already lists.
+
+`ChatRequest`/the WS frame both accept `"model": "<id>"`, threaded into
+`AgentLoop.run(model_override=...)` exactly like the CLI. **The
+`UnknownModelError` safety fix built for the CLI paid off immediately
+here too** — no new bug to find, since `Router.pick()`/`AgentLoop.run()`
+already guarantee an invalid override fails cleanly rather than
+silently substituting a model, and that guarantee is now exercised by
+a second real caller. `ChatResponse` gained a new optional `detail`
+field (`null` on success) so `/chat` clients can see *why* a run
+failed, not just that it did — `/ws/chat` clients already had this for
+free, since the full `AgentEvent` stream (including `state_changed`'s
+own `detail`) reaches the socket regardless of which fields any
+particular client bothers to read.
+
+**Verified live, not just in the test suite:** a real `sarva serve`
+process, hit with real `curl` POSTs — `{"model": "mock"}` succeeds,
+`{"model": "totally-bogus"}` returns `{"state": "failed", "detail":
+"unknown model 'totally-bogus'..."}`, never a 500, never a
+silently-different model's response.
+
+4 new tests (REST + WS, success + failure path each), 484 → 488 Python
+tests. `ruff check`/`format --check` clean. `docs/packaging.md`
+updated. `App.tsx` still has no model-picker UI — named directly as
+real, deferred follow-up (a genuinely different, more deliberate
+design decision than adding a wire field was), not silently assumed
+out of scope.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred); or a real model-picker UI in the desktop app (`App.tsx`
+now has an equivalent server field to call, just no control to call it
+with).

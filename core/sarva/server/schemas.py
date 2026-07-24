@@ -12,12 +12,14 @@ class ChatRequest(BaseModel):
     session: str | None = None
     image_base64: str | None = None
     image_media_type: str | None = None
+    model: str | None = None
 
 
 class ChatResponse(BaseModel):
     state: str
     message: str | None
     spend: Spend
+    detail: str | None = None
 
 
 class ModelInfoOut(BaseModel):
