@@ -13,6 +13,7 @@ same proof."""
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import pytest
 from sarva.audio import (
@@ -35,12 +36,15 @@ def test_synthesize_produces_real_nonempty_wav_bytes():
 
 
 @_needs_tts
-def test_synthesize_with_default_macos_voice_produces_full_length_audio():
+def test_synthesize_with_default_voice_produces_full_length_audio():
     # Regression pin for a real bug found while building this: macOS
     # `say`'s own DEFAULT voice (no -v) produced near-silent,
     # sub-10-millisecond output for real text in this environment --
     # confirmed with `afinfo`, not assumed. synthesize() must always
     # pass an explicit voice to avoid silently regressing into that.
+    # Generic enough to double as the equivalent regression check for
+    # Windows SAPI's own default voice, exercised for real on the
+    # windows-latest CI runner (see .github/workflows/ci.yml).
     short = synthesize("hello")
     longer = synthesize("this is a substantially longer sentence than the other one")
     assert len(longer) > len(short)
@@ -100,6 +104,56 @@ def test_synthesize_falls_back_to_espeak_when_say_is_unavailable(monkeypatch):
     assert audio_bytes.startswith(b"RIFF")
     assert b"WAVE" in audio_bytes[:16]
     assert len(audio_bytes) > 1000
+
+
+def test_windows_branch_never_puts_raw_text_on_the_command_line(monkeypatch):
+    # This project has no Windows machine to run the real SAPI branch
+    # against locally -- the windows-latest CI job is what verifies it
+    # actually speaks (see .github/workflows/ci.yml's windows-audio
+    # job). What CAN be verified here, on any OS, hermetically: the
+    # structural safety property that makes the branch safe to call
+    # with arbitrary (e.g. model-produced) text in the first place --
+    # `text` never becomes part of the subprocess argv or the
+    # PowerShell script content, only the content of a temp file read
+    # back via `Get-Content`, so it can never be interpreted as
+    # PowerShell syntax no matter what it contains.
+    import sarva.audio as audio_module
+
+    dangerous_text = '"; Remove-Item -Recurse -Force C:\\ ; Write-Host "pwned'
+    captured = {}
+
+    monkeypatch.setattr(audio_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        audio_module.shutil, "which", lambda cmd: "powershell.exe" if cmd == "powershell" else None
+    )
+
+    def fake_run(args, check, capture_output):
+        # Inspect the temp text/script files *inside* the fake call --
+        # synthesize()'s own TemporaryDirectory is cleaned up as soon as
+        # it returns, so this is the only point they're on disk.
+        captured["args"] = args
+        text_path = Path(args[args.index("-TextPath") + 1])
+        script_path = Path(args[args.index("-File") + 1])
+        captured["text_file_content"] = text_path.read_text(encoding="utf-8")
+        captured["script_content"] = script_path.read_text(encoding="utf-8")
+        out_path = Path(args[args.index("-OutPath") + 1])
+        out_path.write_bytes(b"RIFF....WAVEfake")
+
+        class _Result:
+            pass
+
+        return _Result()
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    result = synthesize(dangerous_text)
+
+    assert result == b"RIFF....WAVEfake"
+    args = captured["args"]
+    assert all(dangerous_text not in str(a) for a in args)
+    assert captured["text_file_content"] == dangerous_text
+    assert dangerous_text not in captured["script_content"]
+    assert "Get-Content" in captured["script_content"]
 
 
 @pytest.mark.skipif(

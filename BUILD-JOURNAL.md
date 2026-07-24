@@ -4554,3 +4554,66 @@ unimplemented, not just unverified), or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## Windows TTS — closing the one named gap this environment couldn't verify locally, so CI does
+
+`sarva.audio`'s own module docstring named it outright: "the Windows
+branch genuinely has no engine at all yet." macOS shells out to `say`,
+Linux to `espeak`/`espeak-ng` — both real, already-installed,
+OS-native engines. Windows has an equivalent: `System.Speech.Synthesis`
+(SAPI), part of every desktop Windows .NET Framework install, reached
+via PowerShell — no third-party dependency, the identical "already on
+the machine" bar the other two branches were picked against.
+
+**The real risk this branch had to be built around, not an
+afterthought:** `synthesize()`'s whole reason to exist is letting an
+agent speak arbitrary text, including model-produced text a caller
+never fully controls. A naive implementation would interpolate that
+text into a `powershell -Command "..."` string — a real command-
+injection surface (a string like `"; Remove-Item -Recurse -Force C:\;
+"` breaking out of the intended command). Instead, the text is written
+to a temp file and read back *inside* a fixed PowerShell script via
+`Get-Content` — the text never becomes part of any command string or
+argv element PowerShell parses as syntax, only file content. A
+dedicated hermetic test (`test_windows_branch_never_puts_raw_text_
+on_the_command_line`) proves this directly: it monkeypatches
+`platform.system`/`shutil.which`/`subprocess.run`, feeds in a
+deliberately hostile string, and asserts that string never appears in
+the captured argv or script content — only in the temp text file's own
+content, read back exactly.
+
+**Honesty about what "verified" means here:** this dev environment has
+no Windows machine, the same limitation that left this gap open in the
+first place. Rather than ship an unverified implementation and call it
+done, or claim confidence this project's own discipline doesn't allow,
+a new `windows-audio` CI job runs on a genuine `windows-latest` GitHub
+Actions runner and executes `tests/conformance/test_audio.py` for
+real — including the pre-existing generic `_needs_tts`-marked tests
+(`test_synthesize_produces_real_nonempty_wav_bytes`, and the renamed
+`test_synthesize_with_default_voice_produces_full_length_audio`, which
+already existed to catch macOS `say`'s own real near-silent-default-
+voice bug and is equally applicable to SAPI's default voice) — rather
+than writing Windows-specific mocked tests that would only prove the
+code *looks* right. This mirrors exactly how the desktop `cargo check`
+job's own `windows-latest` matrix leg already verifies Rust-side
+Windows compilation without a local Windows machine.
+
+`tts_engine_available()` gained a Windows branch (`shutil.which
+("powershell")`/`"pwsh"`) so `sarva doctor` can never claim
+availability `synthesize()` would then fail to honor — the same
+single-source-of-truth pattern `ollama_reachable`/
+`_foundry_extra_installed` already established. `docs/packaging.md`'s
+"Local speech" section and `sarva.audio`'s own module docstring both
+updated to describe the real implementation instead of naming the gap.
+1 new test, 457 → 458 Python tests. `ruff check`/`format --check`
+clean.
+
+**Next:** whether CI's real `windows-latest` run actually validates
+SAPI's default voice the same way it validates `say`'s (the test is
+generic and will surface it either way); batching multiple concurrent
+inference requests (§3.6f, still a deliberate deferral — real
+correctness risk); F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have); or a
+first pass at code-signing/notarization for the desktop release
+bundles (needs a real signing identity this environment doesn't have —
+likely stays deferred).

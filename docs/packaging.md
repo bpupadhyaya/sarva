@@ -262,15 +262,33 @@ actually available. `sarva speak` is the CLI's own reachable surface
 for TTS — closing the same "fully built but unreachable by any real
 user" gap this project has named and fixed before.
 
-**Both TTS branches verified against real installed binaries, not just
-documented CLI shapes:** the `say` branch runs unconditionally on real
-macOS; the `espeak-ng` branch was verified too — installed via `brew
-install espeak-ng`, then exercised for real by a test that hides `say`
-specifically (macOS's own Darwin branch would otherwise always win)
-so the actual espeak subprocess call runs, not a mock. A full
-`espeak-ng` → `faster-whisper` round trip (real synthesized speech,
-transcribed back, words checked) passed the same way the `say` round
-trip already had.
+**Both non-Windows TTS branches verified against real installed
+binaries, not just documented CLI shapes:** the `say` branch runs
+unconditionally on real macOS; the `espeak-ng` branch was verified too
+— installed via `brew install espeak-ng`, then exercised for real by a
+test that hides `say` specifically (macOS's own Darwin branch would
+otherwise always win) so the actual espeak subprocess call runs, not a
+mock. A full `espeak-ng` → `faster-whisper` round trip (real
+synthesized speech, transcribed back, words checked) passed the same
+way the `say` round trip already had.
+
+**Windows had no engine at all until now** — this module's own
+docstring named it as genuinely unimplemented, not just unverified.
+It's closed the same way the other two branches are: shell out to an
+OS-bundled engine, `System.Speech.Synthesis` (SAPI) via PowerShell,
+rather than pulling in a third-party TTS library. The text to speak is
+written to a temp file and read back inside the PowerShell script via
+`Get-Content` — deliberately never interpolated into the command
+string, so arbitrary (e.g. model-produced) text passed to `sarva
+speak` can never be interpreted as PowerShell syntax; a dedicated
+hermetic test pins exactly that property by inspecting the real argv
+and file contents a monkeypatched `subprocess.run` receives. This
+project has no Windows machine to develop against directly, so what
+actually verifies the branch runs and produces real audio is a new
+`windows-audio` CI job — a genuine `windows-latest` GitHub Actions
+runner running `sarva.audio.synthesize()` for real, the same
+discipline `release-bundle.yml`'s own Windows matrix leg already
+established for the desktop bundle.
 
 ## CLI conformance tests
 

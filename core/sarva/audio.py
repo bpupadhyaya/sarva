@@ -36,14 +36,33 @@ its own default silently produced near-silent WAV files that would
 have looked like a working feature until someone actually listened to
 one.
 
-Both TTS branches are verified against real installed binaries in this
-environment, not just written to documented CLI shapes: the `say`
-branch runs unconditionally on real macOS; the `espeak-ng` branch was
-verified too, by installing it (`brew install espeak-ng`) and hiding
-`say` specifically in a dedicated test so the espeak code path actually
-runs for real (macOS's own Darwin branch would otherwise always win).
-The Windows branch genuinely has no engine at all yet — see
-`synthesize()`'s own `RuntimeError` message.
+Both non-Windows TTS branches are verified against real installed
+binaries in this environment, not just written to documented CLI
+shapes: the `say` branch runs unconditionally on real macOS; the
+`espeak-ng` branch was verified too, by installing it (`brew install
+espeak-ng`) and hiding `say` specifically in a dedicated test so the
+espeak code path actually runs for real (macOS's own Darwin branch
+would otherwise always win).
+
+**Windows now has a real engine too**: `System.Speech.Synthesis`
+(SAPI), reached via PowerShell — no third-party install needed, since
+it ships as part of every desktop Windows .NET Framework install, the
+same "already on the machine" bar `say`/`espeak-ng` were picked for.
+The text to speak is written to a temp file and read back inside the
+PowerShell script via `Get-Content`, deliberately never interpolated
+into the command string itself — the same reason `subprocess.run`'s
+non-Windows branches already pass `text` as a separate argv element
+rather than building a shell string: arbitrary model-produced text
+(this function's whole reason to exist is an agent speaking its own
+output) must never be able to break out of a command's syntax.
+
+This project has no Windows machine to develop against directly — the
+same honest limitation this module's docstring named before this
+change. What actually verifies this branch is a real `windows-latest`
+GitHub Actions runner (see `.github/workflows/ci.yml`'s
+`windows-audio` job), running this exact code path end to end on
+genuine Windows, not a mock or a `platform.system()` monkeypatch
+standing in for one.
 """
 
 from __future__ import annotations
@@ -58,6 +77,27 @@ from pathlib import Path
 
 DEFAULT_MACOS_VOICE = "Samantha"
 
+# Deliberately parameterized, never string-formatted with `text` itself --
+# `text` reaches this script only via `Get-Content` on a temp file passed as
+# a separate argv element, so arbitrary (e.g. model-produced) text can never
+# be interpreted as PowerShell syntax.
+_WINDOWS_TTS_SCRIPT = """
+param(
+    [Parameter(Mandatory=$true)][string]$TextPath,
+    [Parameter(Mandatory=$true)][string]$OutPath,
+    [string]$VoiceName
+)
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+if ($VoiceName) {
+    $synth.SelectVoice($VoiceName)
+}
+$synth.SetOutputToWaveFile($OutPath)
+$text = Get-Content -Path $TextPath -Raw -Encoding UTF8
+$synth.Speak($text)
+$synth.Dispose()
+"""
+
 
 def tts_engine_available() -> bool:
     """Best-effort probe, same role `ollama_reachable`/
@@ -67,6 +107,8 @@ def tts_engine_available() -> bool:
     itself would then fail to honor."""
     if platform.system() == "Darwin":
         return shutil.which("say") is not None
+    if platform.system() == "Windows":
+        return shutil.which("powershell") is not None or shutil.which("pwsh") is not None
     return shutil.which("espeak-ng") is not None or shutil.which("espeak") is not None
 
 
@@ -96,6 +138,33 @@ def synthesize(text: str, voice: str | None = None) -> bytes:
             )
             return out_path.read_bytes()
 
+    if platform.system() == "Windows":
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if powershell:
+            with tempfile.TemporaryDirectory() as tmp:
+                text_path = Path(tmp) / "speech_input.txt"
+                out_path = Path(tmp) / "speech.wav"
+                script_path = Path(tmp) / "synthesize.ps1"
+                text_path.write_text(text, encoding="utf-8")
+                script_path.write_text(_WINDOWS_TTS_SCRIPT, encoding="utf-8")
+                args = [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script_path),
+                    "-TextPath",
+                    str(text_path),
+                    "-OutPath",
+                    str(out_path),
+                ]
+                if voice:
+                    args += ["-VoiceName", voice]
+                subprocess.run(args, check=True, capture_output=True)
+                return out_path.read_bytes()
+
     engine = shutil.which("espeak-ng") or shutil.which("espeak")
     if engine:
         # espeak/espeak-ng writes a real WAV directly via -w, no format
@@ -110,12 +179,9 @@ def synthesize(text: str, voice: str | None = None) -> bytes:
             return out_path.read_bytes()
 
     raise RuntimeError(
-        "no local text-to-speech engine detected -- macOS's `say` or "
-        "Linux's `espeak`/`espeak-ng` is required. Windows has no "
-        "supported engine yet: a real, open gap, not silently assumed "
-        "away (this project has no Windows machine to verify a "
-        "PowerShell-based implementation against, the same honest "
-        "limitation named for the desktop sidecar's own Windows gap)."
+        "no local text-to-speech engine detected -- macOS's `say`, "
+        "Linux's `espeak`/`espeak-ng`, or Windows's PowerShell "
+        "(System.Speech/SAPI) is required."
     )
 
 
