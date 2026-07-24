@@ -22,14 +22,15 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from sarva.agent.budget import Spend
 from sarva.agent.events import AgentState, RunDoneEvent, StateChangedEvent
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
-from sarva.config import save_config
+from sarva.config import ConfigError, save_config
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message, ToolCallBlock
 from sarva.multimodal.degraders import default_degraders
@@ -61,6 +62,21 @@ def create_app() -> FastAPI:
         title="Sarva",
         description="An open, all-in-one multimodal AGI tool.",
     )
+
+    @app.exception_handler(ConfigError)
+    async def config_error_handler(request: Request, exc: ConfigError) -> JSONResponse:
+        # A real bug found by actually corrupting ~/.sarva/config.json and
+        # hitting /models, /doctor, or POST /config: get_env() backs
+        # nearly every provider-availability check, so a bad file crashed
+        # every one of them with a raw json.JSONDecodeError 500 -- not
+        # even the clean-but-still-500 shape a normal unhandled exception
+        # gets in production, a genuine unformatted traceback. One handler
+        # here covers every plain HTTP route in this app; /chat and
+        # /ws/chat get their own explicit handling below since their
+        # response shapes (ChatResponse, WS event frames) aren't generic
+        # JSON errors and a WebSocket route isn't covered by this handler
+        # at all.
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -127,13 +143,24 @@ def create_app() -> FastAPI:
             # same "this request can't run" case.
             return ChatResponse(state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e))
 
-        loop = AgentLoop(
-            router=build_router(),
-            providers=build_providers(),
-            tools=[],
-            confirm=always_allow,
-            degraders=default_degraders(),
-        )
+        try:
+            loop = AgentLoop(
+                router=build_router(),
+                providers=build_providers(),
+                tools=[],
+                confirm=always_allow,
+                degraders=default_degraders(),
+            )
+        except ConfigError as e:
+            # The /chat-specific counterpart to the global ConfigError
+            # handler above: this endpoint's own established shape for
+            # "this request can't run" is a real ChatResponse with
+            # state=failed and the reason in `detail`, not the generic
+            # {"detail": ...} 500 the global handler returns elsewhere --
+            # kept consistent with the unknown-model and invalid-session
+            # failure modes just above, which callers already parse the
+            # same way.
+            return ChatResponse(state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e))
 
         state = AgentState.FAILED
         final_message: Message | None = None
@@ -256,13 +283,31 @@ def create_app() -> FastAPI:
                 )
                 return
 
-            loop = AgentLoop(
-                router=build_router(),
-                providers=build_providers(),
-                tools=BUILTIN_TOOLS,
-                confirm=always_allow if auto else ws_confirm,
-                degraders=default_degraders(),
-            )
+            try:
+                loop = AgentLoop(
+                    router=build_router(),
+                    providers=build_providers(),
+                    tools=BUILTIN_TOOLS,
+                    confirm=always_allow if auto else ws_confirm,
+                    degraders=default_degraders(),
+                )
+            except ConfigError as e:
+                # The WS counterpart to the same real bug just fixed for
+                # /chat: a corrupted ~/.sarva/config.json raised a raw
+                # json.JSONDecodeError with nothing here to catch it --
+                # the whole ASGI call crashed with no frame sent at all,
+                # the client seeing a bare ClosedResourceError, the exact
+                # same failure mode already fixed here for an invalid
+                # session name and a malformed image_base64 field.
+                await websocket.send_text(
+                    StateChangedEvent(state=AgentState.FAILED, detail=str(e)).model_dump_json()
+                )
+                await websocket.send_text(
+                    RunDoneEvent(
+                        state=AgentState.FAILED, final_message=None, spend=Spend()
+                    ).model_dump_json()
+                )
+                return
             state = AgentState.FAILED
             transcript: list[Message] = []
             async for event in loop.run(

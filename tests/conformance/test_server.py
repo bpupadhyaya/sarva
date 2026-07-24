@@ -83,6 +83,14 @@ def _force_mock_only(monkeypatch) -> MockProvider:
     return provider
 
 
+def _raise_config_error(*args, **kwargs):
+    from sarva.config import ConfigError
+
+    raise ConfigError(
+        "config file at ~/.sarva/config.json is corrupted (invalid JSON): mock detail"
+    )
+
+
 def test_health():
     resp = _client().get("/health")
     assert resp.status_code == 200
@@ -95,6 +103,43 @@ def test_models_lists_mock_as_available():
     models = resp.json()
     mock = next(m for m in models if m["id"] == "mock")
     assert mock["available"] is True
+
+
+def test_models_with_a_corrupted_config_file_fails_cleanly_not_a_500_traceback(monkeypatch):
+    # A real bug found by actually corrupting ~/.sarva/config.json and
+    # hitting GET /models: get_env() backs nearly every provider-
+    # availability check build_router() makes, so a bad file crashed
+    # this (and almost every other) endpoint with a raw
+    # json.JSONDecodeError -- an unhandled 500 with a full traceback body,
+    # not even a clean error response. The global ConfigError exception
+    # handler now returns a clean {"detail": ...} 500 instead.
+    monkeypatch.setattr(app_module, "build_router", _raise_config_error)
+
+    resp = _client().get("/models")
+
+    assert resp.status_code == 500
+    assert "corrupted" in resp.json()["detail"]
+
+
+def test_doctor_with_a_corrupted_config_file_fails_cleanly_not_a_500_traceback(monkeypatch):
+    monkeypatch.setattr(app_module, "run_diagnostics", _raise_config_error)
+
+    resp = _client().get("/doctor")
+
+    assert resp.status_code == 500
+    assert "corrupted" in resp.json()["detail"]
+
+
+def test_post_config_with_a_corrupted_config_file_fails_cleanly_not_a_500_traceback(monkeypatch):
+    # POST /config always calls run_diagnostics() at the end (to return
+    # the fresh check results), even with an empty body that never
+    # reaches save_config() -- this is the shortest real path to the bug.
+    monkeypatch.setattr(app_module, "run_diagnostics", _raise_config_error)
+
+    resp = _client().post("/config", json={})
+
+    assert resp.status_code == 500
+    assert "corrupted" in resp.json()["detail"]
 
 
 def test_chat_zero_config_uses_mock(monkeypatch):
@@ -194,6 +239,25 @@ def test_chat_with_malformed_image_base64_fails_cleanly_not_a_500(monkeypatch):
     body = resp.json()
     assert body["state"] == "failed"
     assert body["message"] is None
+
+
+def test_chat_with_a_corrupted_config_file_fails_cleanly_not_a_500_traceback(monkeypatch):
+    # A real bug found by actually corrupting ~/.sarva/config.json and
+    # POSTing to /chat: build_router()/build_providers() both raise
+    # ConfigError uncaught, a genuine unhandled 500 -- worse, since the
+    # rest of this endpoint already reports "this request can't run"
+    # failures as a clean ChatResponse(state=failed, detail=...), the
+    # exact same shape an unknown --model or invalid session name
+    # already get, which this needed too rather than falling through to
+    # a differently-shaped generic error.
+    monkeypatch.setattr(app_module, "build_router", _raise_config_error)
+
+    resp = _client().post("/chat", json={"message": "hi"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert "corrupted" in body["detail"]
 
 
 def test_chat_with_an_attached_image_reaches_the_provider_as_a_real_image_block(monkeypatch):
@@ -364,6 +428,29 @@ def test_websocket_with_malformed_image_base64_fails_cleanly_not_a_bare_disconne
             if data["type"] == "run_done":
                 break
 
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_a_corrupted_config_file_fails_cleanly_not_a_bare_disconnect(monkeypatch):
+    # The WS counterpart to the same real bug just fixed for /chat: a
+    # corrupted ~/.sarva/config.json made build_router() raise
+    # ConfigError uncaught -- the whole ASGI call would crash with no
+    # frame sent at all, a bare ClosedResourceError, the same failure
+    # mode already fixed here for an invalid session name and a
+    # malformed image_base64 field.
+    monkeypatch.setattr(app_module, "build_router", _raise_config_error)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert "corrupted" in state_changed["detail"]
     assert events[-1]["state"] == "failed"
 
 

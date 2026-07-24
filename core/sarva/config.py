@@ -61,13 +61,37 @@ DEFAULT_CONFIG_PATH = Path.home() / ".sarva" / "config.json"
 KNOWN_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
+class ConfigError(RuntimeError):
+    """Raised when `~/.sarva/config.json` exists but isn't valid JSON --
+    disk corruption, an interrupted write, or a hand-edit gone wrong. A
+    real, checked gap found by actually corrupting a config file and
+    running `sarva doctor`/`chat`/`config show`: `get_env()` backs
+    nearly every provider-availability check in `sarva.runtime`, so a
+    bad file crashed almost every command and server endpoint with a
+    raw `json.JSONDecodeError` traceback -- the broadest blast radius of
+    any "unhandled exception where a clean error belongs" bug found in
+    this project so far. Deliberately its own exception type, not a
+    `ValueError` -- callers already have `except ValueError` blocks
+    scoped to unrelated failures (an invalid session name); reusing that
+    base would risk this being silently swallowed by the wrong handler
+    with a misleading message instead of failing clearly."""
+
+
 def load_config(path: Path | None = None) -> dict[str, str]:
     """Returns `{}` if no config file exists yet — a fresh install with
-    nothing saved is the expected common case, not an error."""
+    nothing saved is the expected common case, not an error. A file that
+    exists but isn't valid JSON is a different, real failure and raises
+    `ConfigError` rather than propagating a raw `JSONDecodeError` --
+    every caller (CLI commands, server endpoints) needs a clean, single
+    exception type to catch, not a leaky implementation detail of how
+    this file happens to be encoded."""
     path = path or DEFAULT_CONFIG_PATH
     if not path.exists():
         return {}
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"config file at {path} is corrupted (invalid JSON): {e}") from e
 
 
 def save_config(values: dict[str, str], path: Path | None = None) -> None:

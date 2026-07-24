@@ -21,6 +21,7 @@ from rich.markup import escape
 
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, Tool, always_allow
+from sarva.config import ConfigError
 from sarva.mcp_client import connect_http_mcp_server, connect_stdio_mcp_server, list_mcp_tools
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ContentBlock, ImageBlock, Message
@@ -35,10 +36,29 @@ config_app = typer.Typer(help="Manage saved provider API keys (~/.sarva/config.j
 app.add_typer(config_app, name="config")
 console = Console()
 
-# Kept as thin aliases so the rest of this file reads the same as before the
-# provider-wiring logic moved to sarva.runtime (shared with the server skin).
-_build_router = build_router
-_build_providers = build_providers
+
+def _build_router():
+    # A real bug found by actually corrupting ~/.sarva/config.json and
+    # running any command: get_env() backs nearly every provider-
+    # availability check build_router() makes, so a bad file crashed
+    # every caller with a raw json.JSONDecodeError traceback -- the
+    # broadest blast radius of any "unhandled exception where a clean
+    # error belongs" bug found in this project. Wrapping the alias
+    # itself (rather than each of this function's many call sites)
+    # closes every one of them in one place.
+    try:
+        return build_router()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
+
+
+def _build_providers():
+    try:
+        return build_providers()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
 
 
 def _version_callback(show_version: bool) -> None:
@@ -377,12 +397,18 @@ def doctor_cmd() -> None:
     console.print(f"Python {sys.version.split()[0]} on {platform.system()} ({platform.machine()})")
     console.print()
 
+    try:
+        checks = run_diagnostics()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
+
     # `check.detail`/`static_dir` can contain literal square brackets (e.g.
     # "sarva[foundry]") that Rich's markup parser would otherwise silently
     # swallow as an (invalid) style tag -- escape() is what keeps those
     # bytes on screen instead of vanishing, the same reason the rest of
     # this file never prints raw model output without it.
-    for check in run_diagnostics():
+    for check in checks:
         mark = "[green]x[/green]" if check.ok else "[dim]-[/dim]"
         console.print(f"\\[{mark}] {check.name:32s} {escape(check.detail)}")
 
@@ -548,7 +574,11 @@ def config_set(
             "--openai-api-key / --gemini-api-key[/yellow]"
         )
         raise typer.Exit(1)
-    save_config(non_empty)
+    try:
+        save_config(non_empty)
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     console.print(f"saved {', '.join(sorted(non_empty))} to ~/.sarva/config.json")
 
 
@@ -561,7 +591,11 @@ def config_show() -> None:
 
     from sarva.config import KNOWN_KEYS, load_config
 
-    saved = load_config()
+    try:
+        saved = load_config()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     for name in KNOWN_KEYS:
         if os.environ.get(name):
             console.print(f"{name:20s} [green]set[/green] (environment variable)")
@@ -596,7 +630,11 @@ def config_unset(
             "--openai-api-key / --gemini-api-key[/yellow]"
         )
         raise typer.Exit(1)
-    removed = unset_config(names)
+    try:
+        removed = unset_config(names)
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     if removed:
         console.print(f"removed {', '.join(sorted(removed))} from ~/.sarva/config.json")
     else:

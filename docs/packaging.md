@@ -114,6 +114,36 @@ at all until it was noticed missing while poking at the CLI's own
   described below; its own docstring calls it "the surface a web UI or
   desktop app uses."
 
+**A corrupted `~/.sarva/config.json` crashed nearly every command and
+server endpoint — the broadest blast radius of any "unhandled
+exception where a clean error belongs" bug found in this project so
+far.** `get_env()` backs almost every provider-availability check
+`build_router()`/`build_providers()`/`run_diagnostics()` make, and
+`load_config()` parsed the file with a bare `json.loads()` — disk
+corruption, an interrupted write, or a bad hand-edit crashed `doctor`,
+`chat`, `run`, `models`, `eval`, `distill`, and all three `config`
+subcommands with a raw `json.JSONDecodeError` traceback, confirmed live
+on every one. The server side was worse in the usual two ways: `GET
+/models`/`GET /doctor`/`POST /config` returned genuine unhandled 500s,
+and `/ws/chat` crashed the whole ASGI call with no frame sent at all.
+**Fixed with one new exception type, `sarva.config.ConfigError`**
+(deliberately not a `ValueError` — reusing that base risked being
+silently caught by an unrelated `except ValueError` scoped to a
+different failure, like an invalid session name, with a misleading
+message), raised once inside `load_config()` and handled at three
+different points depending on what each skin can express: the CLI
+wraps `_build_router`/`_build_providers` (closing every one of their
+many call sites at once) plus `doctor`/`config show`/`set`/`unset`
+individually; the server registers one `@app.exception_handler(ConfigError)`
+covering every plain HTTP route for free (`/models`, `/doctor`, `POST
+/config`), while `/chat` and `/ws/chat` catch it explicitly to keep
+their own established failure shapes (`ChatResponse(state=failed,
+detail=...)` and a `state_changed`/`run_done` frame pair) instead of
+falling through to a generic error a WebSocket route can't even
+receive. Verified the new tests are real: reverted the fix and watched
+all eleven fail with the raw `JSONDecodeError`/`ImportError` before
+re-applying.
+
 **A bad file path crashed four commands with a raw traceback — `chat
 --image`, `run --image`, `speak --out`, `transcribe`, and `distill` —
 the same "unhandled exception where a clean error belongs" bug class

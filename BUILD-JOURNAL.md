@@ -5795,3 +5795,73 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have — likely stays deferred).
+
+## A corrupted `~/.sarva/config.json` crashed nearly every command and server endpoint — the broadest blast radius found so far
+
+A fresh Explore-agent sweep (all three candidates from the last sweep
+were closed, so this one was given the full fix history and pointed at
+less-obvious angles: corrupted on-disk state, not just bad CLI
+arguments). Its top candidate: `sarva.config.load_config()` parses
+`~/.sarva/config.json` with a bare `json.loads()`, no error handling at
+all. Since `get_env()` (which calls `load_config`) backs nearly every
+provider-availability check `build_router()`/`build_providers()`/
+`run_diagnostics()` make, this is the widest blast radius of any bug
+found in this project: confirmed live by actually corrupting a config
+file and running `doctor`, `chat`, `models`, `eval`, `distill`, and all
+three `config` subcommands — every single one crashed with a raw
+`json.JSONDecodeError` traceback. The server side was worse in the two
+already-familiar ways: `GET /models`/`GET /doctor`/`POST /config`
+returned genuine unhandled 500s (confirmed with
+`raise_server_exceptions=False`), and `/ws/chat` crashed the whole ASGI
+call with no frame sent at all — a bare `ClosedResourceError`, the same
+failure mode already fixed twice this window for other causes.
+
+**Fixed with one new exception type, handled once per skin rather than
+once per call site:** `ConfigError(RuntimeError)` — deliberately not a
+`ValueError`, since callers already have `except ValueError` blocks
+scoped to unrelated failures (an invalid session name); reusing that
+base risked silently swallowing this into the wrong handler with a
+misleading message. Raised once, inside `load_config()` itself. On the
+CLI side, the `_build_router`/`_build_providers` module-level aliases
+(previously bare re-exports of `sarva.runtime`'s functions) became
+small wrapper functions that catch `ConfigError` — since every command
+using them already calls them by the same two names, this closed eight
+of the nine total CLI call sites with a two-function change, not eight
+separate edits; `doctor`, `config show`, `config set`, and `config
+unset` each got their own small `try`/`except` at their one remaining
+call site. On the server side, one `@app.exception_handler(ConfigError)`
+covers every plain HTTP route for free (`/models`, `/doctor`, `POST
+/config`) — a FastAPI idiom this project hadn't used yet, and a
+genuinely better fit here than a `try`/`except` at each of those three
+routes individually. `/chat` and `/ws/chat` needed their own explicit
+handling instead: a WebSocket route isn't covered by HTTP exception
+handlers at all, and `/chat`'s own established failure shape
+(`ChatResponse(state=failed, detail=...)`) is more useful to a caller
+than the generic `{"detail": ...}` 500 the global handler would
+otherwise produce for it.
+
+**Verified the new tests are real, not just green, the same discipline
+as every fix in this journal since the MCP tool-name escaping
+milestone:** reverted all three source files together and re-ran all
+eleven new tests (six CLI commands parametrized in one test, five
+server cases), watched every one fail with the raw
+`JSONDecodeError`/`ImportError: cannot import name 'ConfigError'`
+propagating for exactly the right reason, then re-applied.
+
+11 new tests, 521 → 532 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated.
+
+**Next:** the sweep also reconfirmed a real, small gap flagged (but not
+picked up) by an earlier sweep: `connect_stdio_mcp_server`'s `env`
+parameter still has no `--mcp-env` CLI flag, so a stdio MCP server that
+needs an environment variable (e.g. an API token an `npx`/`uvx`-run
+server reads from its own process environment) genuinely can't receive
+one via `sarva run` today — `get_default_environment()` only inherits a
+fixed safe allowlist otherwise. Also found: one corrupted session file
+among several good ones crashes `sarva sessions list` entirely, hiding
+the valid sessions too (a pydantic `ValidationError`, technically
+already a `ValueError` subclass, but never caught at this specific
+per-entry call site). Batching (§3.6f), F1's distributed training
+infra, Gemini's Files API for long video, and desktop
+code-signing/notarization remain deferred for the reasons already
+logged above.

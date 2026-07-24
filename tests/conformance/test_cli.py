@@ -523,6 +523,41 @@ def _isolate_config(monkeypatch, tmp_path) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+def _corrupt_config(tmp_path) -> None:
+    (tmp_path / "config.json").write_text("{not valid json")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["doctor"],
+        ["chat", "hi"],
+        ["models"],
+        ["config", "show"],
+        ["config", "set", "--anthropic-api-key", "sk-test"],
+        ["config", "unset", "--anthropic-api-key"],
+    ],
+)
+def test_a_corrupted_config_file_fails_every_command_cleanly_not_a_traceback(
+    monkeypatch, tmp_path, args
+):
+    # A real bug found by actually corrupting ~/.sarva/config.json and
+    # running any of these commands: get_env() backs nearly every
+    # provider-availability check build_router()/build_providers()/
+    # run_diagnostics() make, so a bad file crashed every one of them
+    # with a raw json.JSONDecodeError traceback -- the broadest blast
+    # radius of any "unhandled exception where a clean error belongs"
+    # bug found in this project so far.
+    _isolate_config(monkeypatch, tmp_path)
+    _corrupt_config(tmp_path)
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code != 0
+    assert "corrupted" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_config_set_writes_and_config_show_reflects_it(monkeypatch, tmp_path):
     _isolate_config(monkeypatch, tmp_path)
 
