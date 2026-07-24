@@ -104,6 +104,16 @@ def create_app() -> FastAPI:
         store = SessionStore()
         try:
             history = store.load(req.session) if req.session else []
+            # A real bug found by actually sending {"image_base64":
+            # "not-valid-base64!!!", ...}: base64.b64decode() raises
+            # binascii.Error (a ValueError subclass) for malformed input,
+            # and nothing here caught it -- a genuine unhandled 500, the
+            # same "raw traceback instead of a clean message" bug class
+            # already fixed for an invalid --session name a few lines
+            # above. Sharing this try block means both failure modes get
+            # the identical clean ChatResponse(state=failed, detail=...)
+            # treatment.
+            extra_content = _extra_content_blocks(req.image_base64, req.image_media_type)
         except ValueError as e:
             # A real bug found by actually sending {"session": "bad
             # name!"}: SessionStore._sanitize() raises a plain ValueError
@@ -116,7 +126,6 @@ def create_app() -> FastAPI:
             # differently-shaped HTTP error for what's semantically the
             # same "this request can't run" case.
             return ChatResponse(state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e))
-        extra_content = _extra_content_blocks(req.image_base64, req.image_media_type)
 
         loop = AgentLoop(
             router=build_router(),
@@ -203,9 +212,6 @@ def create_app() -> FastAPI:
             session = payload.get("session")
             auto = bool(payload.get("auto", False))
             model = payload.get("model")
-            extra_content = _extra_content_blocks(
-                payload.get("image_base64"), payload.get("image_media_type")
-            )
 
             async def ws_confirm(call: ToolCallBlock) -> bool:
                 reply = await websocket.receive_json()
@@ -214,13 +220,25 @@ def create_app() -> FastAPI:
             store = SessionStore()
             try:
                 history = store.load(session) if session else []
-            except ValueError as e:
                 # The WS counterpart to the same real bug just fixed for
-                # /chat: SessionStore._sanitize() raises a plain
-                # ValueError for an invalid session name, and reaching
-                # this point uncaught didn't even give the client the
-                # REST endpoint's own clean detail message -- it crashed
-                # the whole ASGI call with no frame sent at all, and the
+                # /chat: a malformed "image_base64" made
+                # base64.b64decode() raise binascii.Error (a ValueError
+                # subclass) with nothing here to catch it -- the whole
+                # ASGI call crashed with no frame sent at all, the client
+                # saw a bare ClosedResourceError, confirmed directly with
+                # a real TestClient WebSocket session before this fix.
+                # Sharing this try block gives it the identical clean
+                # failure treatment the invalid-session-name case below
+                # already has.
+                extra_content = _extra_content_blocks(
+                    payload.get("image_base64"), payload.get("image_media_type")
+                )
+            except ValueError as e:
+                # SessionStore._sanitize() raises a plain ValueError for
+                # an invalid session name, and reaching this point
+                # uncaught didn't even give the client the REST
+                # endpoint's own clean detail message -- it crashed the
+                # whole ASGI call with no frame sent at all, and the
                 # client saw a bare ClosedResourceError, confirmed
                 # directly with a real TestClient WebSocket session
                 # before this fix. Reported as a real state_changed +

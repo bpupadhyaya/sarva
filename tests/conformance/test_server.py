@@ -172,6 +172,30 @@ def test_chat_with_an_invalid_session_name_fails_cleanly_not_a_500(monkeypatch):
     assert "invalid session name" in body["detail"]
 
 
+def test_chat_with_malformed_image_base64_fails_cleanly_not_a_500(monkeypatch):
+    # A real bug found by actually POSTing {"image_base64": "not valid
+    # base64!!!", ...}: base64.b64decode() raises binascii.Error (a
+    # ValueError subclass), and nothing here caught it -- a genuine
+    # unhandled 500, confirmed directly with raise_server_exceptions=False
+    # before this fix. The exact same bug shape already fixed for an
+    # invalid session name just above, now closed for images too.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "hi",
+            "image_base64": "not valid base64!!!",
+            "image_media_type": "image/png",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert body["message"] is None
+
+
 def test_chat_with_an_attached_image_reaches_the_provider_as_a_real_image_block(monkeypatch):
     provider = _use_capturing_mock(monkeypatch)
     raw = b"\x89PNG\r\n\x1a\nreal enough bytes for this test"
@@ -314,6 +338,32 @@ def test_websocket_with_an_invalid_session_name_fails_cleanly_not_a_bare_disconn
 
     state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
     assert "invalid session name" in state_changed["detail"]
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_malformed_image_base64_fails_cleanly_not_a_bare_disconnect(monkeypatch):
+    # The WS counterpart to the same real bug just fixed for /chat:
+    # before this fix, reaching this point uncaught crashed the whole
+    # ASGI call with no frame sent at all -- a bare ClosedResourceError
+    # on the next receive, confirmed directly with a real WebSocket
+    # session, worse than even a REST 500.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json(
+            {
+                "message": "hi",
+                "image_base64": "not valid base64!!!",
+                "image_media_type": "image/png",
+            }
+        )
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
     assert events[-1]["state"] == "failed"
 
 

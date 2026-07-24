@@ -167,6 +167,21 @@ beyond the test suites:** a real `sarva serve` process hit with a real
 `websockets` client sending a real image over `/ws/chat` completed
 cleanly end to end, confirmed against the server's own request log.
 
+**A malformed `image_base64` field crashed both endpoints, the same bug
+shape already fixed here for an invalid `session` name.**
+`base64.b64decode()` raises `binascii.Error` (a `ValueError` subclass)
+on malformed input, and neither endpoint caught it: `/chat` returned a
+genuine unhandled 500, and `/ws/chat` — worse — crashed the whole ASGI
+call with no error frame sent at all, leaving the client to see a bare
+`ClosedResourceError` on its next receive. Fixed by folding the
+`_extra_content_blocks()` call into the same `try`/`except ValueError`
+block that already handles the session-name case, so both failure
+modes now get the identical clean treatment: a real
+`ChatResponse(state="failed", ...)` on `/chat`, and a real
+`state_changed` + `run_done` frame pair on `/ws/chat`. Verified the new
+tests are real: reverted the fix and watched both fail with the raw
+`binascii.Error` before re-applying.
+
 **Both endpoints also gained an optional `model` field**, the REST/WS
 counterpart to the CLI's own `--model` (see the agent-loop/providers
 chapters for the `UnknownModelError` safety fix that motivated

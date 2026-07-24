@@ -5633,3 +5633,57 @@ deferred). The three real bugs found by the last broad Explore-agent
 sweep (session names, desktop `onclose`, TTS engine failures) are now
 all closed — worth another such sweep next time a fresh angle is
 needed rather than incremental ad-hoc searching.
+
+## A malformed `image_base64` field crashed both `/chat` and `/ws/chat`, the exact bug shape already fixed here for an invalid session name
+
+Found by a fresh Explore-agent sweep given the full list of everything
+already fixed (to avoid duplicate research), asked to look specifically
+at CLI file-path handling, server endpoint edge cases, the desktop
+onboarding screen, built-in tool failure modes, and foundry recipes.
+The clearest, most real hit: `_extra_content_blocks()` in
+`sarva/server/app.py` calls `base64.b64decode(image_base64)` with no
+validation at all, and neither call site guarded it. Confirmed live:
+`POST /chat` with `{"image_base64": "not valid base64!!!", ...}`
+returned a genuine unhandled 500 (`raise_server_exceptions=False`
+showed the raw `binascii.Error: Incorrect padding`), and the `/ws/chat`
+equivalent was worse — the whole ASGI call crashed with **no error
+frame sent at all**, the client's next `receive_json()` raising a bare
+`ClosedResourceError`, identical to the pre-fix session-name bug this
+same file already fixed a few milestones ago.
+
+**Fixed by sharing one `try` block, not adding a second `except`
+clause:** `binascii.Error` is a `ValueError` subclass, so folding the
+`_extra_content_blocks()` call into the same `try`/`except ValueError`
+that already handles an invalid session name gives both failure modes
+the identical clean treatment for free — a real
+`ChatResponse(state="failed", ...)` on `/chat`, and a real
+`state_changed` + `run_done` frame pair on `/ws/chat` — with no new
+exception-handling logic, just a wider `try` block covering a sibling
+field the way the session-name fix's own shape was designed to extend.
+
+**Verified the new tests are real, not just green, the same discipline
+already applied to the last three fixes in this journal:** reverted
+the `try` block widening and re-ran both new tests, watched them fail
+with the raw `binascii.Error` propagating uncaught (a REST 500 and a
+bare `ClosedResourceError`, respectively) for exactly the right reason,
+then re-applied the fix.
+
+2 new tests (one REST, one WebSocket), 513 → 515 Python tests. `ruff
+check`/`format --check` clean. `docs/packaging.md` updated.
+
+**Next:** the same Explore-agent sweep surfaced two more real, unfixed
+candidates worth picking up soon: `RunShellTool`'s 60-second timeout
+(`core/sarva/agent/tools.py`) cancels the *awaiting* coroutine but
+never actually kills the child process, so a timed-out shell command's
+side effects keep happening unattended in the background, and the
+error the model/user sees is blank (`str(TimeoutError())` is empty) —
+a real gap since this tool is marked `destructive=True` specifically so
+a confirmation gate can stop unwanted side effects, and a timeout
+defeats that silently; and four CLI commands (`chat --image`, `speak
+--out`, `transcribe`, `distill`) crash with a raw `FileNotFoundError`
+traceback on a bad path instead of the same clean
+`console.print(...); raise typer.Exit(1)` pattern `--model`/`--session`
+now get consistently. Batching (§3.6f), F1's distributed training
+infra, Gemini's Files API for long video, and desktop
+code-signing/notarization remain deferred for the reasons already
+logged above.
