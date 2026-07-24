@@ -351,6 +351,27 @@ def doctor_cmd() -> None:
     )
 
 
+def _require_known_model(router: Any, model_id: str) -> Any:
+    # A real bug found by actually running `sarva eval --model
+    # bogus-id`/`sarva distill ... --model bogus-id`, not assumed safe:
+    # both called Registry.get() directly (neither goes through
+    # Router.pick(), since neither needs modality/availability routing,
+    # just "does this id exist") with no error handling at all, so an
+    # unknown model id crashed with a raw KeyError traceback instead of
+    # the same clean, actionable message chat/run's --model already
+    # give via UnknownModelError. Same message text for consistency,
+    # not routed through Router.pick() itself since these two commands
+    # were never subject to its modality/availability/degradation logic
+    # in the first place.
+    try:
+        return router.registry.get(model_id)
+    except KeyError:
+        console.print(
+            f"[red]unknown model {model_id!r} -- see 'sarva models' for the full list[/red]"
+        )
+        raise typer.Exit(1) from None
+
+
 @app.command("eval")
 def eval_cmd(
     model: str | None = typer.Option(
@@ -367,6 +388,8 @@ async def _eval(model_filter: str | None) -> None:
 
     router = _build_router()
     providers = _build_providers()
+    if model_filter:
+        _require_known_model(router, model_filter)  # fail fast, before printing anything
     model_ids = [model_filter] if model_filter else sorted(router.available)
 
     console.print(f"Benchmark: {ARITHMETIC.name} ({len(ARITHMETIC.cases)} cases)\n")
@@ -402,7 +425,7 @@ async def _distill(prompts_file: Path, model: str, out: Path, system: str | None
 
     router = _build_router()
     providers = _build_providers()
-    info = router.registry.get(model)
+    info = _require_known_model(router, model)
     provider = providers.get(info.provider)
     if provider is None:
         console.print(

@@ -68,7 +68,16 @@ at all until it was noticed missing while poking at the CLI's own
   Mock provider.
 - **`eval [--model ID]`** / **`distill PROMPTS --model ID --out PATH`**
   — the eval harness and distillation pipeline, covered in their own
-  chapters.
+  chapters. Both resolve `--model` via `Registry.get()` directly (they
+  need no modality/availability routing, unlike `chat`/`run`'s
+  `Router.pick()`) — a real bug found by actually running `sarva eval
+  --model bogus-id`: neither caught the resulting `KeyError` at all,
+  crashing with a raw Python traceback instead of `chat`/`run`'s own
+  clean `unknown model '...' -- see 'sarva models' for the full list`
+  message. Fixed with a shared `_require_known_model` helper giving
+  both commands the identical message and a clean nonzero exit,
+  checked fast — before `eval` prints its own benchmark header, before
+  `distill` writes anything — rather than failing mid-run.
 - **`sessions list`** / **`sessions clear NAME`** — inspect or delete
   persisted chat sessions.
 - **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...]`**

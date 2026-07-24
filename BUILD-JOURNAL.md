@@ -5428,3 +5428,42 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## `sarva eval --model bogus-id` crashed with a raw traceback — a real gap the `--model` safety fix never actually reached
+
+Checked whether the `--model` safety work (the `UnknownModelError`
+fix, `chat`/`run`'s clean failure messages) had actually reached every
+command that takes a `--model` argument — it hadn't. `sarva eval` and
+`sarva distill` both resolve their `--model` via `Registry.get()`
+directly, never through `Router.pick()` (neither command needs
+modality/availability routing — just "does this id exist"), so the
+`UnknownModelError` fix built for `Router.pick()`'s override path
+never applied to either. Confirmed directly, not assumed: `sarva eval
+--model totally-bogus-model` printed its benchmark header, then
+crashed with a raw `KeyError: 'totally-bogus-model'` traceback;
+`sarva distill ... --model totally-bogus` did the identical thing.
+
+Fixed with a small shared helper, `_require_known_model(router,
+model_id)`, giving both commands the exact same message text
+`UnknownModelError` already established (`unknown model '...' -- see
+'sarva models' for the full list`) and the same clean nonzero exit —
+consistency across every `--model`-accepting command, not a
+parallel, slightly-different error path. **Checked fast, not just
+caught late:** `eval`'s validation runs before it prints its own
+"Benchmark: ..." header, and `distill`'s runs before it ever reads the
+prompts file or writes anything — a bad `--model` fails immediately,
+not mid-run after partial, confusing output.
+
+2 new tests (one per command, each asserting the clean message
+appears and the raw `"KeyError"` string never does), 504 → 506 Python
+tests. `ruff check`/`format --check` clean. `docs/packaging.md`
+updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

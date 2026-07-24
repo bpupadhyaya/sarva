@@ -364,6 +364,47 @@ def test_distill_fails_cleanly_for_a_provider_that_is_not_configured(monkeypatch
     assert "not configured" in result.stdout
 
 
+def test_eval_with_an_unknown_model_fails_cleanly_instead_of_a_raw_traceback(monkeypatch):
+    # A real bug found by actually running `sarva eval --model
+    # bogus-id`: Registry.get() is called directly here (eval never
+    # goes through Router.pick(), since it needs no modality/
+    # availability routing), with no error handling at all -- an
+    # unknown id crashed with a raw KeyError traceback instead of the
+    # same clean message chat/run's --model already give.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["eval", "--model", "not-a-real-model"])
+
+    assert result.exit_code != 0
+    assert "unknown model 'not-a-real-model'" in result.stdout
+    assert "KeyError" not in result.stdout
+
+
+def test_distill_with_an_unknown_model_fails_cleanly_instead_of_a_raw_traceback(
+    monkeypatch, tmp_path
+):
+    _clear_provider_env(monkeypatch)
+    prompts_file = tmp_path / "prompts.txt"
+    prompts_file.write_text("hi\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "distill",
+            str(prompts_file),
+            "--model",
+            "not-a-real-model",
+            "--out",
+            str(tmp_path / "out.jsonl"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "unknown model 'not-a-real-model'" in result.stdout
+    assert "KeyError" not in result.stdout
+    assert not (tmp_path / "out.jsonl").exists()
+
+
 def test_sessions_list_reports_nothing_saved_when_empty(monkeypatch, tmp_path):
     _isolate_sessions(monkeypatch, tmp_path)
 
