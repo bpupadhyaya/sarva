@@ -11,10 +11,13 @@ provider only), the same "always works with no API keys" guarantee
 from __future__ import annotations
 
 import json
+import stat
+import sys
 from contextlib import asynccontextmanager
 
 import pytest
 import sarva.cli as cli_module
+import sarva.config as config_module
 import sarva.memory.session as session_module
 import sarva.runtime as runtime
 from sarva.audio import stt_extra_installed, tts_engine_available
@@ -384,6 +387,66 @@ def test_sessions_list_and_clear_reflect_a_real_saved_session(monkeypatch, tmp_p
 
     final_list = runner.invoke(app, ["sessions", "list"])
     assert "keepsake" not in final_list.stdout
+
+
+def _isolate_config(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_config_set_writes_and_config_show_reflects_it(monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+
+    set_result = runner.invoke(app, ["config", "set", "--anthropic-api-key", "sk-ant-real-test"])
+    assert set_result.exit_code == 0
+    assert "ANTHROPIC_API_KEY" in set_result.stdout
+    # The actual key value must never appear in terminal output.
+    assert "sk-ant-real-test" not in set_result.stdout
+
+    show_result = runner.invoke(app, ["config", "show"])
+    assert "ANTHROPIC_API_KEY" in show_result.stdout
+    assert "set" in show_result.stdout
+    assert "saved config file" in show_result.stdout
+    assert "sk-ant-real-test" not in show_result.stdout
+    # The other three keys were never set.
+    assert "OPENAI_API_KEY" in show_result.stdout
+    assert "not set" in show_result.stdout
+
+
+def test_config_show_prefers_a_real_env_var_over_the_saved_file(monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+    runner.invoke(app, ["config", "set", "--anthropic-api-key", "sk-from-file"])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-env")
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert "environment variable" in result.stdout
+    assert "saved config file" not in result.stdout
+
+
+def test_config_set_with_no_keys_fails_cleanly(monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["config", "set"])
+
+    assert result.exit_code != 0
+    assert "nothing to save" in result.stdout
+    assert not (tmp_path / "config.json").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="owner-only permissions are POSIX-only")
+def test_config_set_writes_with_owner_only_permissions(monkeypatch, tmp_path):
+    # sarva config set is a real second caller of save_config() beyond
+    # the desktop app's POST /config -- proves the CLI path gets the
+    # same real security fix (see sarva.config's own docstring), not
+    # just the server one.
+    _isolate_config(monkeypatch, tmp_path)
+
+    runner.invoke(app, ["config", "set", "--gemini-api-key", "test-key"])
+
+    mode = stat.S_IMODE((tmp_path / "config.json").stat().st_mode)
+    assert mode == 0o600
 
 
 @pytest.mark.skipif(not tts_engine_available(), reason="no local TTS engine detected")

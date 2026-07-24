@@ -5326,3 +5326,57 @@ error details) goes through React's own default JSX auto-escaping —
 the equivalent bug class doesn't exist there by construction, not
 just unverified. This specific issue is now closed across both
 surfaces.
+
+## `sarva config set`/`show` — the CLI's own missing surface for a mechanism the desktop app has had for a while
+
+Checked for the CLI's own copy of a gap this project has now closed
+several times over: `sarva.config.save_config`/`load_config`/`get_env`
+have backed the desktop app's first-run screen (`POST /config`) since
+that screen shipped, but `sarva --help` had no way to reach any of it
+— a CLI-only user with no desktop app installed had no way to persist
+a provider API key across sessions at all, short of hand-editing
+`~/.sarva/config.json` or re-exporting an env var every session. New
+`sarva config set [--anthropic-api-key ...] [--openai-api-key ...]
+[--gemini-api-key ...]` and `sarva config show` close it, mirroring
+the existing `sessions list`/`sessions clear` subcommand-group shape
+rather than inventing a new CLI pattern.
+
+**`show` adds real value beyond what `sarva doctor` already reports,**
+not a duplicate: `doctor`'s existing provider-key checks already say
+whether a key is configured via `get_env()`, but never *which* of the
+two sources (a real environment variable vs. the saved config file)
+actually won — `show` makes that precedence visible directly, the
+same precedence `sarva.config`'s own docstring has always documented
+but nothing surfaced to a user before now. Neither command ever prints
+an actual key value, only whether one is set and where it came from —
+checked directly in the tests (`assert "sk-ant-real-test" not in
+result.stdout`), not just assumed safe from reading the code.
+
+**`set` is a second real caller of the credential-exposure fix, not
+just a thin wrapper that happens to inherit it** — verified directly:
+a real `sarva config set` run against an isolated config path produces
+a file at `0o600`, the identical owner-only permission the earlier
+`save_config` security fix established, confirmed with a dedicated
+POSIX-only test rather than assumed to just work because the
+underlying function was already fixed elsewhere.
+
+**Verified live, beyond the test suite:** a real `sarva config set
+--anthropic-api-key sk-...` run (with `HOME` pointed at a scratch
+directory) produced a real, correctly-permissioned file with the
+right JSON content; `sarva config show` afterward correctly reported
+`"set (saved config file)"`; setting the same env var afterward and
+re-running `show` correctly flipped it to `"set (environment
+variable)"`; running `set` with no options at all failed cleanly with
+a clear message and a nonzero exit, writing nothing.
+
+4 new tests, 492 → 496 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated ("Ten commands" → "Eleven").
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

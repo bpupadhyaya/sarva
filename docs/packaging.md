@@ -19,7 +19,7 @@ with no `ANTHROPIC_API_KEY` set, everything routes to the offline
 prints the real installed version (`importlib.metadata.version("sarva")`)
 and exits — a genuinely common convenience that had no code path here
 at all until it was noticed missing while poking at the CLI's own
-`--help` output. Ten commands, each doing one thing:
+`--help` output. Eleven commands, each doing one thing:
 
 - **`chat MESSAGE [--image PATH] [--model ID] [--session NAME]`** —
   one-shot, tool-free, single-turn (`AgentLoop(tools=[],
@@ -71,6 +71,19 @@ at all until it was noticed missing while poking at the CLI's own
   chapters.
 - **`sessions list`** / **`sessions clear NAME`** — inspect or delete
   persisted chat sessions.
+- **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...]`**
+  / **`config show`** — save provider API keys to `~/.sarva/config.json`
+  from the command line. `sarva.config.save_config`/`get_env` have
+  backed the desktop app's first-run screen (`POST /config`) since it
+  shipped, but a CLI-only user with no desktop app had no way to reach
+  the same persistence at all — another instance of the "fully built,
+  unreachable by a real user" shape this project keeps finding.
+  `show` never prints an actual key value, only whether one is set and
+  which source won (a real environment variable always beats a saved
+  file). `set` reuses `save_config` directly, so it inherits the exact
+  same owner-only file permissions the credential-exposure fix already
+  established — verified as a real, second caller of that fix, not
+  just the server's own path.
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
 - **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text

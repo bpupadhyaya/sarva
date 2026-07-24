@@ -31,6 +31,8 @@ from sarva.runtime import build_providers, build_router, run_diagnostics
 app = typer.Typer(help="Sarva — an open, all-in-one multimodal AGI tool.")
 sessions_app = typer.Typer(help="Manage persisted chat sessions (used by `sarva chat --session`).")
 app.add_typer(sessions_app, name="sessions")
+config_app = typer.Typer(help="Manage saved provider API keys (~/.sarva/config.json).")
+app.add_typer(config_app, name="config")
 console = Console()
 
 # Kept as thin aliases so the rest of this file reads the same as before the
@@ -433,6 +435,58 @@ def sessions_clear(name: str = typer.Argument(..., help="Session name to delete.
     """Delete a saved session."""
     SessionStore().clear(name)
     console.print(f"cleared session {name!r}")
+
+
+@config_app.command("set")
+def config_set(
+    anthropic_api_key: str | None = typer.Option(None, "--anthropic-api-key"),
+    openai_api_key: str | None = typer.Option(None, "--openai-api-key"),
+    gemini_api_key: str | None = typer.Option(None, "--gemini-api-key"),
+) -> None:
+    """Save one or more provider API keys to ~/.sarva/config.json (owner-only
+    permissions -- see `sarva.config`'s own docstring). This is the CLI's
+    own reachable surface for exactly what the desktop app's first-run
+    screen already does via `POST /config` -- `sarva.config.save_config`
+    has been callable since that screen shipped, but nothing exposed it
+    to a CLI-only user with no desktop app installed at all. A real
+    environment variable of the same name always wins over whatever's
+    saved here (`sarva.config.get_env`'s own documented precedence,
+    unchanged by this command)."""
+    from sarva.config import save_config
+
+    values = {
+        "ANTHROPIC_API_KEY": anthropic_api_key,
+        "OPENAI_API_KEY": openai_api_key,
+        "GEMINI_API_KEY": gemini_api_key,
+    }
+    non_empty = {k: v for k, v in values.items() if v}
+    if not non_empty:
+        console.print(
+            "[yellow]nothing to save -- pass at least one of --anthropic-api-key / "
+            "--openai-api-key / --gemini-api-key[/yellow]"
+        )
+        raise typer.Exit(1)
+    save_config(non_empty)
+    console.print(f"saved {', '.join(sorted(non_empty))} to ~/.sarva/config.json")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Show which provider keys are configured and where each comes from
+    (a real environment variable always wins over a saved config-file
+    value) -- never prints the actual key, only whether one is set."""
+    import os
+
+    from sarva.config import KNOWN_KEYS, load_config
+
+    saved = load_config()
+    for name in KNOWN_KEYS:
+        if os.environ.get(name):
+            console.print(f"{name:20s} [green]set[/green] (environment variable)")
+        elif saved.get(name):
+            console.print(f"{name:20s} [green]set[/green] (saved config file)")
+        else:
+            console.print(f"{name:20s} [dim]not set[/dim]")
 
 
 @app.command()
