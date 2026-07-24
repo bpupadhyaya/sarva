@@ -21,6 +21,23 @@ list and hand it straight to `SessionStore.save()`, so resuming a saved
 tool-using session actually restores the full back-and-forth, not a
 summary of it.
 
+**Written with owner-only permissions (`0700` directory, `0600` files),
+not the platform default.** The same real gap found in
+`sarva.config`'s credential file, checked for here too since a saved
+session can hold real tool-use output — file contents `ReadFileTool`
+read, `RunShellTool` command output, anything the user typed — at
+least as sensitive as an API key: confirmed with a real `stat()` call
+that `SessionStore` was leaving files at `0644`/the directory at
+`0755` on this machine's real umask. `SessionStore.__init__` now
+`chmod`s the sessions directory to `0700` (self-healing one an older
+version already created looser), and `save()` creates each file via
+`os.open(..., 0o600)` directly rather than `Path.write_bytes`'s
+platform-default mode, with an explicit `chmod` afterward too so an
+existing insecurely-written file gets tightened on its next save.
+POSIX-only in practice, the same honesty this project already applies
+to the Windows TTS and credential-file gaps — `os.chmod` doesn't give
+real per-user isolation on Windows.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:
@@ -30,6 +47,17 @@ reconstruction problem. This is exactly what `sarva.memory`'s own module
 docstring named as future work from the start: "a vector index or
 database-backed store can layer on top later without changing this
 contract." Layered on top — `session.py` is completely untouched.
+
+**The same file-permission sweep that fixed `session.py` found this
+store's SQLite file (`~/.sarva/memory.db`) at the identical `0644`/
+`0755` gap** — `remember`/`recall_memory` can hold text just as
+sensitive as a saved session. Fixed slightly differently here, and
+actually more completely: `VectorMemoryStore.__init__` `chmod`s the
+parent directory to `0700` *before* `sqlite3.connect()` ever creates
+the database file, so there's no window at all where another local
+user could reach the file path, then `chmod`s the file itself to
+`0600` too (both for defense in depth and to tighten a DB an older
+version already wrote insecurely).
 
 ### Why TF-IDF, not neural embeddings
 

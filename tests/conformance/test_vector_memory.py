@@ -5,8 +5,16 @@ just return something."""
 
 from __future__ import annotations
 
+import stat
+import sys
+
 import pytest
 from sarva.memory.vector import VectorMemoryStore, _cosine_similarity, _tfidf_vector, _tokenize
+
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.chmod's real per-user isolation is POSIX-only -- see sarva.config's docstring",
+)
 
 
 @pytest.fixture
@@ -36,6 +44,28 @@ def test_tfidf_gives_zero_weight_to_query_terms_never_seen_in_any_document():
     vec = _tfidf_vector(["seen", "never_seen_anywhere"], idf)
     assert vec["seen"] > 0
     assert vec["never_seen_anywhere"] == 0.0
+
+
+@_posix_only
+def test_db_file_and_parent_directory_are_owner_only(store, tmp_path):
+    # remember/recall_memory can hold text at least as sensitive as a
+    # saved session -- the same class of gap already fixed for
+    # sarva.config and sarva.memory.session, checked here too.
+    store.add("sess1", "a note")
+
+    db_path = tmp_path / "memory.db"
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+
+
+@_posix_only
+def test_parent_directory_tightened_before_the_db_file_is_ever_created(tmp_path):
+    # The directory is chmod'd BEFORE sqlite3.connect() creates the
+    # file, not after -- closing the window a file-level-only fix would
+    # still leave open, however brief.
+    nested = tmp_path / "sub"
+    VectorMemoryStore(nested / "memory.db")
+    assert stat.S_IMODE(nested.stat().st_mode) == 0o700
 
 
 def test_search_on_empty_store_returns_empty_list(store):

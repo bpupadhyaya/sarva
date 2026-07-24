@@ -4901,3 +4901,76 @@ surface unlike anything else in this codebase, a genuine security
 design decision rather than a mechanical port of the CLI flag —
 deliberately not attempted autonomously this session, named here so
 it isn't silently forgotten either.
+
+## The same credential-exposure bug, one directory over: saved sessions were world-readable too
+
+Immediately after fixing `sarva.config`'s permission gap, checked the
+one other place in `~/.sarva/` that writes real files to disk:
+`sarva.memory.session.SessionStore`. Same bug, confirmed with a real
+`stat()` call before touching anything: `SessionStore.save()` used
+`Path.write_bytes`, whose default `open()` mode left session files at
+`0644` and the `sessions/` directory itself at `0755` on this
+machine's real umask — both world-readable/listable. A saved session
+transcript can genuinely be *more* sensitive than an API key: it's the
+complete message history for a `sarva run --session` conversation,
+including every tool-call/tool-result round `transcript_out` captures
+— real file contents `ReadFileTool` read, real `RunShellTool` command
+output, anything the user typed. On a shared machine, any other local
+user could read all of it.
+
+**Fixed identically to the config.py precedent, not a new pattern:**
+`SessionStore.__init__` now `os.chmod`s the sessions directory to
+`0o700` right after `mkdir` (self-healing a directory an older version
+already created looser); `save()` creates each file via
+`os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)` instead
+of `write_bytes`'s platform-default mode — no create-then-chmod race
+window — with an explicit `os.chmod` afterward too, since `os.open`'s
+mode argument only applies when it actually creates a new file, not a
+pre-existing one written by an older version. Both self-healing
+behaviors tested directly, mirroring the config.py tests exactly.
+
+**Verified beyond the unit tests:** a real `sarva chat --session
+perm-test` run (with `HOME` pointed at a scratch directory) produced a
+real `~/.sarva/sessions/perm-test.json` on disk at `0600`, in a
+`sessions/` directory at `0700` — the actual CLI path, not just
+`SessionStore` called directly.
+
+**Same honest platform scoping as the config.py fix:** real on
+POSIX (macOS/Linux); `os.chmod` on Windows only toggles the read-only
+attribute, not genuine per-user ACL isolation — the three new tests are
+explicitly POSIX-only, asserting nothing the platform doesn't actually
+guarantee.
+
+3 new tests, 467 → 470 Python tests. `ruff check`/`format --check`
+clean. `docs/memory.md` updated.
+
+**A sweep of `~/.sarva/` for any other unreviewed file found a third,
+real instance of the identical bug, fixed in the same milestone:**
+`sarva.memory.vector.VectorMemoryStore`'s SQLite database
+(`~/.sarva/memory.db`, backing the `remember`/`recall_memory` tools) —
+confirmed with the same real `stat()` pattern, `0644`/`0755` again.
+Fixed with a variant of the same technique, actually tighter than the
+config/session fixes needed: `os.chmod(db_path.parent, 0o700)` runs
+*before* `sqlite3.connect()` ever creates the file, not after, so
+there's no window at all — however brief — where another local user
+could even reach the file path, closing the race more completely than
+a file-level-only chmod could. `os.chmod(db_path, 0o600)` still runs
+after the table's created, both for defense in depth and to tighten a
+DB file an older version already wrote insecurely. 2 more tests (one
+pinning the directory-before-file-creation ordering specifically), 470
+→ 472 Python tests. This now covers every file this project's own
+runtime writes under `~/.sarva/` — `config.json`, `sessions/*.json`,
+`memory.db` — the issue class considered closed unless a sweep like
+this one finds a fourth instance.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred); Windows ACL-based protection for `config.json`/`sessions/`/
+`memory.db` (named, real, separate work); or MCP-over-the-network
+(named, deliberately not attempted — a real remote-code-execution
+design question, not a mechanical port; see the previous entry).

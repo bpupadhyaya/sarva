@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import stat
+import sys
+
 import pytest
 from sarva.memory.session import SessionStore
 from sarva.multimodal.content import ImageBlock, Message, TextBlock
+
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.chmod's real per-user isolation is POSIX-only -- see sarva.config's docstring",
+)
 
 
 @pytest.fixture
@@ -38,6 +46,36 @@ def test_round_trip_preserves_binary_content(store):
     store.save("with-image", messages)
     restored = store.load("with-image")
     assert restored == messages
+
+
+@_posix_only
+def test_save_writes_the_session_file_with_owner_only_permissions(store, tmp_path):
+    # Real gap this pins, the same class already fixed in sarva.config:
+    # a saved session can hold real tool-use output (file contents,
+    # shell command output, anything the user typed) -- at least as
+    # sensitive as an API key, and was left world-readable (0644 on
+    # this machine's real umask) until this fix.
+    store.save("greeting", [Message(role="user", content=[TextBlock(text="hi")])])
+
+    path = tmp_path / "greeting.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@_posix_only
+def test_sessions_directory_itself_is_owner_only(store, tmp_path):
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+
+
+@_posix_only
+def test_save_tightens_permissions_on_a_file_that_already_existed_insecurely(store, tmp_path):
+    path = tmp_path / "greeting.json"
+    path.write_bytes(b"[]")
+    path.chmod(0o644)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644  # sanity: the insecure state is real
+
+    store.save("greeting", [Message(role="user", content=[TextBlock(text="hi")])])
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_clear_removes_the_session(store):

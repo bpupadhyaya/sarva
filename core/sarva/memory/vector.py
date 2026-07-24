@@ -30,6 +30,7 @@ scoring math.
 from __future__ import annotations
 
 import math
+import os
 import re
 import sqlite3
 from collections import Counter
@@ -74,7 +75,19 @@ class VectorMemoryStore:
     here via `sqlite3 db_path` instead of `cat`."""
 
     def __init__(self, db_path: Path):
+        # Owner-only from before the DB file even exists: chmod the
+        # parent directory to 0700 *before* sqlite3.connect() creates
+        # it, so there's no window where another local user could reach
+        # the file path at all -- closes the same class of gap fixed in
+        # sarva.config/sarva.memory.session, but without even the brief
+        # create-then-chmod race those needed a special atomic-open for
+        # (a directory-level restriction protects the file regardless
+        # of what mode it's initially created with). `remember`/
+        # `recall_memory` can hold text at least as sensitive as a saved
+        # session -- confirmed with a real stat() call that this file
+        # was previously left at 0644/0755 (this machine's real umask).
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(db_path.parent, 0o700)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute(
             """
@@ -86,6 +99,7 @@ class VectorMemoryStore:
             """
         )
         self._conn.commit()
+        os.chmod(db_path, 0o600)
 
     def add(self, session_id: str, text: str) -> int:
         cursor = self._conn.execute(
