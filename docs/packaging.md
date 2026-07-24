@@ -24,14 +24,18 @@ at all until it was noticed missing while poking at the CLI's own
 - **`chat MESSAGE [--image PATH] [--session NAME]`** — one-shot,
   tool-free, single-turn (`AgentLoop(tools=[], confirm=always_allow)`).
   The simplest possible entry point, deliberately with no tool access.
-- **`run TASK [--workdir .] [--auto] [--session NAME] [--mcp-server CMD]...`**
+- **`run TASK [--workdir .] [--image PATH] [--auto] [--session NAME] [--mcp-server CMD]...`**
   — the full agent loop with `BUILTIN_TOOLS` (files, shell) plus any MCP
   servers. `--mcp-server` is repeatable; each value is shell-split and
   connected via `connect_stdio_mcp_server` inside an `AsyncExitStack`
   (see the MCP chapter), its tools appended to the built-in list. Without
   `--auto`, every destructive tool call stops for a real
   `typer.confirm(f"Allow {call.name}({call.arguments})?")` prompt;
-  `--auto` swaps that for `always_allow`.
+  `--auto` swaps that for `always_allow`. `--image` landed later than
+  `chat`'s own copy of the same flag — a real gap found by checking
+  `/ws/chat` (`run`'s own server-side mirror) against what it actually
+  read from the frame, not what `chat`/`/chat` already supported; see
+  BUILD-JOURNAL.md.
 - **`models`** — lists every registry entry with `[x]`/`[ ]` marking
   whether it's currently available (API key present, Ollama reachable,
   a foundry checkpoint discovered — see the providers and foundry

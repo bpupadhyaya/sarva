@@ -4777,3 +4777,55 @@ input (no API key here to verify live); or a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## `sarva run --image` — the CLI's own copy of the gap just closed in `/ws/chat`, plus a README staleness sweep
+
+Immediately after wiring image support into `/ws/chat`, checked the one
+other place with the same shape of gap: `sarva run` (the CLI's own
+tool-using surface, `/ws/chat`'s direct mirror) had no `--image` option
+at all, even though `sarva chat` has had one since early in the
+project. Confirmed by `sarva run --help` before touching anything —
+`--workdir`/`--auto`/`--session`/`--mcp-server`, no image. Fixed the
+same way `chat` and `/chat`/`/ws/chat` already do it:
+`_load_image(path)` builds the `ImageBlock`, threaded into
+`loop.run(extra_content=...)`. 3 new tests (a wrong-media-type failure
+mirroring `chat`'s own, and a real positive-path run confirming the
+CLI wiring doesn't crash and the task text still reaches Mock) —
+463 → 465 Python tests. `docs/packaging.md`'s own `run` flag listing
+updated to match.
+
+**Separately, swept `README.md` for staleness** — the same discipline
+this project has applied to docstrings and doc chapters, just not yet
+to the repo's own front door. Found three real gaps, not stylistic
+nitpicks: (1) the Status paragraph named Anthropic/OpenAI/Google/Ollama
+adapters but said nothing about Ollama's real vision support, Windows
+TTS, or the desktop app's image-attach — all shipped in the last few
+milestones but invisible to a first-time reader; (2) the desktop-app
+section still said "Windows signal handling isn't wired up yet,"
+stale since the sidecar-reaping fix — graceful window close now
+correctly kills the sidecar on Windows too, only an abrupt kill that
+bypasses the close handler entirely doesn't, a narrower and more
+accurate claim; (3) the repository-layout table's `scripts/` line said
+"build-web.sh, and future setup/release scripts" when `freeze-server.sh`
+and `generate-icon.py` have existed for a while — "future" was simply
+wrong. All three fixed to match actual current behavior, verified
+against source/BUILD-JOURNAL rather than rewritten from memory.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred); or investigating whether `TaskClass.VISION`/`SUBTASK`/
+`ESCALATION` (real entries in `routing.yaml`, real values in the
+`TaskClass` enum, exercised only by one direct `Router.pick()` test)
+are reachable through any actual call site — a `grep -rn "task_class"
+core/sarva/` run while investigating this milestone found exactly one:
+`AgentLoop.__init__`'s own default parameter. Deliberately not touched
+this round — auto-switching task class based on message modality would
+be a real design decision (how it should interact with a future
+subagent-fan-out feature this project's own docs already name as
+unbuilt), not a mechanical wire-up, so it's named here rather than
+guessed at.

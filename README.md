@@ -11,21 +11,25 @@ point as the tool itself.
 ## Status
 
 v0.1.0 (draft release) — the core engine (provider layer with real
-Anthropic/OpenAI/Google/Ollama adapters plus a **foundry adapter** that
-plugs a from-scratch-trained checkpoint in as a real, routable model
-(`sarva[foundry]`, optional), agent loop, built-in tools including
-session persistence and semantic memory recall, image/audio/video
-degradation for models that can't handle a modality (including real
-local speech transcription via `sarva[audio]`), local text-to-speech
-(`sarva speak`, no API key), an MCP client so the ecosystem's tools plug
-in with `sarva run --mcp-server`, and a benchmark harness that grades
+Anthropic/OpenAI/Google/Ollama adapters — Ollama now including real
+local vision support, verified against a real pulled model — plus a
+**foundry adapter** that plugs a from-scratch-trained checkpoint in as
+a real, routable model (`sarva[foundry]`, optional), agent loop,
+built-in tools including session persistence and semantic memory
+recall, image/audio/video degradation for models that can't handle a
+modality (including real local speech transcription via
+`sarva[audio]`), local text-to-speech on macOS/Linux/**Windows**
+(`sarva speak`, no API key — Windows via `System.Speech`/PowerShell,
+verified on a real `windows-latest` CI runner since this dev
+environment has none), an MCP client so the ecosystem's tools plug in
+with `sarva run --mcp-server`, and a benchmark harness that grades
 every model with the same yardstick via `sarva eval`), the FastAPI
-server (REST + WebSocket, with real tool-confirmation over the socket),
-and a web UI with a working chat and tool-approval flow are scaffolded
-and tested; the CLI works end to end,
-verified via a real `pip install` of the built wheels in CI, not just
-the dev workspace. The desktop app (Tauri) bundles and auto-starts its
-own backend, with real cross-platform release bundles
+server (REST + WebSocket, with real tool-confirmation over the socket
+and image attachments on both), and a web UI with a working chat,
+image-attach, and tool-approval flow are scaffolded and tested; the CLI
+works end to end, verified via a real `pip install` of the built wheels
+in CI, not just the dev workspace. The desktop app (Tauri) bundles and
+auto-starts its own backend, with real cross-platform release bundles
 (macOS/Linux/Windows) — see below for the one-click flow and its known
 gaps.
 
@@ -105,9 +109,11 @@ cd apps/desktop && npx tauri build --no-bundle
 ```
 
 Launching `sarva-desktop` is now the whole experience: it starts its own
-bundled backend as a sidecar process and stops it whether you close the
-window or kill the app directly (macOS/Linux; Windows signal handling
-isn't wired up yet). Real, installable bundles (`.dmg`/`.msi` or
+bundled backend as a sidecar process and stops it on a graceful window
+close on every OS, and on a direct kill on macOS/Linux too — an abrupt
+kill that bypasses the close handler entirely still doesn't reap the
+sidecar on Windows specifically, a real, checked Win32 constraint (see
+`BUILD-JOURNAL.md`), not an oversight. Real, installable bundles (`.dmg`/`.msi` or
 `.exe`/`.AppImage`+`.deb`) for all three OSes come from
 `.github/workflows/release-bundle.yml`, triggered manually via
 `gh workflow run release-bundle.yml` — genuinely verified to produce
@@ -125,7 +131,7 @@ foundry/          # from-scratch model training code (tokenizer, transformer, pr
 tests/            # conformance suites — the definition of done for each component
 examples/         # small, runnable, graded examples
 docs/             # the accompanying book: "Building a Multimodal AGI Tool"
-scripts/          # build-web.sh, and future setup/release scripts
+scripts/          # build-web.sh, freeze-server.sh, generate-icon.py
 ```
 
 Build/preview the book locally: `pip install mkdocs mkdocs-material && mkdocs serve`

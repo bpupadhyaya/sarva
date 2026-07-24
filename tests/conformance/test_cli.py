@@ -81,6 +81,33 @@ def test_chat_with_an_image_of_the_wrong_type_fails_cleanly(tmp_path, monkeypatc
     assert "cannot determine an image media type" in result.output
 
 
+def test_run_with_an_image_of_the_wrong_type_fails_cleanly(tmp_path, monkeypatch):
+    # sarva run gained --image after ws_chat did (the CLI's own "run"
+    # mirrors /ws/chat the way "chat" mirrors /chat) -- mirrors the chat
+    # test above so both commands hold the same failure-mode guarantee.
+    _clear_provider_env(monkeypatch)
+    not_an_image = tmp_path / "notes.txt"
+    not_an_image.write_text("hello")
+
+    result = runner.invoke(app, ["run", "look at this", "--image", str(not_an_image), "--auto"])
+
+    assert result.exit_code != 0
+    assert "cannot determine an image media type" in result.output
+
+
+def test_run_with_a_valid_image_completes_successfully(tmp_path, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nreal enough bytes for this test")
+
+    result = runner.invoke(
+        app, ["run", "what's in this image?", "--image", str(image_path), "--auto"]
+    )
+
+    assert result.exit_code == 0
+    assert "[mock] received: what's in this image?" in result.stdout
+
+
 def test_run_with_mock_provider_completes_with_no_tool_calls(monkeypatch, tmp_path):
     # MockProvider's unscripted default turn never issues tool calls, so
     # this proves the CLI wires AgentLoop + BUILTIN_TOOLS end to end

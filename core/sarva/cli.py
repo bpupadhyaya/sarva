@@ -124,6 +124,9 @@ async def _chat(message: str, image: Path | None, session: str | None) -> None:
 def run(
     task: str = typer.Argument(..., help="Task for the agent to complete."),
     workdir: str = typer.Option(".", help="Working directory for file/shell tools."),
+    image: Path | None = typer.Option(
+        None, "--image", help="Attach an image file (requires a vision-capable model)."
+    ),
     auto: bool = typer.Option(
         False, "--auto", help="Auto-approve destructive tools (no confirmation prompts)."
     ),
@@ -144,7 +147,7 @@ def run(
     ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
-    asyncio.run(_run(task, workdir, auto, session, mcp_server))
+    asyncio.run(_run(task, workdir, image, auto, session, mcp_server))
 
 
 async def _confirm_prompt(call: Any) -> bool:
@@ -152,10 +155,16 @@ async def _confirm_prompt(call: Any) -> bool:
 
 
 async def _run(
-    task: str, workdir: str, auto: bool, session: str | None, mcp_servers: list[str]
+    task: str,
+    workdir: str,
+    image: Path | None,
+    auto: bool,
+    session: str | None,
+    mcp_servers: list[str],
 ) -> None:
     store = SessionStore()
     history = store.load(session) if session else []
+    extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
     confirm = always_allow if auto else _confirm_prompt
 
     async with AsyncExitStack() as stack:
@@ -185,7 +194,11 @@ async def _run(
         final_state = None
         transcript: list[Message] = []
         async for event in loop.run(
-            task, history=history, transcript_out=transcript, session_id=session
+            task,
+            history=history,
+            extra_content=extra_content,
+            transcript_out=transcript,
+            session_id=session,
         ):
             if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
                 console.print(event.event.text, end="", markup=False)
