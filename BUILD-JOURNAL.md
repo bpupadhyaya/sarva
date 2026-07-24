@@ -4653,3 +4653,61 @@ The injection-safety test
 on real Windows too, not just the hermetic macOS run that first proved
 the property. Full CI run genuinely green: `web`, `desktop` (all three
 OSes), `docs`, `core`, and `windows-audio`, commit `53e3b1e`.
+
+## Ollama vision — closing the last adapter's own named follow-up, verified against a real local vision model
+
+Two milestones ago, fixing Ollama's silent-content-drop bug named the
+real remaining gap directly in its own commit message: "real
+vision-capable Ollama models do accept images via a separate
+`images: [base64, ...]` wire field this adapter doesn't build yet."
+Closed now, the same way every other Ollama claim this session has
+been verified — against a real running server, not just the documented
+API shape.
+
+`_to_ollama_message` is now `async`, matching the Anthropic/Google
+translators' own shape, so it can call `resolve_media_bytes` (the
+shared SSRF-guarded fetch path) instead of only handling `data`/`path`
+sources. An `ImageBlock` becomes one raw base64 string in Ollama's
+`images` array — no `data:` URI prefix, no `media_type` field, the
+opposite shape from Anthropic's `source: {type: "base64", media_type,
+data}` object — confirmed against the real wire response before
+writing any adapter code, not assumed to match a sibling adapter's
+convention.
+
+**Verified against a real, small, vision-capable local model:** `ollama
+pull moondream` (~1.7GB; its own `/api/tags` entry reports
+`"capabilities":["completion","vision"]`, checked directly rather than
+assumed from the model's size class). A genuine solid-red PNG (built
+with Pillow) sent through the real `OllamaProvider.generate()` path —
+not a raw curl shortcut standing in for the actual adapter code — came
+back `"!!!RED!!!"`: the model genuinely read the pixels and identified
+the color, not an echo, not a hallucinated guess. A wrong answer here
+would have been just as informative a result as a right one; this was
+checked, not assumed to pass.
+
+`moondream:latest` is now a second registered `ollama/*` entry in
+`models.yaml` (`modalities_in: [text, image]`), gated by the exact same
+`ollama_pulled_models()` per-tag availability check the text model
+already goes through — the router only offers it once that exact tag
+is genuinely pulled, not the instant any Ollama server answers (the
+same real bug fixed for the text-only entry a few milestones back).
+`tool_use: false` on the registry entry, matching what moondream's own
+capabilities list actually declares rather than assumed from
+comparison to larger vision models.
+
+6 new/changed tests in `test_ollama_provider.py` (every pre-existing
+test needed `await` once the translator went async; new coverage for
+single and multiple images, and the images-key omitted when none are
+present) — 458 → 460 Python tests. `ruff check`/`format --check`
+clean. `docs/providers.md` updated with the real verification record.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (named as real, deferred follow-up when native video-in
+shipped — no API key in this environment to verify live against, same
+limitation as the rest of the Google adapter); or a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

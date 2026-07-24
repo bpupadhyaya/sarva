@@ -51,6 +51,27 @@ models:
       max_output: 32768
     cost: { input_per_mtok: 0.0, output_per_mtok: 0.0 }
 
+  - id: ollama/moondream:latest
+    provider: ollama
+    display_name: Moondream (local, vision)
+    local: true
+    capabilities:
+      # A real vision-capable local model, not a hypothetical registry
+      # entry -- OllamaProvider's `images` wire field and this entry
+      # were both verified together against a real running server:
+      # `ollama pull moondream`, then a real image genuinely described
+      # correctly ("a vibrant red square..."), not just accepted
+      # silently. No tool_use: moondream is vision+completion only per
+      # its own real /api/tags capabilities list, confirmed before
+      # writing this, not assumed from its size class.
+      modalities_in: [text, image]
+      modalities_out: [text]
+      tool_use: false
+      thinking: false
+      context_window: 2048
+      max_output: 2048
+    cost: { input_per_mtok: 0.0, output_per_mtok: 0.0 }
+
   - id: mock
     provider: mock
     display_name: Mock Provider (offline, deterministic)

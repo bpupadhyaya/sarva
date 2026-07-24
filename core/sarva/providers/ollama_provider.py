@@ -18,13 +18,15 @@ the full verification record.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
-from sarva.multimodal.content import Message, TextBlock, ToolCallBlock, ToolResultBlock
+from sarva.multimodal.content import ImageBlock, Message, TextBlock, ToolCallBlock, ToolResultBlock
+from sarva.multimodal.fetch import resolve_media_bytes
 from sarva.providers.base import (
     DoneEvent,
     GenerateRequest,
@@ -39,29 +41,37 @@ from sarva.providers.base import (
 _DEFAULT_HOST = "http://localhost:11434"
 
 
-def _to_ollama_message(m: Message) -> dict[str, Any]:
+async def _to_ollama_message(m: Message) -> dict[str, Any]:
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    images: list[str] = []
     for b in m.content:
         if isinstance(b, TextBlock):
             text_parts.append(b.text)
+        elif isinstance(b, ImageBlock):
+            # resolve_media_bytes (not b.resolve_bytes()) so url-sourced
+            # images work too, not just data/path -- see
+            # sarva.multimodal.fetch's module docstring. Ollama's own
+            # `/api/chat` wire format wants raw base64 (no data: URI
+            # prefix, no media_type field) in a per-message `images`
+            # array, confirmed against a real running server with a real
+            # vision-capable model (moondream) before writing this --
+            # not just written to documented shape.
+            image_bytes = await resolve_media_bytes(b)
+            images.append(base64.standard_b64encode(image_bytes).decode())
         elif isinstance(b, ToolCallBlock):
             tool_calls.append({"function": {"name": b.name, "arguments": b.arguments}})
         elif isinstance(b, ToolResultBlock):
             # Ollama has no dedicated tool-result role; render as a tool message.
             text_parts.append("".join(c.text for c in b.content if isinstance(c, TextBlock)))
         else:
-            # A block type this adapter has no translation for at all
-            # (e.g. ImageBlock -- real vision-capable Ollama models do
-            # accept images via a separate `images: [base64, ...]` wire
-            # field this adapter doesn't build yet, real, named, deferred
-            # follow-up, not a silent no-op). Raising here is deliberate,
-            # matching the Anthropic/OpenAI/Google/Foundry adapters'
-            # own guards: silently omitting it would send the request
-            # missing content the caller believes is present, and the
-            # model would answer as if it had read something it never
-            # received -- a materially misleading response, not a
-            # cosmetic gap.
+            # A block type this adapter has no translation for at all.
+            # Raising here is deliberate, matching the
+            # Anthropic/OpenAI/Google/Foundry adapters' own guards:
+            # silently omitting it would send the request missing
+            # content the caller believes is present, and the model
+            # would answer as if it had read something it never received
+            # -- a materially misleading response, not a cosmetic gap.
             raise ValueError(
                 f"OllamaProvider cannot translate a {type(b).__name__!r} content block "
                 "(no wire-format mapping exists for it yet)"
@@ -69,6 +79,8 @@ def _to_ollama_message(m: Message) -> dict[str, Any]:
     out: dict[str, Any] = {"role": m.role, "content": "".join(text_parts)}
     if tool_calls:
         out["tool_calls"] = tool_calls
+    if images:
+        out["images"] = images
     return out
 
 
@@ -86,11 +98,12 @@ class OllamaProvider:
         self._client = client or httpx.AsyncClient(timeout=120.0)
 
     async def generate(self, request: GenerateRequest) -> AsyncIterator[ProviderEvent]:
+        messages = [await _to_ollama_message(m) for m in request.messages]
         payload: dict[str, Any] = {
             "model": _strip_local_prefix(request.model),
             "messages": (
                 ([{"role": "system", "content": request.system}] if request.system else [])
-                + [_to_ollama_message(m) for m in request.messages]
+                + messages
             ),
             "stream": True,
         }

@@ -152,10 +152,36 @@ an `ImageBlock` (or any other block type this adapter has no wire
 mapping for) was silently skipped, the model answering as if it had
 never received it. Fixed to raise the same loud `ValueError` the
 Anthropic/OpenAI/Google/Foundry adapters already do for exactly this
-case. Real vision-capable Ollama models do accept images via a
-separate `images: [base64, ...]` wire field this adapter doesn't build
-yet — named directly as real, deferred follow-up, not silently
-assumed unreachable.
+case.
+
+### Ollama vision — the named follow-up, closed and verified against a real local vision model
+
+The gap named directly above ("real vision-capable Ollama models do
+accept images... this adapter doesn't build yet") stayed open for
+exactly one more milestone. `_to_ollama_message` is now `async` (like
+the Anthropic/Google translators) so it can call the same
+`resolve_media_bytes` they use — an `ImageBlock` becomes a raw base64
+string (no `data:` URI prefix, no `media_type` field — Ollama's own
+`/api/chat` shape) appended to a per-message `images` array.
+
+**Verified against a real pulled vision model, not just the documented
+wire shape:** `ollama pull moondream` (~1.7GB, real, small,
+vision-capable — confirmed via its own `/api/tags` entry reporting
+`"capabilities":["completion","vision"]` before writing any code), then
+a real solid-red PNG built with Pillow sent through the actual
+`OllamaProvider.generate()` path end to end (not a raw curl
+shortcut) — the model's real reply: `"!!!RED!!!"`, genuinely identifying
+the color from real pixel data, not an echo or a hallucinated guess (a
+wrong color, or a refusal, would have been just as informative a
+result — this was checked, not assumed). `moondream:latest` is now a
+second registered `ollama/*` entry in `models.yaml`
+(`modalities_in: [text, image]`, `tool_use: false` — matching what its
+own capabilities list actually declares, not assumed from its size
+class), so the router can genuinely pick it for an image-carrying
+request once it's actually pulled, the same `ollama_pulled_models()`
+exact-tag-match gate the text model already goes through. 6 new/changed
+tests (the file's existing tests all needed `await` once the
+translator went async), 458 → 460 Python tests.
 
 ## The model registry: adding a model is a YAML edit, not a code change
 
