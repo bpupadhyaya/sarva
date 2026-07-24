@@ -5,7 +5,16 @@ was nowhere for a pasted key to actually go)."""
 
 from __future__ import annotations
 
+import stat
+import sys
+
+import pytest
 from sarva.config import get_env, load_config, save_config
+
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.chmod's real per-user isolation is POSIX-only -- see sarva.config's docstring",
+)
 
 
 def test_load_config_on_a_missing_file_returns_empty_not_a_crash(tmp_path):
@@ -28,6 +37,35 @@ def test_save_config_merges_rather_than_overwriting_other_keys(tmp_path):
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "OPENAI_API_KEY": "sk-oai-test",
     }
+
+
+@_posix_only
+def test_save_config_writes_the_file_with_owner_only_permissions(tmp_path):
+    # The real gap this pins: Path.write_text's default open() mode
+    # (0666, reduced by the process umask) left this file world-readable
+    # -- confirmed with a real stat() call against an actual saved file
+    # before writing this fix, not assumed from reading the stdlib docs.
+    path = tmp_path / "config.json"
+    save_config({"ANTHROPIC_API_KEY": "sk-ant-test"}, path=path)
+
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600
+
+
+@_posix_only
+def test_save_config_tightens_permissions_on_a_file_that_already_existed_insecurely(tmp_path):
+    # os.open's mode argument only applies when it actually creates a
+    # new file -- a config.json written by a version of this module
+    # predating this fix (or by anything else) must still get tightened
+    # on the next save, not stay exposed forever.
+    path = tmp_path / "config.json"
+    path.write_text("{}")
+    path.chmod(0o644)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644  # sanity: the insecure state is real
+
+    save_config({"ANTHROPIC_API_KEY": "sk-ant-test"}, path=path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_save_config_creates_the_parent_directory(tmp_path):

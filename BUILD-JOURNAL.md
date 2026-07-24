@@ -4829,3 +4829,75 @@ be a real design decision (how it should interact with a future
 subagent-fan-out feature this project's own docs already name as
 unbuilt), not a mechanical wire-up, so it's named here rather than
 guessed at.
+
+## `~/.sarva/config.json` was world-readable — a real credential-exposure gap, not a hypothetical one
+
+Stepped back to security-audit a different piece of the stack after
+the last two milestones' feature work — the same discipline that found
+the WebFetchTool/multimodal-fetch SSRF gaps earlier this session:
+after fixing one kind of issue, check adjacent code for the same class
+of problem, and periodically re-audit rather than only reacting to
+what a feature milestone happens to touch. `sarva.config.save_config`
+is the one place in this codebase that writes real, plaintext provider
+API keys (Anthropic/OpenAI/Gemini) to disk, at `~/.sarva/config.json`.
+
+**Confirmed with a real `stat()` call, not assumed from reading
+`pathlib` docs:** `path.write_text(...)`'s default `open()` mode
+(`0666`, reduced by the process umask) left a real saved config file
+at `0o644` on this machine's real umask (`022`) — world-readable. On
+any shared machine — a real, plausible case for this project's own
+"free for everyone" audience, not a contrived scenario: shared dev
+servers, university/lab machines, CI runners with a persistent home
+directory — any other local user could read another user's API keys
+straight off disk with a plain `cat`.
+
+**Fixed at the point of creation, not with a chmod bolted on after a
+gap already existed:** `os.open(path, os.O_WRONLY | os.O_CREAT |
+os.O_TRUNC, 0o600)` creates the file with owner-only permissions from
+the instant it exists — no create-then-chmod race window where a
+narrower `os.chmod()` call after `write_text` would have left it
+briefly world-readable. `os.chmod(path, 0o600)` also runs unconditionally
+afterward, since `os.open`'s mode argument only applies when it
+actually creates a *new* file — a `config.json` written by a version of
+this module predating this fix needs tightening too, and now
+self-heals on its very next save rather than staying exposed forever
+(a real scenario tested directly: a file manually created at `0o644`,
+then `save_config` called again, confirmed `0o600` afterward).
+
+**Verified beyond the unit tests:** drove the real `POST /config`
+server endpoint through a genuine `TestClient` request (not calling
+`save_config` directly) and confirmed the file it actually wrote came
+out `0o600` on the real filesystem, proving the fix reaches through
+the actual call path a browser client uses, not just the function in
+isolation.
+
+**Honestly platform-scoped, the same discipline `sarva.audio`'s Windows
+TTS entry already established:** this is a real, meaningful boundary on
+POSIX (macOS/Linux — confirmed against actual mode bits, and where this
+dev environment and CI's `core` job both run) — on Windows, `os.chmod`'s
+real effect is limited to toggling the read-only attribute, not genuine
+per-user ACL isolation. True multi-user protection on Windows would
+need the separate Windows ACL APIs — real, deferred, named directly
+rather than silently assumed equivalent to the POSIX fix. The two new
+POSIX-only tests are explicitly skipped on Windows rather than
+asserting something the platform doesn't actually guarantee.
+
+2 new tests, 465 → 467 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred); Windows ACL-based protection for `config.json` (named just
+above, real separate work); or MCP-over-the-network — the server has
+no equivalent to `sarva run --mcp-server` at all, but wiring a
+client-supplied MCP server (especially a stdio command to spawn) into
+a network-facing WebSocket endpoint is a real remote-code-execution
+surface unlike anything else in this codebase, a genuine security
+design decision rather than a mechanical port of the CLI flag —
+deliberately not attempted autonomously this session, named here so
+it isn't silently forgotten either.

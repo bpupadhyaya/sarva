@@ -156,6 +156,19 @@ SDK constructors' own (config-file-blind) `os.environ` auto-detection —
 verified directly by checking the constructed client's own `.api_key`
 attribute, not just that `build_providers()` doesn't crash.
 
+**A real gap found later, by checking an actual saved file's mode bits
+rather than assuming `write_text` was fine:** `~/.sarva/config.json`
+holds plaintext provider API keys, but was being written with whatever
+the platform default happened to be — `0644` on this machine's real
+umask, world-readable. `save_config` now creates the file via
+`os.open(..., 0o600)` directly (no create-then-chmod window where it's
+briefly exposed) and `chmod`s it explicitly afterward too, so a file an
+older version already wrote insecurely gets tightened on the very next
+save. Real and meaningful on POSIX (macOS/Linux); on Windows,
+`os.chmod` only toggles the read-only attribute, not genuine per-user
+ACL isolation — named honestly as a real, separate, deferred gap rather
+than assumed equivalent.
+
 `Onboarding.tsx` is the screen this makes possible: on mount it polls
 `GET /doctor`; if any provider (including a reachable Ollama) is already
 configured, it completes immediately and the user never sees it. If

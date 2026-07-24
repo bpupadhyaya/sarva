@@ -1,5 +1,27 @@
 """sarva.config — a real, persistent config file for provider API keys.
 
+**Written with owner-only (0600) permissions, not the platform default.**
+A real, checked gap found by inspecting an actual saved file's mode
+bits, not assumed: `Path.write_text`'s default `open()` mode (0666,
+reduced by the process umask) left `~/.sarva/config.json` at 0644 on
+this machine's real umask (022) -- world-readable, for a file whose
+entire purpose is holding plaintext Anthropic/OpenAI/Gemini API keys.
+On any shared machine (a real, common case this project's own "free
+for everyone" audience includes -- shared dev servers, lab machines,
+CI runners with persistent home directories), any other local user
+could read another user's credentials straight off disk. `save_config`
+now creates the file via `os.open(..., 0o600)` directly (no
+create-then-chmod race window where it's briefly world-readable) and
+`os.chmod`s it explicitly afterward too, so a file an older version of
+this module already created insecurely gets tightened on the very next
+save rather than staying exposed forever. **Honestly platform-scoped:**
+this is a real, meaningful boundary on POSIX (macOS/Linux, verified
+against actual `stat()` mode bits); on Windows, `os.chmod`'s real
+effect is limited to toggling the read-only attribute, not genuine
+per-user ACL isolation -- true multi-user protection there would need
+the Windows ACL APIs, real, separate, deferred work rather than
+silently assumed equivalent to the POSIX fix.
+
 Closes a gap the desktop app's own promised first-run flow depends on:
 the design doc's own T4 definition of done and the README's own
 quickstart text both promise a guided first run that offers "paste an
@@ -51,12 +73,21 @@ def load_config(path: Path | None = None) -> dict[str, str]:
 def save_config(values: dict[str, str], path: Path | None = None) -> None:
     """Merges `values` into whatever's already saved (a caller setting
     only `ANTHROPIC_API_KEY` doesn't wipe out a previously saved
-    `OPENAI_API_KEY`), then writes the whole file back."""
+    `OPENAI_API_KEY`), then writes the whole file back with owner-only
+    permissions -- see this module's own docstring for why."""
     path = path or DEFAULT_CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = load_config(path)
     existing.update(values)
-    path.write_text(json.dumps(existing, indent=2))
+    content = json.dumps(existing, indent=2)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    # Covers the case where `path` already existed with looser
+    # permissions (e.g. written by a version of this module predating
+    # this fix) -- os.open's mode argument only applies when it actually
+    # creates a new file, not to a pre-existing one.
+    os.chmod(path, 0o600)
 
 
 def get_env(name: str, path: Path | None = None) -> str | None:
