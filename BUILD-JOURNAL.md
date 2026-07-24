@@ -4617,3 +4617,39 @@ correctness risk); F1's real distributed training infrastructure
 first pass at code-signing/notarization for the desktop release
 bundles (needs a real signing identity this environment doesn't have —
 likely stays deferred).
+
+## The `windows-audio` job's first real run, and a `uv sync --package` bug it caught immediately
+
+The very first push of the `windows-audio` job (previous entry) failed
+before a single Python test ran: `uv sync --package sarva --group dev`
+errored with `Group `dev` is not defined in the project's
+dependency-groups table`. Reproduced locally first, not assumed to be
+CI-only flakiness — the identical command fails the same way on this
+macOS dev machine. Root cause: constraining `uv sync` to one workspace
+member (`--package sarva`) stops it from resolving a dependency group
+declared in the *workspace root* `pyproject.toml` rather than that
+member's own — `dev` lives only at the root. Fixed by building the
+venv manually (`uv venv` + `uv pip install -e core "pytest>=8.0"
+"pytest-asyncio>=0.24"`) instead of `uv sync`, which both sidesteps the
+group-resolution gap and avoids pulling in `torch`/foundry this job
+never needed. Caught a second, unrelated real issue while debugging:
+the committed `uv.lock`'s `provides-extras` for `sarva` was missing
+`"audio"` even though `core/pyproject.toml` has declared it as a real
+extra for a while — a plain `uv sync --all-extras` regenerates the
+lockfile correctly; fixed in the same commit.
+
+**The re-run is the actual point of this job, and it delivered a real
+answer:** on genuine Windows (a `windows-latest` GitHub Actions
+runner), `test_synthesize_produces_real_nonempty_wav_bytes` and the
+generic default-voice regression test both passed on the first try —
+unlike macOS `say`, SAPI's own default voice did *not* reproduce the
+near-silent-output bug that made `synthesize()` pass an explicit voice
+for the `say` branch. Genuinely determined by running the real code on
+real Windows, not inferred from documentation or assumed safe by
+analogy — this project's "verify, don't assume" discipline applied to
+its own prior finding, which could easily have turned out differently.
+The injection-safety test
+(`test_windows_branch_never_puts_raw_text_on_the_command_line`) passed
+on real Windows too, not just the hermetic macOS run that first proved
+the property. Full CI run genuinely green: `web`, `desktop` (all three
+OSes), `docs`, `core`, and `windows-audio`, commit `53e3b1e`.
