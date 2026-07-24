@@ -4425,6 +4425,24 @@ regression test). 446 → 447 Python tests. `ruff check`/`format
 the exploit itself, and the honest re-verification of the published
 numbers.
 
+## `sarva --version` — a small, real, genuinely missing convenience
+
+Noticed while poking at `sarva --help`'s own output for something
+unrelated: no `--version` flag existed at all, not even as a stub —
+`typer`'s default top-level options were just `--install-completion`/
+`--show-completion`/`--help`. A real gap for a real CLI tool; anyone
+reporting an issue or checking what they have installed would
+reasonably reach for it first. Added a top-level `@app.callback()`
+with an eager `--version` option that prints
+`importlib.metadata.version("sarva")` (the real installed package
+version, not a hardcoded string that could drift from `pyproject.toml`)
+and exits before any subcommand logic runs. Verified for real:
+`sarva --version` prints `sarva 0.1.0.dev0`, exit code 0; `sarva --help`
+and every existing command still work unchanged.
+
+1 new test, 447 → 448 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated.
+
 **Next:** batching multiple concurrent inference requests (§3.6f), F1's
 real distributed training infrastructure (needs real multi-node compute
 this environment doesn't have), a Windows TTS engine (genuinely

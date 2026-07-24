@@ -39,6 +39,28 @@ _build_router = build_router
 _build_providers = build_providers
 
 
+def _version_callback(show_version: bool) -> None:
+    if not show_version:
+        return
+    from importlib.metadata import version
+
+    console.print(f"sarva {version('sarva')}")
+    raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the installed sarva version and exit.",
+    ),
+) -> None:
+    pass
+
+
 def _load_image(path: str) -> ImageBlock:
     media_type, _ = mimetypes.guess_type(path)
     if media_type is None or not media_type.startswith("image/"):

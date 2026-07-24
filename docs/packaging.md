@@ -15,8 +15,11 @@ means or how local providers get detected.
 `sarva chat "hello"` works with no configuration at all — the module's
 own docstring states the design goal directly: "Zero-config by default:
 with no `ANTHROPIC_API_KEY` set, everything routes to the offline
-`MockProvider` so `sarva chat "hello"` always works." Nine commands,
-each doing one thing:
+`MockProvider` so `sarva chat "hello"` always works." `sarva --version`
+prints the real installed version (`importlib.metadata.version("sarva")`)
+and exits — a genuinely common convenience that had no code path here
+at all until it was noticed missing while poking at the CLI's own
+`--help` output. Nine commands, each doing one thing:
 
 - **`chat MESSAGE [--image PATH] [--session NAME]`** — one-shot,
   tool-free, single-turn (`AgentLoop(tools=[], confirm=always_allow)`).

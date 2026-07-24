@@ -226,3 +226,12 @@ def test_speak_fails_cleanly_with_no_engine_available(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "no local text-to-speech engine detected" in result.stdout
     assert not (tmp_path / "out.wav").exists()
+
+
+def test_version_flag_prints_the_real_installed_version_and_exits():
+    from importlib.metadata import version
+
+    result = runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert f"sarva {version('sarva')}" in result.stdout
