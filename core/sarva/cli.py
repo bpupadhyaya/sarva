@@ -68,6 +68,20 @@ def _load_image(path: str) -> ImageBlock:
     return ImageBlock(media_type=media_type, data=Path(path).read_bytes())
 
 
+def _parse_mcp_headers(values: list[str]) -> dict[str, str]:
+    # Reject rather than silently skip a malformed entry -- the same
+    # "don't guess" discipline session-name validation already applies:
+    # a header a user thought they sent but got silently dropped (e.g. a
+    # missing ':') is a much worse failure mode than an immediate error.
+    headers: dict[str, str] = {}
+    for value in values:
+        if ":" not in value:
+            raise typer.BadParameter(f"invalid --mcp-header {value!r} -- expected 'Name: Value'")
+        name, _, header_value = value.partition(":")
+        headers[name.strip()] = header_value.strip()
+    return headers
+
+
 @app.command()
 def chat(
     message: str = typer.Argument(..., help="Message to send."),
@@ -145,9 +159,21 @@ def run(
         "URL connects over Streamable HTTP instead, e.g. "
         "--mcp-server https://example.com/mcp.",
     ),
+    mcp_header: list[str] = typer.Option(
+        [],
+        "--mcp-header",
+        help="HTTP header to send to every http(s):// --mcp-server in this run "
+        '(repeatable), "Name: Value" -- e.g. --mcp-header "Authorization: Bearer '
+        'sk-...". Most real MCP deployments need one of these for auth; '
+        "connect_http_mcp_server() has always accepted headers, this is what "
+        "actually threads one through from the command line. Applies to every "
+        "HTTP server in this invocation alike, not per-server -- a real, named "
+        "limit for the (rare) case of multiple HTTP servers needing different "
+        "auth in one run.",
+    ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
-    asyncio.run(_run(task, workdir, image, auto, session, mcp_server))
+    asyncio.run(_run(task, workdir, image, auto, session, mcp_server, mcp_header))
 
 
 async def _confirm_prompt(call: Any) -> bool:
@@ -161,17 +187,21 @@ async def _run(
     auto: bool,
     session: str | None,
     mcp_servers: list[str],
+    mcp_headers: list[str],
 ) -> None:
     store = SessionStore()
     history = store.load(session) if session else []
     extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
     confirm = always_allow if auto else _confirm_prompt
+    headers = _parse_mcp_headers(mcp_headers)
 
     async with AsyncExitStack() as stack:
         tools: list[Tool] = list(BUILTIN_TOOLS)
         for server_cmd in mcp_servers:
             if server_cmd.startswith(("http://", "https://")):
-                mcp_session = await stack.enter_async_context(connect_http_mcp_server(server_cmd))
+                mcp_session = await stack.enter_async_context(
+                    connect_http_mcp_server(server_cmd, headers=headers or None)
+                )
             else:
                 command, *args = shlex.split(server_cmd)
                 mcp_session = await stack.enter_async_context(

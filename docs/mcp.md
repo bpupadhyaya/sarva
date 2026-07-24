@@ -73,6 +73,12 @@ sarva run "list the files in /tmp" \
 
 # An http:// or https:// value connects over Streamable HTTP instead:
 sarva run "..." --mcp-server https://example.com/mcp --auto
+
+# Most real HTTP MCP deployments need auth -- connect_http_mcp_server()
+# has always accepted a headers dict, but nothing threaded one through
+# from the command line until --mcp-header closed that gap:
+sarva run "..." --mcp-server https://example.com/mcp \
+    --mcp-header "Authorization: Bearer sk-..." --auto
 ```
 
 `--mcp-server` is repeatable, and each value is dispatched by shape —
@@ -83,6 +89,14 @@ startup and merged into the same tool registry as the built-ins
 (`read_file`, `write_file`, `remember`, `recall_memory`, ...); the model
 sees one flat set of tools, with no way to tell which ones came from
 where or which transport carried them.
+
+`--mcp-header` (also repeatable, `"Name: Value"`) applies to every
+`http(s)://` `--mcp-server` in the same invocation alike — a real,
+named limit, not silently glossed over: the (rare) case of two HTTP
+servers in one run needing different auth isn't supported. Malformed
+entries (no `:`) fail immediately with a clear error rather than being
+silently dropped, the same "reject, don't guess" discipline session-name
+validation already applies elsewhere in this file.
 
 ## Content conversion, honestly scoped
 

@@ -4974,3 +4974,58 @@ deferred); Windows ACL-based protection for `config.json`/`sessions/`/
 `memory.db` (named, real, separate work); or MCP-over-the-network
 (named, deliberately not attempted — a real remote-code-execution
 design question, not a mechanical port; see the previous entry).
+
+## `--mcp-header` — the one thing HTTP MCP servers usually need that the CLI never actually let through
+
+`connect_http_mcp_server()`'s own docstring has said since it shipped:
+"`headers` is the one thing an HTTP server usually needs that a local
+stdio subprocess doesn't — most real deployments put an auth token
+there... left entirely to the caller." True at the library level, but
+checking `cli.py`'s `_run` found the real gap: `sarva run`'s
+`--mcp-server` handling called `connect_http_mcp_server(server_cmd)`
+with no `headers` argument at all — the exact "fully built and tested
+at the library level, completely unreachable by any real user through
+the CLI" shape this project has found and fixed before (MCP's own HTTP
+transport, `sarva doctor`, `/ws/chat`'s image support, `sarva run
+--image`). Any real MCP server requiring auth — the common case for a
+network-reachable deployment, not an edge case — was simply
+unusable from `sarva run`.
+
+Closed with a new repeatable `--mcp-header "Name: Value"` option,
+parsed by `_parse_mcp_headers` into the same `dict[str, str]`
+`connect_http_mcp_server` has always accepted, applied to every
+`http(s)://` `--mcp-server` in one invocation. **Honestly scoped, not
+silently limited:** one shared header set per run, not per-server —
+named directly in the `--help` text and the docs rather than pretended
+away; the rare case of two HTTP servers needing different auth in one
+run genuinely isn't supported. Malformed entries (missing `:`) raise
+immediately (`typer.BadParameter`) instead of being silently dropped —
+a header a user believed they sent but got silently ignored would be
+a much worse failure than an upfront error, the same discipline
+session-name validation already applies.
+
+**Verified two ways:** a hermetic CLI test monkeypatches
+`connect_http_mcp_server` itself and confirms the exact parsed headers
+dict reaches it (proving the wiring, not re-proving the already-tested
+library behavior); and a real end-to-end run against the actual HTTP
+MCP fixture server (`tests/fixtures/mcp_http_echo_server.py`, launched
+as a genuine subprocess) with `--mcp-header` supplied completed
+cleanly, listing the server's real tools (`echo, fail`) — the same
+verification depth `test_connect_http_mcp_server_passes_through_
+custom_headers` already established for the library-level call.
+
+7 new tests (3 for `_parse_mcp_headers` in isolation, 1 for the CLI
+wiring), 472 → 476 Python tests. `ruff check`/`format --check` clean.
+`docs/mcp.md` updated with the new flag and its honest limit.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred); Windows ACL-based protection for the three files under
+`~/.sarva/` now chmod'd POSIX-only; or MCP-over-the-network on the
+server side (named, deliberately not attempted — a real
+remote-code-execution design question, not a mechanical port).

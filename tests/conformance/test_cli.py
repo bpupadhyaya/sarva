@@ -11,12 +11,14 @@ provider only), the same "always works with no API keys" guarantee
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 
 import pytest
+import sarva.cli as cli_module
 import sarva.memory.session as session_module
 import sarva.runtime as runtime
 from sarva.audio import tts_engine_available
-from sarva.cli import app
+from sarva.cli import _parse_mcp_headers, app
 from sarva.memory.session import SessionStore
 from typer.testing import CliRunner
 
@@ -106,6 +108,66 @@ def test_run_with_a_valid_image_completes_successfully(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "[mock] received: what's in this image?" in result.stdout
+
+
+def test_parse_mcp_headers_builds_a_dict_from_name_colon_value_strings():
+    assert _parse_mcp_headers(["Authorization: Bearer abc123", "X-Custom:  spaced  "]) == {
+        "Authorization": "Bearer abc123",
+        "X-Custom": "spaced",
+    }
+
+
+def test_parse_mcp_headers_on_an_empty_list_returns_an_empty_dict():
+    assert _parse_mcp_headers([]) == {}
+
+
+def test_parse_mcp_headers_rejects_an_entry_with_no_colon():
+    with pytest.raises(Exception, match="invalid --mcp-header"):
+        _parse_mcp_headers(["not-a-header"])
+
+
+def test_run_mcp_header_actually_reaches_connect_http_mcp_server(monkeypatch, tmp_path):
+    # connect_http_mcp_server() has always accepted a headers dict
+    # (test_mcp_client_http.py's own test proves that at the library
+    # level) -- what was missing, and what this pins, is that
+    # --mcp-header on the CLI actually gets parsed and threaded through
+    # to that call, not just accepted and silently dropped.
+    _clear_provider_env(monkeypatch)
+    captured = {}
+
+    class _FakeSession:
+        async def list_tools(self):
+            class _Result:
+                tools = []
+
+            return _Result()
+
+    @asynccontextmanager
+    async def fake_connect_http_mcp_server(url, headers=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        yield _FakeSession()
+
+    monkeypatch.setattr(cli_module, "connect_http_mcp_server", fake_connect_http_mcp_server)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "do something",
+            "--workdir",
+            str(tmp_path),
+            "--mcp-server",
+            "https://example.invalid/mcp",
+            "--mcp-header",
+            "Authorization: Bearer test-token",
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["url"] == "https://example.invalid/mcp"
+    assert captured["headers"] == {"Authorization": "Bearer test-token"}
 
 
 def test_run_with_mock_provider_completes_with_no_tool_calls(monkeypatch, tmp_path):
