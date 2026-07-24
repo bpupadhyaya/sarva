@@ -102,11 +102,23 @@ jobs:
       - name: Install Python
         run: uv python install 3.12
 
-      - name: Sync core package only (no torch/foundry needed for this job)
-        run: uv sync --package sarva --group dev
+      - name: Install sarva core + pytest into a fresh venv (no torch/foundry needed for this job)
+        # `uv sync --package sarva --group dev` was the first attempt here
+        # and fails with "Group `dev` is not defined in the project's
+        # dependency-groups table" -- confirmed by reproducing it locally,
+        # not just in CI: constraining `sync` to one workspace member
+        # apparently stops it from resolving the `dev` group declared in
+        # the *workspace root* pyproject.toml. `uv pip install` into a
+        # venv built by hand sidesteps this entirely and pulls in only
+        # what this job actually needs.
+        shell: bash
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/Scripts/python.exe -e core "pytest>=8.0" "pytest-asyncio>=0.24"
 
       - name: Test the Windows TTS branch for real
-        run: uv run pytest tests/conformance/test_audio.py -v
+        shell: bash
+        run: .venv/Scripts/python.exe -m pytest tests/conformance/test_audio.py -v
 
   web:
     runs-on: macos-latest
