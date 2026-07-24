@@ -70,6 +70,23 @@ def _load_image(path: str) -> ImageBlock:
     return ImageBlock(media_type=media_type, data=Path(path).read_bytes())
 
 
+def _load_session_history(store: SessionStore, session: str | None) -> list[Message]:
+    # A real bug found by actually running `sarva chat --session "bad
+    # name!"`: SessionStore._sanitize() raises a plain ValueError for any
+    # name outside [A-Za-z0-9_-], and neither chat nor run caught it --
+    # a raw Python traceback instead of a clean, actionable message, the
+    # same "unhandled exception where a clean error belongs" bug class
+    # already fixed for eval/distill's --model. `sessions clear` gets the
+    # identical treatment at its own call site below.
+    if not session:
+        return []
+    try:
+        return store.load(session)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
+
+
 def _parse_mcp_headers(values: list[str]) -> dict[str, str]:
     # Reject rather than silently skip a malformed entry -- the same
     # "don't guess" discipline session-name validation already applies:
@@ -110,7 +127,7 @@ def chat(
 
 async def _chat(message: str, image: Path | None, model: str | None, session: str | None) -> None:
     store = SessionStore()
-    history = store.load(session) if session else []
+    history = _load_session_history(store, session)
     extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
 
     loop = AgentLoop(
@@ -234,7 +251,7 @@ async def _run(
     mcp_headers: list[str],
 ) -> None:
     store = SessionStore()
-    history = store.load(session) if session else []
+    history = _load_session_history(store, session)
     extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
     confirm = always_allow if auto else _confirm_prompt
     headers = _parse_mcp_headers(mcp_headers)
@@ -456,7 +473,11 @@ def sessions_list() -> None:
 @sessions_app.command("clear")
 def sessions_clear(name: str = typer.Argument(..., help="Session name to delete.")) -> None:
     """Delete a saved session."""
-    SessionStore().clear(name)
+    try:
+        SessionStore().clear(name)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     console.print(f"cleared session {name!r}")
 
 

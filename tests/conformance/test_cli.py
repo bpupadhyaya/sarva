@@ -76,6 +76,49 @@ def test_chat_with_session_persists_the_transcript(monkeypatch, tmp_path):
     assert saved[0].text() == "remember this"
 
 
+def test_chat_with_an_invalid_session_name_fails_cleanly_instead_of_a_raw_traceback(
+    monkeypatch, tmp_path
+):
+    # A real bug found by actually running `sarva chat --session "bad
+    # name!"`: SessionStore._sanitize() raises a plain ValueError for
+    # any name outside [A-Za-z0-9_-], and _chat never caught it -- a
+    # raw Python traceback and exit 1, the same "unhandled exception
+    # where a clean error belongs" bug class already fixed for
+    # eval/distill's --model.
+    _clear_provider_env(monkeypatch)
+    _isolate_sessions(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["chat", "hi", "--session", "bad name!"])
+
+    assert result.exit_code != 0
+    assert "invalid session name" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_run_with_an_invalid_session_name_fails_cleanly_instead_of_a_raw_traceback(
+    monkeypatch, tmp_path
+):
+    _clear_provider_env(monkeypatch)
+    _isolate_sessions(monkeypatch, tmp_path)
+
+    result = runner.invoke(
+        app, ["run", "hi", "--workdir", str(tmp_path), "--session", "bad name!", "--auto"]
+    )
+
+    assert result.exit_code != 0
+    assert "invalid session name" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_sessions_clear_with_an_invalid_name_fails_cleanly(monkeypatch, tmp_path):
+    _isolate_sessions(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["sessions", "clear", "bad name!"])
+
+    assert result.exit_code != 0
+    assert "invalid session name" in result.stdout
+
+
 def test_chat_with_model_forces_that_exact_model(monkeypatch):
     _clear_provider_env(monkeypatch)
 

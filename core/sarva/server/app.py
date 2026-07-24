@@ -26,7 +26,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from sarva.agent.budget import Spend
-from sarva.agent.events import AgentState
+from sarva.agent.events import AgentState, RunDoneEvent, StateChangedEvent
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
 from sarva.config import save_config
@@ -102,7 +102,20 @@ def create_app() -> FastAPI:
     @app.post("/chat", response_model=ChatResponse)
     async def chat(req: ChatRequest) -> ChatResponse:
         store = SessionStore()
-        history = store.load(req.session) if req.session else []
+        try:
+            history = store.load(req.session) if req.session else []
+        except ValueError as e:
+            # A real bug found by actually sending {"session": "bad
+            # name!"}: SessionStore._sanitize() raises a plain ValueError
+            # for any name outside [A-Za-z0-9_-], and nothing here caught
+            # it -- a genuine unhandled 500, not a clean failure, the
+            # exact "raw traceback instead of a clean message" bug class
+            # already fixed for eval/distill's --model. Reported the same
+            # way an unknown --model already is: a real ChatResponse with
+            # state=failed and the actual reason in `detail`, not a
+            # differently-shaped HTTP error for what's semantically the
+            # same "this request can't run" case.
+            return ChatResponse(state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e))
         extra_content = _extra_content_blocks(req.image_base64, req.image_media_type)
 
         loop = AgentLoop(
@@ -199,7 +212,31 @@ def create_app() -> FastAPI:
                 return bool(reply.get("approved", False))
 
             store = SessionStore()
-            history = store.load(session) if session else []
+            try:
+                history = store.load(session) if session else []
+            except ValueError as e:
+                # The WS counterpart to the same real bug just fixed for
+                # /chat: SessionStore._sanitize() raises a plain
+                # ValueError for an invalid session name, and reaching
+                # this point uncaught didn't even give the client the
+                # REST endpoint's own clean detail message -- it crashed
+                # the whole ASGI call with no frame sent at all, and the
+                # client saw a bare ClosedResourceError, confirmed
+                # directly with a real TestClient WebSocket session
+                # before this fix. Reported as a real state_changed +
+                # run_done pair -- the exact same shape an unknown
+                # --model already produces -- so App.tsx's existing
+                # failure-detail handling (see BUILD-JOURNAL.md) shows it
+                # with no client-side changes needed.
+                await websocket.send_text(
+                    StateChangedEvent(state=AgentState.FAILED, detail=str(e)).model_dump_json()
+                )
+                await websocket.send_text(
+                    RunDoneEvent(
+                        state=AgentState.FAILED, final_message=None, spend=Spend()
+                    ).model_dump_json()
+                )
+                return
 
             loop = AgentLoop(
                 router=build_router(),

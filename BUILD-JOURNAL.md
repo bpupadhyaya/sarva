@@ -5467,3 +5467,56 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## An invalid session name crashed every real caller — CLI, REST, and (worse) a silent WebSocket disconnect
+
+After fixing `eval`/`distill`'s unknown-`--model` crash, checked for
+the same bug class ("a caller-supplied string reaches an internal
+validator with no error handling") anywhere else a real user's input
+reaches one. Found it in `sarva.memory.session._sanitize()`:
+its own `ValueError` (a genuinely good, actionable message) was never
+actually caught at any of its five real call sites. Confirmed
+directly, not assumed: `sarva chat --session "bad name!"`, `sarva run
+... --session "bad name!"`, and `sarva sessions clear "bad name!"` all
+crashed with a raw Python traceback and exit 1; `POST /chat` with
+`{"session": "bad name!"}` returned a genuine unhandled `500` (checked
+with `raise_server_exceptions=False` to see past the test client's own
+re-raising); `/ws/chat` was the worst of the four — the client got
+**no error frame at all**, just a bare `ClosedResourceError` on its
+next read, confirmed with a real `TestClient` WebSocket session before
+this fix.
+
+**Fixed consistently, not four different ad-hoc patches:** a new
+`_load_session_history(store, session)` helper gives `chat` and `run`
+identical clean-failure behavior (`console.print` + `typer.Exit(1)`,
+the same pattern `_require_known_model` already established);
+`sessions clear` gets a direct `try`/`except` at its one call site.
+For the two server endpoints, reported as a real `state=failed` result
+with the actual reason in `detail` — the *identical shape* an unknown
+`--model` already produces on both `/chat` and `/ws/chat` — reusing
+the real `StateChangedEvent`/`RunDoneEvent` types the agent loop itself
+emits, not a bespoke error shape. This means `/ws/chat` clients
+(including the desktop app, via the `state_changed`-detail fix from a
+few milestones back) show the real reason with zero client-side
+changes needed — the exact payoff of having fixed that gap generally
+instead of narrowly for the model case alone.
+
+**Verified live on all four real surfaces, not just the new tests:**
+a real `sarva chat`/`sarva run`/`sarva sessions clear` invocation each
+now print the clean message and exit 1; a real `TestClient` REST call
+returns `{"state": "failed", "detail": "invalid session name: ..."}`
+at `200`, not a `500`; a real WebSocket session receives a proper
+`state_changed` + `run_done` frame pair instead of silently
+disconnecting.
+
+5 new tests (3 CLI, 2 server — REST and WS). 506 → 511 Python tests.
+`ruff check`/`format --check` clean. `docs/memory.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

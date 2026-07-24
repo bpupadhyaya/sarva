@@ -156,6 +156,22 @@ def test_chat_with_an_unknown_model_fails_cleanly_with_a_detail_message(monkeypa
     assert "not-a-real-model" in body["detail"]
 
 
+def test_chat_with_an_invalid_session_name_fails_cleanly_not_a_500(monkeypatch):
+    # A real bug found by actually POSTing {"session": "bad name!"}:
+    # SessionStore._sanitize() raises a plain ValueError, and nothing
+    # here caught it -- a genuine unhandled 500, confirmed directly
+    # with raise_server_exceptions=False before this fix. Reported the
+    # same shape an unknown --model already is.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post("/chat", json={"message": "hi", "session": "bad name!"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert "invalid session name" in body["detail"]
+
+
 def test_chat_with_an_attached_image_reaches_the_provider_as_a_real_image_block(monkeypatch):
     provider = _use_capturing_mock(monkeypatch)
     raw = b"\x89PNG\r\n\x1a\nreal enough bytes for this test"
@@ -276,6 +292,28 @@ def test_websocket_with_an_unknown_model_fails_cleanly_with_a_detail_frame(monke
 
     state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
     assert "not-a-real-model" in state_changed["detail"]
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_an_invalid_session_name_fails_cleanly_not_a_bare_disconnect(monkeypatch):
+    # Before this fix, the client got nothing at all -- not even an
+    # error frame, just a bare ClosedResourceError on the next receive,
+    # confirmed directly with a real WebSocket session. Now reports the
+    # identical state_changed + run_done shape the unknown-model case
+    # above already does.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "session": "bad name!"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert "invalid session name" in state_changed["detail"]
     assert events[-1]["state"] == "failed"
 
 

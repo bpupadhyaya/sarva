@@ -38,6 +38,28 @@ POSIX-only in practice, the same honesty this project already applies
 to the Windows TTS and credential-file gaps — `os.chmod` doesn't give
 real per-user isolation on Windows.
 
+**An invalid `--session`/`session` name used to crash instead of
+failing cleanly.** `_sanitize()`'s own `ValueError` (a genuinely good,
+actionable message — "use only letters, digits, '-', and '_'") was
+never actually caught anywhere it could be reached from a real user
+action: `sarva chat --session "bad name!"`/`sarva run`/`sarva sessions
+clear` all crashed with a raw Python traceback, and both `POST /chat`
+and `/ws/chat` had the identical gap — the REST case a genuine
+unhandled `500`, and the WebSocket case worse still: no error frame at
+all, just a bare `ClosedResourceError` on the client's next read,
+confirmed directly with a real `TestClient` WebSocket session before
+this fix. The same "raw exception instead of a clean, actionable
+error" bug class already fixed for `eval`/`distill`'s unknown `--model`
+handling, just never checked for the one other place a caller-supplied
+string reaches an internal validator. Fixed at every real call site: a
+shared `_load_session_history` helper for `chat`/`run`, a direct
+`try`/`except` in `sessions clear`, and — for the two server
+endpoints — reported as a real `state=failed` result with the actual
+reason in `detail`, the identical shape an unknown `--model` already
+produces, so `/ws/chat` clients (including the desktop app, via the
+`state_changed`-detail fix from a few milestones back) show it with no
+client-side changes needed.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:
