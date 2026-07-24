@@ -489,6 +489,38 @@ def config_show() -> None:
             console.print(f"{name:20s} [dim]not set[/dim]")
 
 
+@config_app.command("unset")
+def config_unset(
+    anthropic_api_key: bool = typer.Option(False, "--anthropic-api-key"),
+    openai_api_key: bool = typer.Option(False, "--openai-api-key"),
+    gemini_api_key: bool = typer.Option(False, "--gemini-api-key"),
+) -> None:
+    """Remove one or more provider API keys from ~/.sarva/config.json --
+    `set`'s missing counterpart. A real environment variable of the same
+    name is never touched (this command only ever edits the saved
+    file); a key that was never saved is silently a no-op, not an
+    error."""
+    from sarva.config import unset_config
+
+    requested = {
+        "ANTHROPIC_API_KEY": anthropic_api_key,
+        "OPENAI_API_KEY": openai_api_key,
+        "GEMINI_API_KEY": gemini_api_key,
+    }
+    names = [name for name, wanted in requested.items() if wanted]
+    if not names:
+        console.print(
+            "[yellow]nothing to remove -- pass at least one of --anthropic-api-key / "
+            "--openai-api-key / --gemini-api-key[/yellow]"
+        )
+        raise typer.Exit(1)
+    removed = unset_config(names)
+    if removed:
+        console.print(f"removed {', '.join(sorted(removed))} from ~/.sarva/config.json")
+    else:
+        console.print("nothing to do -- none of those were saved")
+
+
 @app.command()
 def speak(
     text: str = typer.Argument(..., help="Text to synthesize as speech."),

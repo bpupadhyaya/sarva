@@ -90,6 +90,33 @@ def save_config(values: dict[str, str], path: Path | None = None) -> None:
     os.chmod(path, 0o600)
 
 
+def unset_config(names: list[str], path: Path | None = None) -> list[str]:
+    """Removes `names` from the saved config file, if present -- `set`'s
+    missing counterpart, closed the same milestone `sarva config
+    set`/`show` shipped in rather than left as a real, separate gap: a
+    key saved by mistake, or a user switching back to relying purely on
+    an env var, had no way to actually remove it short of hand-editing
+    or deleting `~/.sarva/config.json` outright (which would also lose
+    every *other* saved key). A name not currently saved is silently a
+    no-op, not an error -- "make sure this key isn't saved" is a
+    reasonable request regardless of whether it happened to be saved in
+    the first place. Returns the names that were actually removed, so a
+    caller (the CLI) can report exactly what changed rather than
+    assuming every requested name was present."""
+    path = path or DEFAULT_CONFIG_PATH
+    existing = load_config(path)
+    removed = [name for name in names if name in existing]
+    for name in removed:
+        del existing[name]
+    if removed:
+        content = json.dumps(existing, indent=2)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.chmod(path, 0o600)
+    return removed
+
+
 def get_env(name: str, path: Path | None = None) -> str | None:
     """What `sarva.runtime` should treat env-var `name` as being set to:
     a real process environment variable if set, else whatever's saved in

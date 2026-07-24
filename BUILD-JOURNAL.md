@@ -5380,3 +5380,51 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## `sarva config unset` — closing the gap `set`/`show` themselves left open
+
+Immediately after shipping `sarva config set`/`show`, checked for the
+CRUD-completeness gap that entry's own shape implied: `sarva.config`
+had `save_config` (create/update) and `load_config`/`get_env` (read),
+but genuinely no delete path at all — a key saved by mistake, or a
+user switching back to relying on a real environment variable, had no
+way to actually remove it short of hand-editing `~/.sarva/config.json`
+or deleting the whole file outright (losing every *other* saved key in
+the process too). New `sarva.config.unset_config(names, path=None)`
+and `sarva config unset [--anthropic-api-key] [--openai-api-key]
+[--gemini-api-key]` close it — `set`'s missing counterpart, added in
+the very next iteration rather than left as a fresh "built, unreachable"
+gap of its own.
+
+**Scoped precisely, not just symmetrically:** a name that was never
+saved is a silent no-op (matching `save_config`'s own "merge, don't
+assume the caller knows current state" philosophy) rather than an
+error; `unset` only ever edits the saved file and never touches a real
+environment variable — a dedicated test confirms `get_env()` still
+resolves to the real env var, unaffected, after `unset` runs.
+`unset_config` reuses the identical `os.open(..., 0o600)`/`os.chmod`
+write path `save_config` already established, verified with its own
+permissions test rather than assumed inherited — editing an existing
+file must not regress it back to a looser mode.
+
+**Verified live, beyond the test suite:** a real `HOME`-scoped run
+saved two keys, `unset` removed one and left the other genuinely
+intact in the file on disk (confirmed by reading it directly, not just
+trusting `config show`'s report), re-running the identical `unset`
+against the now-absent key printed a clean "nothing to do" rather than
+erroring, and `unset` with no flags at all failed cleanly with a
+nonzero exit — the same failure-mode discipline `set` already
+established.
+
+8 new tests (4 at the `sarva.config` module level, 4 through the real
+CLI), 496 → 504 Python tests. `ruff check`/`format --check` clean.
+`docs/packaging.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

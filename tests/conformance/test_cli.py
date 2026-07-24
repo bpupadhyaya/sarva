@@ -449,6 +449,54 @@ def test_config_set_writes_with_owner_only_permissions(monkeypatch, tmp_path):
     assert mode == 0o600
 
 
+def test_config_unset_removes_the_saved_key_and_leaves_others_alone(monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+    runner.invoke(
+        app,
+        ["config", "set", "--anthropic-api-key", "sk-a", "--openai-api-key", "sk-b"],
+    )
+
+    result = runner.invoke(app, ["config", "unset", "--anthropic-api-key"])
+
+    assert result.exit_code == 0
+    assert "removed ANTHROPIC_API_KEY" in result.stdout
+    show = runner.invoke(app, ["config", "show"])
+    assert "ANTHROPIC_API_KEY    not set" in show.stdout
+    assert "OPENAI_API_KEY       set (saved config file)" in show.stdout
+
+
+def test_config_unset_a_key_that_was_never_saved_is_a_clean_no_op(monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["config", "unset", "--gemini-api-key"])
+
+    assert result.exit_code == 0
+    assert "nothing to do" in result.stdout
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_config_unset_never_touches_a_real_environment_variable(monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-env")
+
+    runner.invoke(app, ["config", "unset", "--anthropic-api-key"])
+
+    # unset only ever edits the saved file -- get_env must still resolve
+    # to the real env var exactly as before.
+    from sarva.config import get_env
+
+    assert get_env("ANTHROPIC_API_KEY", path=tmp_path / "config.json") == "sk-from-env"
+
+
+def test_config_unset_with_no_flags_fails_cleanly(monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["config", "unset"])
+
+    assert result.exit_code != 0
+    assert "nothing to remove" in result.stdout
+
+
 @pytest.mark.skipif(not tts_engine_available(), reason="no local TTS engine detected")
 def test_speak_writes_a_real_audio_file(tmp_path):
     out_path = tmp_path / "out.wav"

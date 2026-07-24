@@ -72,18 +72,25 @@ at all until it was noticed missing while poking at the CLI's own
 - **`sessions list`** / **`sessions clear NAME`** — inspect or delete
   persisted chat sessions.
 - **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...]`**
-  / **`config show`** — save provider API keys to `~/.sarva/config.json`
-  from the command line. `sarva.config.save_config`/`get_env` have
-  backed the desktop app's first-run screen (`POST /config`) since it
-  shipped, but a CLI-only user with no desktop app had no way to reach
-  the same persistence at all — another instance of the "fully built,
+  / **`config show`** / **`config unset [--anthropic-api-key] [--openai-api-key] [--gemini-api-key]`**
+  — manage provider API keys in `~/.sarva/config.json` from the command
+  line. `sarva.config.save_config`/`get_env` have backed the desktop
+  app's first-run screen (`POST /config`) since it shipped, but a
+  CLI-only user with no desktop app had no way to reach the same
+  persistence at all — another instance of the "fully built,
   unreachable by a real user" shape this project keeps finding.
   `show` never prints an actual key value, only whether one is set and
   which source won (a real environment variable always beats a saved
   file). `set` reuses `save_config` directly, so it inherits the exact
   same owner-only file permissions the credential-exposure fix already
   established — verified as a real, second caller of that fix, not
-  just the server's own path.
+  just the server's own path. `unset` (new `sarva.config.unset_config`)
+  is `set`'s own missing counterpart, added in the same milestone
+  rather than left as a fresh gap: a key saved by mistake, or a switch
+  back to relying on a real env var, had no way to actually be removed
+  short of hand-editing or deleting the whole file (losing every other
+  saved key too) — a name that was never saved is a silent no-op, and
+  a real environment variable is never touched, only the saved file.
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
 - **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text

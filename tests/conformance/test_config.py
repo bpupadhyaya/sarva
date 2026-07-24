@@ -9,7 +9,7 @@ import stat
 import sys
 
 import pytest
-from sarva.config import get_env, load_config, save_config
+from sarva.config import get_env, load_config, save_config, unset_config
 
 _posix_only = pytest.mark.skipif(
     sys.platform == "win32",
@@ -73,6 +73,45 @@ def test_save_config_creates_the_parent_directory(tmp_path):
     save_config({"ANTHROPIC_API_KEY": "sk-ant-test"}, path=path)
 
     assert path.is_file()
+
+
+def test_unset_config_removes_the_named_key_and_leaves_others(tmp_path):
+    path = tmp_path / "config.json"
+    save_config({"ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-b"}, path=path)
+
+    removed = unset_config(["ANTHROPIC_API_KEY"], path=path)
+
+    assert removed == ["ANTHROPIC_API_KEY"]
+    assert load_config(path) == {"OPENAI_API_KEY": "sk-b"}
+
+
+def test_unset_config_on_a_missing_file_is_a_clean_no_op(tmp_path):
+    path = tmp_path / "does-not-exist.json"
+
+    removed = unset_config(["ANTHROPIC_API_KEY"], path=path)
+
+    assert removed == []
+    assert not path.exists()  # never created just to remove nothing from it
+
+
+def test_unset_config_a_key_that_was_never_saved_is_a_no_op(tmp_path):
+    path = tmp_path / "config.json"
+    save_config({"OPENAI_API_KEY": "sk-b"}, path=path)
+
+    removed = unset_config(["ANTHROPIC_API_KEY"], path=path)
+
+    assert removed == []
+    assert load_config(path) == {"OPENAI_API_KEY": "sk-b"}  # untouched
+
+
+@_posix_only
+def test_unset_config_preserves_owner_only_permissions_after_editing(tmp_path):
+    path = tmp_path / "config.json"
+    save_config({"ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-b"}, path=path)
+
+    unset_config(["ANTHROPIC_API_KEY"], path=path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_get_env_returns_none_when_nothing_is_set(tmp_path, monkeypatch):
