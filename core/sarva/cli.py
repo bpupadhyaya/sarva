@@ -445,10 +445,48 @@ def speak(
     try:
         audio_bytes = synthesize(text, voice=voice)
     except RuntimeError as e:
-        console.print(f"[red]{e}[/red]")
+        # escape(): the same real bug just found and fixed for
+        # transcribe's own error path -- this message has no brackets
+        # today, but nothing stops a future edit from adding one, the
+        # same reason doctor's dynamic detail text is escaped too.
+        console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
     out.write_bytes(audio_bytes)
     console.print(f"wrote {len(audio_bytes)} bytes to {out}")
+
+
+@app.command()
+def transcribe(
+    audio: Path = typer.Argument(..., help="Audio file to transcribe."),
+    model_size: str = typer.Option(
+        "tiny",
+        "--model-size",
+        help="faster-whisper model size (tiny/base/small/medium/large-v3, ...) "
+        "-- bigger means more accurate, slower, and a larger one-time download.",
+    ),
+) -> None:
+    """Local speech-to-text via faster-whisper (the `sarva\\[audio]` extra)
+    -- no API key, no network. `speak`'s reverse: this project had a real
+    TTS command but no STT one, despite `sarva.audio.transcribe()` (used
+    internally by `AudioToTextDegrader`) being fully built and tested the
+    whole time -- the same "built, unreachable by any real user" shape
+    this project keeps finding and closing."""
+    from sarva.audio import transcribe as transcribe_audio
+
+    try:
+        text = transcribe_audio(audio.read_bytes(), model_size=model_size)
+    except ImportError as e:
+        # A real bug caught by this file's own test, not assumed safe:
+        # the real error message contains a literal "sarva[audio]" --
+        # printed unescaped, Rich's markup parser silently swallowed the
+        # "[audio]" part, the identical class of bug `doctor`'s dynamic
+        # detail text was fixed for earlier.
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
+    # The transcript is externally-derived text (real speech, not this
+    # project's own strings) -- never markup-parsed, same discipline
+    # chat/run already apply to model output.
+    console.print(text, markup=False)
 
 
 @app.command()

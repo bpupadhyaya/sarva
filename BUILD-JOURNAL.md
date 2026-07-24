@@ -5215,3 +5215,62 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have — likely stays
 deferred).
+
+## `sarva transcribe` — STT had the same "built, unreachable" gap TTS had, plus a real bracket-swallowing bug caught by its own test
+
+Checked for the STT half of a gap this project already closed once for
+TTS: `sarva.audio.transcribe()` (real `faster-whisper` speech-to-text)
+has backed `AudioToTextDegrader` since local speech first shipped, but
+`sarva --help` had no way to run it directly — `speak` existed,
+nothing mirrored it for the other direction. New `sarva transcribe
+AUDIO_FILE [--model-size tiny]` closes it, deliberately shaped like
+`speak`: read the file, call the one library function, print the
+result.
+
+**A real bug, caught by this command's own test on the first run, not
+shipped:** `sarva.audio.transcribe()`'s real `ImportError` message
+contains a literal `sarva[audio]`; printed through the same
+`console.print(f"[red]{e}[/red]")` pattern `speak` already used, Rich's
+markup parser silently swallowed the `[audio]` — the identical bug
+class `sarva doctor`'s dynamic detail text was fixed for earlier this
+session (`console.print(f"\\[{mark}] {check.name:32s} {escape(check.
+detail)}")`). Confirmed directly by running the new test, not
+theorized: `assert "sarva[audio]" in result.stdout` failed with the
+actual output reading `"...pip install sarva for local speech-to-text"`
+— the brackets and their contents just gone. Fixed with `escape()`
+around the dynamic exception text; `speak`'s own equivalent handler
+(bracket-free today, but a future edit away from the identical bug)
+got the same defensive fix in the same pass, not left as a latent
+landmine now that the bug class was actually found live once.
+
+A second, smaller thing caught immediately by running `--help`, not
+assumed safe: the new command's own docstring contains a literal
+`sarva[audio]` too — Typer's own Rich-based help renderer hit the same
+swallowing bug in a docstring, not just dynamic `console.print` output,
+a rendering path `escape()` can't reach. Fixed with a backslash-escaped
+`sarva\[audio]` in the docstring source, verified by actually reading
+the rendered `--help` output before and after.
+
+**Verified beyond the test suite:** `sarva speak "hello from the sarva
+transcribe command"` piped into a real WAV, then `sarva transcribe`
+on that file, printed back `"Hello from the Sarva Transcribe
+command."` — a real TTS→STT round trip through two real CLI commands,
+not library calls. The transcript itself prints with `markup=False`
+(externally-derived text, the same discipline `chat`/`run` already
+apply to model output — a transcribed "[bracketed]" utterance must
+never be silently mangled either).
+
+4 new tests (a real synthesize→transcribe round trip through the CLI,
+`--model-size` threading, the clean-failure message, and the fixed
+message actually containing `sarva[audio]`), 488 → 491 Python tests.
+`ruff check`/`format --check` clean. `docs/packaging.md` updated
+("Nine commands" → "Ten").
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred).

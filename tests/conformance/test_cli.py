@@ -17,7 +17,7 @@ import pytest
 import sarva.cli as cli_module
 import sarva.memory.session as session_module
 import sarva.runtime as runtime
-from sarva.audio import tts_engine_available
+from sarva.audio import stt_extra_installed, tts_engine_available
 from sarva.cli import _parse_mcp_headers, app
 from sarva.memory.session import SessionStore
 from typer.testing import CliRunner
@@ -366,6 +366,66 @@ def test_speak_fails_cleanly_with_no_engine_available(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "no local text-to-speech engine detected" in result.stdout
     assert not (tmp_path / "out.wav").exists()
+
+
+@pytest.mark.skipif(
+    not (tts_engine_available() and stt_extra_installed()),
+    reason="needs a local TTS engine and sarva[audio] (faster-whisper)",
+)
+def test_transcribe_round_trips_real_synthesized_speech(tmp_path):
+    # The strongest real proof: synthesize real speech via the local TTS
+    # engine, write it to a real file, run it through the actual
+    # `transcribe` command (not sarva.audio.transcribe() called
+    # directly), and check real words come back -- the same round trip
+    # test_audio.py already proves at the library level, now proven
+    # through the CLI surface that didn't exist before this command.
+    from sarva.audio import synthesize
+
+    audio_path = tmp_path / "speech.wav"
+    audio_path.write_bytes(synthesize("the assistant can now hear and speak"))
+
+    result = runner.invoke(app, ["transcribe", str(audio_path)])
+
+    assert result.exit_code == 0
+    lowered = result.stdout.lower()
+    assert "hear" in lowered
+    assert "speak" in lowered
+
+
+@pytest.mark.skipif(not stt_extra_installed(), reason="this test needs sarva[audio] installed")
+def test_transcribe_uses_the_requested_model_size(tmp_path, monkeypatch):
+    # Hermetic proof the --model-size flag actually reaches
+    # sarva.audio.transcribe(), without needing a real audio round trip.
+    import sarva.audio as audio_module
+
+    captured = {}
+
+    def fake_transcribe(audio_bytes, model_size="tiny"):
+        captured["model_size"] = model_size
+        return "fake transcript"
+
+    monkeypatch.setattr(audio_module, "transcribe", fake_transcribe)
+    audio_path = tmp_path / "clip.wav"
+    audio_path.write_bytes(b"not real audio, never decoded by the fake")
+
+    result = runner.invoke(app, ["transcribe", str(audio_path), "--model-size", "base"])
+
+    assert result.exit_code == 0
+    assert "fake transcript" in result.stdout
+    assert captured["model_size"] == "base"
+
+
+def test_transcribe_fails_cleanly_without_the_audio_extra(tmp_path, monkeypatch):
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module, "stt_extra_installed", lambda: False)
+    audio_path = tmp_path / "clip.wav"
+    audio_path.write_bytes(b"irrelevant, never reached")
+
+    result = runner.invoke(app, ["transcribe", str(audio_path)])
+
+    assert result.exit_code == 1
+    assert "sarva[audio]" in result.stdout
 
 
 def test_version_flag_prints_the_real_installed_version_and_exits():

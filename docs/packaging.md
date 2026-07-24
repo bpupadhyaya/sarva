@@ -19,7 +19,7 @@ with no `ANTHROPIC_API_KEY` set, everything routes to the offline
 prints the real installed version (`importlib.metadata.version("sarva")`)
 and exits — a genuinely common convenience that had no code path here
 at all until it was noticed missing while poking at the CLI's own
-`--help` output. Nine commands, each doing one thing:
+`--help` output. Ten commands, each doing one thing:
 
 - **`chat MESSAGE [--image PATH] [--model ID] [--session NAME]`** —
   one-shot, tool-free, single-turn (`AgentLoop(tools=[],
@@ -73,6 +73,14 @@ at all until it was noticed missing while poking at the CLI's own
   persisted chat sessions.
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
+- **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text
+  via `faster-whisper`, `speak`'s reverse. `sarva.audio.transcribe()`
+  has backed `AudioToTextDegrader` since local speech shipped, but
+  nothing ever exposed it as a command a real user could just run —
+  the same "fully built, unreachable by any real user" shape this
+  project keeps finding. Printed with `markup=False` (the transcript is
+  real speech, externally-derived text, not this project's own strings
+  — same discipline `chat`/`run` already apply to model output).
 - **`serve [--host 127.0.0.1] [--port 8000]`** — starts the same server
   described below; its own docstring calls it "the surface a web UI or
   desktop app uses."
@@ -350,6 +358,21 @@ functions this module uses, so they can never drift from what's
 actually available. `sarva speak` is the CLI's own reachable surface
 for TTS — closing the same "fully built but unreachable by any real
 user" gap this project has named and fixed before.
+
+**STT had the identical gap for a while longer:** `sarva.audio.
+transcribe()` backed `AudioToTextDegrader` from the start, but nothing
+exposed it as a command — `sarva transcribe AUDIO_FILE` closes it,
+`speak`'s direct reverse. **A real bug caught by this command's own
+test, not shipped:** the first version's `except ImportError` handler
+printed the real "faster-whisper is not installed -- pip install
+sarva[audio]..." message unescaped — Rich's markup parser silently
+swallowed the literal `[audio]`, the identical class of bug `doctor`'s
+dynamic detail text was fixed for earlier in this same file. Fixed
+with `escape()`, and `speak`'s equivalent (bracket-free today, but
+one edit away from the same bug) got the same defensive fix alongside
+it. Verified live end to end, not just the test suite: a real
+`sarva speak "..."` output piped straight into a real
+`sarva transcribe`, real words back.
 
 **Both non-Windows TTS branches verified against real installed
 binaries, not just documented CLI shapes:** the `say` branch runs
