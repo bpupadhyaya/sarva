@@ -4501,6 +4501,52 @@ in the default run, plus 1 live-only test (a real redirect to a real
 public site) not counted in that default total. `ruff check`/`format
 --check` clean. `docs/agent-loop.md` gained a new section on this fix.
 
+## The SSRF fix's other half: sarva.multimodal.fetch shared the identical gap
+
+`WebFetchTool` wasn't the only real url-fetching code path in this
+codebase — `sarva.multimodal.fetch.fetch_bytes()` (what
+`resolve_media_bytes()` calls for any `url`-sourced `ImageBlock`/
+`DocumentBlock`/etc.) had the exact same unrestricted-fetch shape, and
+it runs even deeper in the pipeline than a tool call: inside provider
+adapters' own message translation, with no tool-confirmation boundary
+at all. Checked directly whether this is reachable through any current
+external/model-controlled input path (no server endpoint or MCP tool
+result constructs a `url`-sourced block from external input today) —
+it isn't, right now. But the type exists specifically to support
+url-sourced media, and leaving this second path unguarded while
+`WebFetchTool` got fixed would be real, avoidable inconsistency the
+moment anything does wire a url-sourced block up to external input.
+
+**Refactored, not duplicated:** moved the SSRF guard
+(`ensure_public_host`, same `ipaddress.is_global` check) into
+`sarva.multimodal.fetch` — the more foundational of the two modules
+(`agent/tools.py` already imports from `multimodal/`, not the other
+way around) — and had `WebFetchTool` import it from there instead of
+keeping its own copy. `fetch_bytes()` gained the same bounded
+per-hop-revalidated redirect loop `WebFetchTool` already has, replacing
+its own `follow_redirects=True`.
+
+**A real test-hygiene issue caught while wiring this in, not shipped:**
+`test_fetch.py`'s own docstring promises "no real network calls, fully
+deterministic," but its existing tests all used `https://example.com/
+...` as a stand-in hostname — and the new SSRF guard does a REAL DNS
+lookup before every fetch, which would have made those tests silently
+dependent on real network/DNS access despite the file's own promise
+otherwise (the same class of "test depends on unstated environment
+assumption" bug this session already found and fixed once, for
+Ollama). Fixed by explicitly monkeypatching `ensure_public_host` to a
+no-op in the handful of pre-existing tests that are about response
+handling, not the guard itself — and writing the new SSRF-guard tests
+against real IP literals instead of hostnames, which need no DNS
+lookup and stay genuinely hermetic. Confirmed hermetic, not just
+patched and hoped: the full 12-test file runs in 0.11 seconds, far too
+fast to include a real DNS round trip.
+
+5 new tests. 452 → 457 Python tests. `ruff check`/`format --check`
+clean. `docs/multimodal.md` and `docs/agent-loop.md` both updated —
+the latter now points at the shared guard's real location instead of
+describing it as `WebFetchTool`-only.
+
 **Next:** batching multiple concurrent inference requests (§3.6f), F1's
 real distributed training infrastructure (needs real multi-node compute
 this environment doesn't have), a Windows TTS engine (genuinely

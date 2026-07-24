@@ -98,6 +98,12 @@ public traffic (a real `https://example.com` fetch, and a real
 `http://github.com` → `https://github.com/` redirect chain) — both
 still work exactly as before.
 
+**The guard itself now lives in `sarva.multimodal.fetch`
+(`ensure_public_host`), not duplicated here** — `resolve_media_bytes()`
+(the multimodal chapter) is the *other* real url-fetching path in this
+codebase, and it shares the identical function so the SSRF guard can
+never drift out of sync between the two.
+
 ## Budgets: exceeding one is a clean stop, not an exception
 
 ```python

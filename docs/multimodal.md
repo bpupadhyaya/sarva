@@ -34,6 +34,18 @@ that handles all three source types uniformly (streaming the download
 with a real byte cap enforced from actual counted bytes, never trusted
 `Content-Length`, and restricted to `http`/`https` schemes only).
 
+`resolve_media_bytes()`'s `url` path shares an SSRF guard
+(`ensure_public_host`) with the agent loop's own `WebFetchTool` — every
+fetch, and every redirect hop, is checked against `ipaddress.is_global`
+before it runs, refusing loopback/private/link-local (which includes
+cloud metadata endpoints) addresses. Not reachable through any current
+input path in this codebase (no server endpoint or MCP tool result
+constructs a `url`-sourced block from external input today, checked
+directly before deciding this was still worth fixing rather than
+skipping), but the type exists specifically to support url-sourced
+media, and leaving this path unguarded while `WebFetchTool` got the fix
+would have been real, avoidable inconsistency.
+
 ## Degradation: never silently drop, or fail loudly instead
 
 `Degrader` is the registry every "this model can't see modality X"
