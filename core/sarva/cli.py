@@ -88,6 +88,13 @@ def chat(
     image: Path | None = typer.Option(
         None, "--image", help="Attach an image file (requires a vision-capable model)."
     ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Force a specific model id (see 'sarva models' for the full list), "
+        "bypassing the router's own default candidate selection entirely. "
+        "Omit to let Sarva pick automatically.",
+    ),
     session: str | None = typer.Option(
         None,
         "--session",
@@ -96,10 +103,10 @@ def chat(
     ),
 ) -> None:
     """One-shot chat — no tools, single turn."""
-    asyncio.run(_chat(message, image, session))
+    asyncio.run(_chat(message, image, model, session))
 
 
-async def _chat(message: str, image: Path | None, session: str | None) -> None:
+async def _chat(message: str, image: Path | None, model: str | None, session: str | None) -> None:
     store = SessionStore()
     history = store.load(session) if session else []
     extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
@@ -112,10 +119,12 @@ async def _chat(message: str, image: Path | None, session: str | None) -> None:
         degraders=default_degraders(),
     )
     final_state = None
+    last_detail: str | None = None
     transcript: list[Message] = []
     async for event in loop.run(
         message,
         history=history,
+        model_override=model,
         extra_content=extra_content,
         transcript_out=transcript,
         session_id=session,
@@ -124,14 +133,23 @@ async def _chat(message: str, image: Path | None, session: str | None) -> None:
         # citations — never markup-parse text that came from the model.
         if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
             console.print(event.event.text, end="", markup=False)
+        elif event.type == "state_changed" and event.detail:
+            last_detail = event.detail
         if event.type == "run_done":
             console.print()
             final_state = event.state
             if event.state != "done":
-                console.print(f"[red]run ended: {event.state}[/red]")
+                _print_run_failure(event.state, last_detail)
 
     if session and final_state == "done":
         store.save(session, transcript)
+    if final_state is not None and final_state != "done":
+        # A failed/interrupted/budget-exceeded run exiting 0 (true before
+        # this fix) meant a script chaining `sarva chat ... || handle_it`
+        # could never detect the failure -- the same instinct behind
+        # surfacing `detail` above: an error nobody can act on isn't
+        # meaningfully different from no error at all.
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -140,6 +158,13 @@ def run(
     workdir: str = typer.Option(".", help="Working directory for file/shell tools."),
     image: Path | None = typer.Option(
         None, "--image", help="Attach an image file (requires a vision-capable model)."
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Force a specific model id (see 'sarva models' for the full list), "
+        "bypassing the router's own default candidate selection entirely. "
+        "Omit to let Sarva pick automatically.",
     ),
     auto: bool = typer.Option(
         False, "--auto", help="Auto-approve destructive tools (no confirmation prompts)."
@@ -173,17 +198,34 @@ def run(
     ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
-    asyncio.run(_run(task, workdir, image, auto, session, mcp_server, mcp_header))
+    asyncio.run(_run(task, workdir, image, model, auto, session, mcp_server, mcp_header))
 
 
 async def _confirm_prompt(call: Any) -> bool:
     return typer.confirm(f"Allow {call.name}({call.arguments})?")
 
 
+def _print_run_failure(state: str, detail: str | None) -> None:
+    # Every non-DONE terminal state carries a StateChangedEvent with a
+    # `detail` message (an unknown --model, a provider crash, ...) that
+    # went completely unsurfaced until now -- only ever visible by
+    # digging through .sarva/runs/<id>/transcript.jsonl by hand. `detail`
+    # can originate from a provider's own raw error text (StreamErrorEvent),
+    # not just this project's own strings -- escape() before rendering,
+    # the same discipline `doctor`'s dynamic detail text already uses,
+    # rather than assuming it can never contain a stray '[' Rich would
+    # try to parse as a markup tag.
+    if detail:
+        console.print(f"[red]run ended: {state} — {escape(detail)}[/red]")
+    else:
+        console.print(f"[red]run ended: {state}[/red]")
+
+
 async def _run(
     task: str,
     workdir: str,
     image: Path | None,
+    model: str | None,
     auto: bool,
     session: str | None,
     mcp_servers: list[str],
@@ -222,10 +264,12 @@ async def _run(
             degraders=default_degraders(),
         )
         final_state = None
+        last_detail: str | None = None
         transcript: list[Message] = []
         async for event in loop.run(
             task,
             history=history,
+            model_override=model,
             extra_content=extra_content,
             transcript_out=transcript,
             session_id=session,
@@ -239,14 +283,18 @@ async def _run(
             elif event.type == "tool_finished":
                 status = "[red]error[/red]" if event.result.is_error else "[green]ok[/green]"
                 console.print(f"  {status}")
+            elif event.type == "state_changed" and event.detail:
+                last_detail = event.detail
             elif event.type == "run_done":
                 console.print()
                 final_state = event.state
                 if event.state != "done":
-                    console.print(f"[red]run ended: {event.state}[/red]")
+                    _print_run_failure(event.state, last_detail)
 
         if session and final_state == "done":
             store.save(session, transcript)
+        if final_state is not None and final_state != "done":
+            raise typer.Exit(code=1)
 
 
 @app.command("models")

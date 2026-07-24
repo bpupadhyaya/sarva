@@ -21,10 +21,11 @@ and exits — a genuinely common convenience that had no code path here
 at all until it was noticed missing while poking at the CLI's own
 `--help` output. Nine commands, each doing one thing:
 
-- **`chat MESSAGE [--image PATH] [--session NAME]`** — one-shot,
-  tool-free, single-turn (`AgentLoop(tools=[], confirm=always_allow)`).
-  The simplest possible entry point, deliberately with no tool access.
-- **`run TASK [--workdir .] [--image PATH] [--auto] [--session NAME] [--mcp-server CMD]...`**
+- **`chat MESSAGE [--image PATH] [--model ID] [--session NAME]`** —
+  one-shot, tool-free, single-turn (`AgentLoop(tools=[],
+  confirm=always_allow)`). The simplest possible entry point,
+  deliberately with no tool access.
+- **`run TASK [--workdir .] [--image PATH] [--model ID] [--auto] [--session NAME] [--mcp-server CMD]... [--mcp-header "Name: Value"]...`**
   — the full agent loop with `BUILTIN_TOOLS` (files, shell) plus any MCP
   servers. `--mcp-server` is repeatable; each value is shell-split and
   connected via `connect_stdio_mcp_server` inside an `AsyncExitStack`
@@ -36,6 +37,21 @@ at all until it was noticed missing while poking at the CLI's own
   `/ws/chat` (`run`'s own server-side mirror) against what it actually
   read from the frame, not what `chat`/`/chat` already supported; see
   BUILD-JOURNAL.md.
+
+  **`--model` closes a gap that predates every one of the above:**
+  `AgentLoop.run(model_override=...)` — bypassing the router's default
+  candidate selection entirely for a caller-named model — has been a
+  real, spec-frozen parameter since T1, but neither `chat` nor `run`
+  ever exposed a way to set it; there was no way to actually pick a
+  model from the CLI at all. Fixed the same way `Router.pick()` was
+  hardened alongside it: an unknown `--model` id is a hard, visible
+  failure (`unknown model 'x' -- see 'sarva models' for the full list`,
+  `run ended: failed — ...`, and — new — a nonzero exit code, so a
+  scripted `sarva chat ... || handle_it` can actually detect it),
+  never a silent substitution for some other model — see
+  `UnknownModelError`'s own docstring in `sarva.providers.registry` for
+  why that distinction needed its own exception type, not just a plain
+  `LookupError`.
 - **`models`** — lists every registry entry with `[x]`/`[ ]` marking
   whether it's currently available (API key present, Ollama reachable,
   a foundry checkpoint discovered — see the providers and foundry

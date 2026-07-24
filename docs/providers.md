@@ -233,6 +233,39 @@ to a working (if unintelligent) offline model rather than a hard
 failure. An explicit `override` bypasses all of this — a caller who
 names a specific model gets exactly that model, no substitution.
 
+**"No substitution" needed its own exception type to actually be
+true.** `override`'s promise depends on a subtle distinction: an
+unknown override must be a hard failure, never something
+`AgentLoop.run()`'s modality-degradation fallback (see the agent-loop
+chapter) could catch and quietly route around. Before this was
+checked directly, `Registry.get()` raised a plain `KeyError` for a
+missing id — and `KeyError` *is* a `LookupError` subclass in Python,
+which is exactly the exception type that fallback catches. An invalid
+`--model` would have been silently swallowed and replaced with
+whatever model the degradation path happened to pick, the opposite of
+what "no substitution" promises. Fixed with `UnknownModelError` — a
+deliberately separate exception, not a `LookupError` subclass — that
+`Router.pick()` raises for an unrecognized override, and that
+`AgentLoop.run()` now catches in its own branch, ahead of (and
+excluded from) the degradation-fallback logic: an immediate `FAILED`
+with a clear `detail` message naming the bad id, every time, with
+`degraders` configured or not.
+
+**This was also the CLI's own last mile:** `model_override` has been a
+real `AgentLoop.run()` parameter since T1, but neither `sarva chat`
+nor `sarva run` ever exposed a way to set it — there was no way to pick
+a model from the command line at all, confirmed by `sarva chat --help`
+showing no `--model` flag before this. Both commands now have one;
+wiring it in surfaced the `UnknownModelError` gap above (a real user
+would hit a typo'd model id immediately, unlike this project's own
+tests, which never exercised `override` with an invalid value before).
+`_chat`/`_run` also now print every `StateChangedEvent.detail` a
+FAILED run carries — previously silently dropped, visible only by
+reading `.sarva/runs/<id>/transcript.jsonl` by hand — and exit nonzero
+on any non-`DONE` terminal state, so a scripted `sarva chat ... ||
+handle_it` can actually detect a failure instead of always seeing exit
+code 0.
+
 ### Honestly named: no fabricated registry entries
 
 `OpenAIProvider` and `GoogleProvider` are both real, complete, tested

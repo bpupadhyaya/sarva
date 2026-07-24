@@ -66,7 +66,7 @@ from sarva.providers.base import (
     StreamErrorEvent,
     ToolSpec,
 )
-from sarva.providers.registry import Router, TaskClass
+from sarva.providers.registry import Router, TaskClass, UnknownModelError
 
 
 def _required_modalities(messages: list[Message]) -> set[Modality]:
@@ -167,16 +167,31 @@ class AgentLoop:
                 needs=_required_modalities(messages),
                 override=model_override,
             )
+        except UnknownModelError as e:
+            # An explicit model_override that doesn't name a real
+            # registered model -- a hard user error, handled completely
+            # separately from the LookupError branch below (no degrader
+            # fallback attempted at all): silently routing to some OTHER
+            # model in place of the one the caller explicitly asked for
+            # by id would be a materially misleading response to a
+            # request that was never ambiguous in the first place.
+            state = AgentState.FAILED
+            yield await emit(StateChangedEvent(state=state, detail=str(e)))
+            yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+            if transcript_out is not None:
+                transcript_out.extend(messages)
+            return
         except LookupError as e:
             # No available model supports what this conversation needs (e.g.
             # an image with no vision-capable model configured). With
             # degraders configured, this is recoverable: fall back to the
             # best available text-capable model and degrade the messages
             # down to what it actually supports, rather than failing
-            # outright. (router.pick's `override`, when set, always
-            # short-circuits with no modality check at all — reaching this
-            # except block at all means model_override was None, so there
-            # is no explicit model choice this fallback could contradict.)
+            # outright. (router.pick's `override`, when set, either
+            # returns a real model or raises UnknownModelError above --
+            # never LookupError -- so reaching this branch at all means
+            # model_override was None, and there's no explicit model
+            # choice this fallback could contradict.)
             model = None
             if self._degraders:
                 try:

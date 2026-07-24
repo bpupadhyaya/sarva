@@ -479,6 +479,42 @@ async def test_degradation_fallback_double_failure_still_fails_cleanly(run_root)
 
 
 @pytest.mark.asyncio
+async def test_model_override_reaches_the_provider_request(run_root):
+    """model_override isn't just accepted -- the real registered model's
+    id must be the one that actually reaches GenerateRequest.model, not
+    whatever the router's default candidate list would have picked."""
+    provider = MockProvider(script=[ScriptedTurn(text="ok")])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+
+    events = [e async for e in loop.run("hi", model_override="mock")]
+
+    assert events[-1].state == AgentState.DONE
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_override_fails_cleanly_without_silent_substitution(run_root):
+    """The real safety property this exists for: an explicit but wrong
+    model_override must never be silently caught by the modality-
+    degradation fallback and swapped for a different model -- even with
+    degraders configured (the exact condition that would otherwise
+    trigger the fallback path for a genuinely unsupported modality)."""
+    provider = MockProvider(script=[ScriptedTurn(text="should never be reached")])
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+
+    events = [e async for e in loop.run("hi", model_override="totally-not-a-real-model")]
+
+    assert events[-1].type == "run_done"
+    assert events[-1].state == AgentState.FAILED
+    state_changed = next(e for e in events if e.type == "state_changed")
+    assert "totally-not-a-real-model" in state_changed.detail
+
+
+@pytest.mark.asyncio
 async def test_run_session_id_reaches_the_tool_context(run_root):
     """The actual proof session_id threading works end to end: a tool
     that echoes ctx.session_id back must see the exact value passed to

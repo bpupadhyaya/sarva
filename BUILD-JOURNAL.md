@@ -5029,3 +5029,94 @@ deferred); Windows ACL-based protection for the three files under
 `~/.sarva/` now chmod'd POSIX-only; or MCP-over-the-network on the
 server side (named, deliberately not attempted — a real
 remote-code-execution design question, not a mechanical port).
+
+## `--model` — there was no way to actually pick a model from the CLI, and a real latent bug found while wiring it in
+
+`AgentLoop.run(model_override=...)` has been a real, working parameter
+since T1 — `Router.pick(override=...)` bypasses the default candidate
+list entirely for a caller-named model, documented directly in
+`docs/providers.md` as "no substitution." Checked whether any real
+caller could actually reach it: `sarva chat --help` and `sarva run
+--help` showed no `--model` flag at all, and `server/app.py` never
+passes `model_override` either. The whole "model-agnostic provider
+layer" pitch this project leads with was, in practice, unusable from
+any real surface — a user could never actually choose Claude vs. a
+specific Ollama model vs. a foundry checkpoint, only ever get whatever
+the router's own default candidate list happened to pick.
+
+**Wiring it in surfaced a real, latent correctness bug, not just a
+missing flag.** `Registry.get()` raised a plain `KeyError` for an
+unknown model id — and in Python, `KeyError` *is* a `LookupError`
+subclass. `AgentLoop.run()`'s modality-degradation fallback catches
+`LookupError` specifically, on the stated assumption (in its own code
+comment) that reaching that branch means `model_override` was never
+set. That assumption was false the moment `override` became reachable
+with a real, possibly-mistyped value: an invalid `--model` would have
+been silently caught by the fallback and replaced with some *other*
+model the degrader path picked — the exact opposite of "no
+substitution," and with `default_degraders()` wired into all four real
+call sites, this isn't a theoretical edge case, it's what every real
+CLI/server invocation would have hit on day one of `--model` existing.
+
+**Fixed at the root, not by special-casing the CLI:** `UnknownModelError`
+(`sarva.providers.registry`) is a new exception, deliberately *not* a
+`LookupError` subclass. `Router.pick()` raises it for an unrecognized
+`override`; `AgentLoop.run()` catches it in its own branch, checked
+before (and structurally excluded from) the degradation-fallback logic
+— an immediate, clean `FAILED` with a `detail` message naming the bad
+id, regardless of whether degraders are configured. Verified directly:
+a dedicated test proves `UnknownModelError` is genuinely not a
+`LookupError` subclass, and a full `AgentLoop`-level test constructs a
+loop *with* an image degrader configured (the exact condition that
+would trigger the old silent-substitution bug) and confirms an unknown
+override still fails cleanly rather than routing to the degraded
+fallback model.
+
+**A second real gap found while making the new error message actually
+visible:** `StateChangedEvent.detail` — the field that carries exactly
+this kind of error text — was silently dropped by both `sarva chat`
+and `sarva run`; only the generic `"run ended: failed"` ever reached
+the terminal, the real reason invisible unless someone dug through
+`.sarva/runs/<id>/transcript.jsonl` by hand. Fixed by tracking the last
+`state_changed` detail and printing it (via `rich.markup.escape()`,
+since `detail` can originate from a provider's own raw error text, not
+only this project's own strings) alongside the failure. **A third,
+small, directly-motivated fix:** neither CLI command ever exited
+nonzero on a failed run — `sarva chat ... || handle_it` could never
+detect a failure. Both now `raise typer.Exit(code=1)` on any non-`DONE`
+terminal state.
+
+**Verified live, beyond the test suite:** `sarva chat "hi" --model
+bogus-id` now prints a clear `unknown model 'bogus-id' -- see 'sarva
+models' for the full list` and exits 1; `sarva chat "hi" --model mock`
+correctly forces Mock. Closed the loop on a real friction point from
+two milestones ago (verifying Ollama vision support required calling
+`OllamaProvider` directly in Python, since the CLI had no way to force
+`ollama/moondream:latest`): `sarva chat "..." --image photo.png
+--model ollama/moondream:latest` now genuinely routes to and queries
+the real local vision model through the actual CLI. (A tangential,
+real finding along the way, confirmed independent of Sarva's own code
+via a raw `curl` to Ollama: this specific tiny model degenerates to a
+fixed `"!!!RED!!!"` output for the terse prompt "What color is this
+image? One word." regardless of the image, while a more natural
+prompt gets a genuine, correct answer — a real quirk of the model
+itself, not a bug in this codebase, and out of scope to chase further
+here.)
+
+12 new tests (`UnknownModelError`'s type + Router/AgentLoop/CLI
+coverage, including the exit-code and detail-message paths), 480 → 484
+Python tests. `ruff check`/`format --check` clean. `docs/providers.md`
+and `docs/packaging.md` both updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral — real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have — likely stays
+deferred); a model picker in the server/desktop app (the CLI now has
+`--model`, the web UI still has none — a bigger, more deliberate UI
+design decision than the CLI flag was, named rather than attempted
+here); or investigating the moondream terse-prompt quirk named above,
+if it turns out to matter beyond this one observation.

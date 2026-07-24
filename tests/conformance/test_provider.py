@@ -19,7 +19,7 @@ from sarva.providers.base import (
     complete,
 )
 from sarva.providers.mock import MockProvider, ScriptedTurn
-from sarva.providers.registry import Registry, Router, TaskClass, load_routing
+from sarva.providers.registry import Registry, Router, TaskClass, UnknownModelError, load_routing
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "core" / "sarva" / "providers" / "data"
 
@@ -126,6 +126,28 @@ def test_router_never_returns_unsupported_modality():
     router = Router(registry, routing, available={"mock"})
     picked = router.pick(TaskClass.VISION, needs={Modality.IMAGE})
     assert Modality.IMAGE in picked.capabilities.modalities_in
+
+
+def test_router_pick_with_a_real_override_bypasses_availability_and_modality():
+    registry = Registry.load(_DATA_DIR / "models.yaml")
+    routing = load_routing(_DATA_DIR / "routing.yaml")
+    router = Router(registry, routing, available=set())  # nothing "available"
+    picked = router.pick(TaskClass.MAIN, override="mock")
+    assert picked.id == "mock"
+
+
+def test_router_pick_with_an_unknown_override_raises_a_distinct_error():
+    # Deliberately NOT a plain LookupError -- AgentLoop.run() depends on
+    # this being a distinct type so an explicit-but-wrong model override
+    # can never be silently caught by the modality-degradation fallback
+    # and substituted with a different model. See UnknownModelError's
+    # own docstring.
+    registry = Registry.load(_DATA_DIR / "models.yaml")
+    routing = load_routing(_DATA_DIR / "routing.yaml")
+    router = Router(registry, routing, available={"mock"})
+    with pytest.raises(UnknownModelError, match="bogus-model-id"):
+        router.pick(TaskClass.MAIN, override="bogus-model-id")
+    assert not issubclass(UnknownModelError, LookupError)
 
 
 @pytest.mark.asyncio

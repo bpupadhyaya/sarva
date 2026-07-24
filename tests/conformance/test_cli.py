@@ -72,6 +72,31 @@ def test_chat_with_session_persists_the_transcript(monkeypatch, tmp_path):
     assert saved[0].text() == "remember this"
 
 
+def test_chat_with_model_forces_that_exact_model(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["chat", "hello", "--model", "mock"])
+
+    assert result.exit_code == 0
+    assert "[mock] received: hello" in result.stdout
+
+
+def test_chat_with_an_unknown_model_fails_cleanly_with_a_clear_message_and_nonzero_exit(
+    monkeypatch,
+):
+    # The real safety property --model exists to guarantee: a typo'd
+    # model id must be a clear, visible failure -- never a silent
+    # substitution for a different model, and (this pins the CLI half of
+    # that guarantee) never a bare Python traceback either.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["chat", "hello", "--model", "not-a-real-model"])
+
+    assert result.exit_code != 0
+    assert "unknown model 'not-a-real-model'" in result.stdout
+    assert "run ended: failed" in result.stdout
+
+
 def test_chat_with_an_image_of_the_wrong_type_fails_cleanly(tmp_path, monkeypatch):
     _clear_provider_env(monkeypatch)
     not_an_image = tmp_path / "notes.txt"
@@ -108,6 +133,32 @@ def test_run_with_a_valid_image_completes_successfully(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "[mock] received: what's in this image?" in result.stdout
+
+
+def test_run_with_model_forces_that_exact_model(monkeypatch, tmp_path):
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(
+        app, ["run", "do something", "--workdir", str(tmp_path), "--model", "mock", "--auto"]
+    )
+
+    assert result.exit_code == 0
+    assert "[mock] received: do something" in result.stdout
+
+
+def test_run_with_an_unknown_model_fails_cleanly_with_a_clear_message_and_nonzero_exit(
+    monkeypatch, tmp_path
+):
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["run", "do something", "--workdir", str(tmp_path), "--model", "nope", "--auto"],
+    )
+
+    assert result.exit_code != 0
+    assert "unknown model 'nope'" in result.stdout
+    assert "run ended: failed" in result.stdout
 
 
 def test_parse_mcp_headers_builds_a_dict_from_name_colon_value_strings():

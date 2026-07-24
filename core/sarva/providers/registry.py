@@ -25,6 +25,16 @@ class TaskClass(StrEnum):
     AUDIO = "audio"
 
 
+class UnknownModelError(Exception):
+    """Raised when an explicit model override doesn't name a registered
+    model. Deliberately NOT a LookupError subclass (unlike the "no
+    available model for this task" case `pick()` raises below) -- a
+    caller who named a specific model and got it wrong must see a clear
+    error, not have `AgentLoop`'s modality-degradation fallback silently
+    catch it and substitute a different model for the one they actually
+    asked for. See `AgentLoop.run()`'s own handling of this."""
+
+
 class Registry:
     def __init__(self, models: dict[str, ModelInfo]):
         self._models = models
@@ -79,7 +89,12 @@ class Router:
         override: str | None = None,
     ) -> ModelInfo:
         if override:
-            return self.registry.get(override)
+            try:
+                return self.registry.get(override)
+            except KeyError:
+                raise UnknownModelError(
+                    f"unknown model {override!r} -- see 'sarva models' for the full list"
+                ) from None
         for mid in self.routing.get(task, []):
             if mid not in self.available:
                 continue
