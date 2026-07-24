@@ -63,11 +63,48 @@ def _main(
     pass
 
 
+def _print_file_error(verb: str, description: str, path: Path, e: OSError) -> None:
+    detail = escape(e.strerror or str(e))
+    console.print(f"[red]cannot {verb} {description} '{escape(str(path))}': {detail}[/red]")
+
+
+def _read_bytes_or_exit(path: Path, description: str) -> bytes:
+    # A real bug found by actually running `sarva chat --image
+    # /nonexistent/photo.png` (and the equivalent for `speak --out` on a
+    # missing directory, `transcribe`, and `distill`): a bad path raised
+    # a raw FileNotFoundError/PermissionError/IsADirectoryError straight
+    # through Typer -- a full Python traceback instead of a clean,
+    # actionable message, the same "unhandled exception where a clean
+    # error belongs" bug class already fixed for --model/--session.
+    # OSError covers all of those (and NotADirectoryError) in one place.
+    try:
+        return path.read_bytes()
+    except OSError as e:
+        _print_file_error("read", description, path, e)
+        raise typer.Exit(1) from e
+
+
+def _read_text_or_exit(path: Path, description: str) -> str:
+    try:
+        return path.read_text()
+    except OSError as e:
+        _print_file_error("read", description, path, e)
+        raise typer.Exit(1) from e
+
+
+def _write_bytes_or_exit(path: Path, data: bytes, description: str) -> None:
+    try:
+        path.write_bytes(data)
+    except OSError as e:
+        _print_file_error("write", description, path, e)
+        raise typer.Exit(1) from e
+
+
 def _load_image(path: str) -> ImageBlock:
     media_type, _ = mimetypes.guess_type(path)
     if media_type is None or not media_type.startswith("image/"):
         raise typer.BadParameter(f"cannot determine an image media type for {path!r}")
-    return ImageBlock(media_type=media_type, data=Path(path).read_bytes())
+    return ImageBlock(media_type=media_type, data=_read_bytes_or_exit(Path(path), "image file"))
 
 
 def _load_session_history(store: SessionStore, session: str | None) -> list[Message]:
@@ -450,7 +487,8 @@ async def _distill(prompts_file: Path, model: str, out: Path, system: str | None
         )
         raise typer.Exit(1)
 
-    prompts = [line.strip() for line in prompts_file.read_text().splitlines() if line.strip()]
+    prompts_text = _read_text_or_exit(prompts_file, "prompts file")
+    prompts = [line.strip() for line in prompts_text.splitlines() if line.strip()]
     console.print(f"Distilling {len(prompts)} prompts from {model}...")
     records = await distill(prompts, provider, model=model, system=system)
     save_jsonl(records, out)
@@ -586,7 +624,7 @@ def speak(
         # same reason doctor's dynamic detail text is escaped too.
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
-    out.write_bytes(audio_bytes)
+    _write_bytes_or_exit(out, audio_bytes, "output file")
     console.print(f"wrote {len(audio_bytes)} bytes to {out}")
 
 
@@ -609,7 +647,7 @@ def transcribe(
     from sarva.audio import transcribe as transcribe_audio
 
     try:
-        text = transcribe_audio(audio.read_bytes(), model_size=model_size)
+        text = transcribe_audio(_read_bytes_or_exit(audio, "audio file"), model_size=model_size)
     except ImportError as e:
         # A real bug caught by this file's own test, not assumed safe:
         # the real error message contains a literal "sarva[audio]" --

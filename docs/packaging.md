@@ -114,6 +114,27 @@ at all until it was noticed missing while poking at the CLI's own
   described below; its own docstring calls it "the surface a web UI or
   desktop app uses."
 
+**A bad file path crashed four commands with a raw traceback — `chat
+--image`, `run --image`, `speak --out`, `transcribe`, and `distill` —
+the same "unhandled exception where a clean error belongs" bug class
+already fixed for `--model`/`--session`, just on file-path arguments
+instead.** `Path.read_bytes()`/`read_text()`/`write_bytes()` all raise
+a plain `OSError` subclass (`FileNotFoundError`, `PermissionError`,
+`IsADirectoryError`) for a nonexistent path, an unreadable file, or a
+missing parent directory, and none of these five call sites caught it.
+Confirmed live on all four commands (`chat --image`/`run --image`
+share `_load_image`, so fixing it once covers both): each printed a
+full Python traceback instead of a clean message. Fixed with three
+small shared helpers (`_read_bytes_or_exit`, `_read_text_or_exit`,
+`_write_bytes_or_exit`) catching `OSError` in one place and printing
+`cannot {read,write} {description} '{path}': {reason}` before exiting
+1 — the same shape `--model`'s clean failure already established, just
+generalized to any file argument rather than one `except` clause per
+command. **Verified the new tests are real:** reverted the fix and
+watched all four new tests fail with the raw, uncaught `OSError`
+propagating (an empty `stdout`, the traceback going to `stderr`
+instead) before re-applying.
+
 **Session persistence works identically for `chat` and `run`:** both
 load prior history via `SessionStore().load(name)` before the turn, and
 save the full transcript afterward — but only if the run actually

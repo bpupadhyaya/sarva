@@ -170,6 +170,22 @@ def test_run_with_an_image_of_the_wrong_type_fails_cleanly(tmp_path, monkeypatch
     assert "cannot determine an image media type" in result.output
 
 
+def test_chat_with_a_nonexistent_image_path_fails_cleanly_not_a_traceback(monkeypatch):
+    # A real bug found by actually running `sarva chat --image
+    # /nonexistent/photo.png`: Path.read_bytes() raised a raw
+    # FileNotFoundError straight through Typer -- a full Python
+    # traceback instead of a clean, actionable message, the same
+    # "unhandled exception where a clean error belongs" bug class
+    # already fixed for --model/--session.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["chat", "look at this", "--image", "/nonexistent/photo.png"])
+
+    assert result.exit_code != 0
+    assert "cannot read image file" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_run_with_a_valid_image_completes_successfully(tmp_path, monkeypatch):
     _clear_provider_env(monkeypatch)
     image_path = tmp_path / "photo.png"
@@ -449,6 +465,33 @@ def test_distill_with_an_unknown_model_fails_cleanly_instead_of_a_raw_traceback(
     assert not (tmp_path / "out.jsonl").exists()
 
 
+def test_distill_with_a_nonexistent_prompts_file_fails_cleanly_not_a_traceback(
+    monkeypatch, tmp_path
+):
+    # A real bug found by actually running `sarva distill
+    # /nonexistent/prompts.txt ...`: Path.read_text() raised a raw
+    # FileNotFoundError, printed as a full Python traceback instead of
+    # a clean message -- the same bug class as the unknown-model case
+    # right above, just on the file-path argument instead.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "distill",
+            str(tmp_path / "nonexistent-prompts.txt"),
+            "--model",
+            "mock",
+            "--out",
+            str(tmp_path / "out.jsonl"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "cannot read prompts file" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_sessions_list_reports_nothing_saved_when_empty(monkeypatch, tmp_path):
     _isolate_sessions(monkeypatch, tmp_path)
 
@@ -610,6 +653,22 @@ def test_speak_fails_cleanly_with_no_engine_available(tmp_path, monkeypatch):
     assert not (tmp_path / "out.wav").exists()
 
 
+@pytest.mark.skipif(not tts_engine_available(), reason="no local TTS engine detected")
+def test_speak_with_an_unwritable_out_path_fails_cleanly_not_a_traceback(tmp_path):
+    # A real bug found by actually running `sarva speak "hi" --out
+    # /nonexistent/dir/speech.wav`: Path.write_bytes() raised a raw
+    # FileNotFoundError for a missing parent directory, printed as a
+    # full Python traceback instead of a clean message.
+    bad_out = tmp_path / "nonexistent-dir" / "out.wav"
+
+    result = runner.invoke(app, ["speak", "hello", "--out", str(bad_out)])
+
+    assert result.exit_code == 1
+    assert "cannot write output file" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert not bad_out.exists()
+
+
 @pytest.mark.skipif(
     not (shutil.which("espeak-ng") or shutil.which("espeak")),
     reason="espeak/espeak-ng not installed",
@@ -706,6 +765,19 @@ def test_transcribe_fails_cleanly_without_the_audio_extra(tmp_path, monkeypatch)
 
     assert result.exit_code == 1
     assert "sarva[audio]" in result.stdout
+
+
+def test_transcribe_with_a_nonexistent_audio_file_fails_cleanly_not_a_traceback(tmp_path):
+    # A real bug found by actually running `sarva transcribe
+    # /nonexistent/audio.wav`: Path.read_bytes() raised a raw
+    # FileNotFoundError, printed as a full Python traceback instead of
+    # a clean message -- the same bug class as the missing-extra case
+    # right above, just on the file-path argument instead.
+    result = runner.invoke(app, ["transcribe", str(tmp_path / "nonexistent.wav")])
+
+    assert result.exit_code == 1
+    assert "cannot read audio file" in result.stdout
+    assert "Traceback" not in result.stdout
 
 
 def test_version_flag_prints_the_real_installed_version_and_exits():

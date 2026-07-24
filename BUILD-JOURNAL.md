@@ -5687,3 +5687,56 @@ now get consistently. Batching (§3.6f), F1's distributed training
 infra, Gemini's Files API for long video, and desktop
 code-signing/notarization remain deferred for the reasons already
 logged above.
+
+## Four CLI commands crashed with a raw traceback on a bad file path — the last real candidate from the image_base64 sweep
+
+Picked up the second of the two candidates the last Explore-agent sweep
+surfaced (the first, `image_base64` crashing `/chat`/`/ws/chat`, was
+already closed): `chat --image`, `run --image`, `speak --out`,
+`transcribe`, and `distill` all read or write a file path straight from
+a CLI argument with no error handling at all. Confirmed live on every
+one: `sarva chat "hi" --image /nonexistent/photo.png`, `sarva speak
+"hi" --out /nonexistent/dir/speech.wav`, `sarva transcribe
+/nonexistent/audio.wav`, and `sarva distill /nonexistent/prompts.txt
+--model mock --out x.jsonl` each printed a full Rich/Python traceback
+ending in a raw `FileNotFoundError` instead of a clean message and a
+sensible exit code — the identical "unhandled exception where a clean
+error belongs" bug class already fixed twice this window for
+`--model`/`--session`, just never checked against file-path arguments.
+
+**Fixed with three small shared helpers, not five separate `except`
+clauses:** `_read_bytes_or_exit`, `_read_text_or_exit`, and
+`_write_bytes_or_exit` each wrap the underlying `Path` call in a single
+`except OSError` (a common base covering `FileNotFoundError`,
+`PermissionError`, `IsADirectoryError`, and `NotADirectoryError` all at
+once, not just the one variant these particular repros happened to
+hit) and print `cannot {read,write} {description} '{path}': {reason}`
+before a clean `typer.Exit(1)` — reusing the identical clean-failure
+shape `--model`/`--session` already established, generalized once
+instead of patched in five separate spots. `_load_image` (already
+shared by both `chat --image` and `run --image`) now calls
+`_read_bytes_or_exit` internally, so fixing it in one place closed two
+of the four command-level gaps for free.
+
+**Verified the new tests are real, not just green, the same discipline
+as every fix in this journal since the MCP tool-name escaping milestone:**
+reverted the three helpers back to plain `Path` calls and re-ran all
+four new tests, watched each fail with the raw, uncaught `OSError`
+propagating (an empty `result.stdout`, the traceback landing on
+`stderr` instead, exactly as it did before this fix existed), then
+re-applied.
+
+4 new tests, 515 → 519 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated.
+
+**Next:** the other real candidate from the same sweep — `RunShellTool`'s
+60-second timeout cancels the *awaiting* coroutine on expiry but never
+actually kills the child process, so a timed-out shell command's side
+effects keep happening unattended in the background while the reported
+error to the model/user is blank (`str(TimeoutError())` is empty) — a
+real gap since this tool is marked `destructive=True` specifically so a
+confirmation gate can stop unwanted side effects, and a silent timeout
+defeats that guarantee. Batching (§3.6f), F1's distributed training
+infra, Gemini's Files API for long video, and desktop
+code-signing/notarization remain deferred for the reasons already
+logged above.
