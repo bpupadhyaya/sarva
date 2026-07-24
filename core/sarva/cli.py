@@ -158,6 +158,25 @@ def _parse_mcp_headers(values: list[str]) -> dict[str, str]:
     return headers
 
 
+def _parse_mcp_env(values: list[str]) -> dict[str, str]:
+    # A real gap, flagged by two separate Explore-agent sweeps and only
+    # now picked up: connect_stdio_mcp_server's `env` parameter has been
+    # callable since MCP support shipped, but nothing threaded it from
+    # the CLI -- a stdio server that needs an environment variable (e.g.
+    # a real npx/uvx-run server reading its own auth token from the
+    # process environment, a common real case) genuinely couldn't
+    # receive one via `sarva run`. Same "reject, don't guess" parsing
+    # discipline as --mcp-header, just split on '=' (the shell's own
+    # convention for NAME=VALUE) instead of ':'.
+    env: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise typer.BadParameter(f"invalid --mcp-env {value!r} -- expected 'NAME=VALUE'")
+        name, _, env_value = value.partition("=")
+        env[name.strip()] = env_value.strip()
+    return env
+
+
 @app.command()
 def chat(
     message: str = typer.Argument(..., help="Message to send."),
@@ -272,9 +291,22 @@ def run(
         "limit for the (rare) case of multiple HTTP servers needing different "
         "auth in one run.",
     ),
+    mcp_env: list[str] = typer.Option(
+        [],
+        "--mcp-env",
+        help="Environment variable to set for every shell-command --mcp-server "
+        'in this run (repeatable), "NAME=VALUE" -- e.g. --mcp-env '
+        '"GITHUB_TOKEN=ghp_...". A real npx/uvx-run stdio MCP server often '
+        "reads its own auth token from its process environment; "
+        "connect_stdio_mcp_server() has always accepted one, this is what "
+        "actually threads it through from the command line. Merged on top of "
+        "a fixed safe-to-inherit environment (PATH, HOME, ...), not a full "
+        "replacement of it. Applies to every stdio server in this invocation "
+        "alike, the same named per-run (not per-server) limit --mcp-header has.",
+    ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
-    asyncio.run(_run(task, workdir, image, model, auto, session, mcp_server, mcp_header))
+    asyncio.run(_run(task, workdir, image, model, auto, session, mcp_server, mcp_header, mcp_env))
 
 
 async def _confirm_prompt(call: Any) -> bool:
@@ -306,12 +338,14 @@ async def _run(
     session: str | None,
     mcp_servers: list[str],
     mcp_headers: list[str],
+    mcp_envs: list[str],
 ) -> None:
     store = SessionStore()
     history = _load_session_history(store, session)
     extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
     confirm = always_allow if auto else _confirm_prompt
     headers = _parse_mcp_headers(mcp_headers)
+    env = _parse_mcp_env(mcp_envs)
 
     async with AsyncExitStack() as stack:
         tools: list[Tool] = list(BUILTIN_TOOLS)
@@ -323,7 +357,7 @@ async def _run(
             else:
                 command, *args = shlex.split(server_cmd)
                 mcp_session = await stack.enter_async_context(
-                    connect_stdio_mcp_server(command, args=args)
+                    connect_stdio_mcp_server(command, args=args, env=env or None)
                 )
             mcp_tools = await list_mcp_tools(mcp_session)
             # escape(): tool names come from the connected MCP server's own

@@ -22,7 +22,7 @@ import sarva.config as config_module
 import sarva.memory.session as session_module
 import sarva.runtime as runtime
 from sarva.audio import stt_extra_installed, tts_engine_available
-from sarva.cli import _parse_mcp_headers, app
+from sarva.cli import _parse_mcp_env, _parse_mcp_headers, app
 from sarva.memory.session import SessionStore
 from sarva.providers.base import ToolSpec
 from typer.testing import CliRunner
@@ -285,6 +285,98 @@ def test_run_mcp_header_actually_reaches_connect_http_mcp_server(monkeypatch, tm
     assert captured["headers"] == {"Authorization": "Bearer test-token"}
 
 
+def test_parse_mcp_env_builds_a_dict_from_name_equals_value_strings():
+    assert _parse_mcp_env(["GITHUB_TOKEN=ghp_abc123", "X_CUSTOM= spaced "]) == {
+        "GITHUB_TOKEN": "ghp_abc123",
+        "X_CUSTOM": "spaced",
+    }
+
+
+def test_parse_mcp_env_on_an_empty_list_returns_an_empty_dict():
+    assert _parse_mcp_env([]) == {}
+
+
+def test_parse_mcp_env_rejects_an_entry_with_no_equals_sign():
+    with pytest.raises(Exception, match="invalid --mcp-env"):
+        _parse_mcp_env(["not-an-env-var"])
+
+
+def test_run_mcp_env_actually_reaches_connect_stdio_mcp_server(monkeypatch, tmp_path):
+    # A real gap, flagged by two separate Explore-agent sweeps: nothing
+    # threaded connect_stdio_mcp_server's env parameter from the CLI at
+    # all -- a real stdio MCP server needing an environment variable
+    # (e.g. an auth token it reads from its own process environment)
+    # genuinely couldn't receive one via `sarva run`. This pins that
+    # --mcp-env is actually parsed and threaded through, not just
+    # accepted and silently dropped.
+    _clear_provider_env(monkeypatch)
+    captured = {}
+
+    class _FakeSession:
+        async def list_tools(self):
+            class _Result:
+                tools = []
+
+            return _Result()
+
+    @asynccontextmanager
+    async def fake_connect_stdio_mcp_server(command, args=None, env=None):
+        captured["command"] = command
+        captured["env"] = env
+        yield _FakeSession()
+
+    monkeypatch.setattr(cli_module, "connect_stdio_mcp_server", fake_connect_stdio_mcp_server)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "do something",
+            "--workdir",
+            str(tmp_path),
+            "--mcp-server",
+            "fake-cmd",
+            "--mcp-env",
+            "GITHUB_TOKEN=ghp_test",
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["command"] == "fake-cmd"
+    assert captured["env"] == {"GITHUB_TOKEN": "ghp_test"}
+
+
+def test_run_with_no_mcp_env_passes_none_not_an_empty_dict(monkeypatch, tmp_path):
+    # env=None (vs env={}) matters to the underlying MCP SDK: None means
+    # "just the safe default environment," a real, meaningfully
+    # different value than an explicit empty dict there.
+    _clear_provider_env(monkeypatch)
+    captured = {}
+
+    class _FakeSession:
+        async def list_tools(self):
+            class _Result:
+                tools = []
+
+            return _Result()
+
+    @asynccontextmanager
+    async def fake_connect_stdio_mcp_server(command, args=None, env=None):
+        captured["env"] = env
+        yield _FakeSession()
+
+    monkeypatch.setattr(cli_module, "connect_stdio_mcp_server", fake_connect_stdio_mcp_server)
+
+    result = runner.invoke(
+        app,
+        ["run", "do something", "--workdir", str(tmp_path), "--mcp-server", "fake-cmd", "--auto"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["env"] is None
+
+
 def test_run_mcp_tool_names_with_markup_characters_are_escaped_not_swallowed(monkeypatch, tmp_path):
     # Tool names come from the connected MCP server's own response -- for
     # an http(s):// server that's a remote, untrusted source. A real bug
@@ -299,7 +391,7 @@ def test_run_mcp_tool_names_with_markup_characters_are_escaped_not_swallowed(mon
     _clear_provider_env(monkeypatch)
 
     @asynccontextmanager
-    async def fake_connect_stdio_mcp_server(command, args=None):
+    async def fake_connect_stdio_mcp_server(command, args=None, env=None):
         yield object()
 
     class _FakeTool:

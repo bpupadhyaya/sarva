@@ -33,7 +33,7 @@ async def test_list_tools_reflects_the_real_server():
     async with _connect() as session:
         tools = await list_mcp_tools(session)
     names = {t.spec.name for t in tools}
-    assert names == {"echo", "fail"}
+    assert names == {"echo", "fail", "env_var"}
     echo = next(t for t in tools if t.spec.name == "echo")
     assert echo.spec.input_schema["properties"]["text"]["type"] == "string"
 
@@ -48,6 +48,38 @@ async def test_call_tool_round_trip(tmp_path):
 
     assert not result.is_error
     assert result.content[0].text == "hello from the real client"
+
+
+async def _env_var_result(env: dict[str, str] | None, tmp_path) -> str:
+    # A real gap flagged by two separate Explore-agent sweeps: `env` has
+    # been part of connect_stdio_mcp_server's signature since MCP
+    # support shipped, but nothing proved it actually reached a real
+    # spawned subprocess's environment, and no CLI flag threaded one
+    # through at all until this milestone (see cli.py's --mcp-env /
+    # _parse_mcp_env). Proven here against a real subprocess, not a
+    # mock -- this file's own docstring states that bar for everything
+    # in it.
+    async with connect_stdio_mcp_server(sys.executable, args=[_ECHO_SERVER], env=env) as session:
+        tools = await list_mcp_tools(session)
+        env_var_tool = next(t for t in tools if t.spec.name == "env_var")
+        ctx = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+        result = await env_var_tool.run({"name": "SARVA_TEST_ENV_VAR"}, ctx)
+    assert not result.is_error
+    return result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_connect_stdio_mcp_server_env_value_reaches_the_real_subprocess(tmp_path):
+    value = await _env_var_result(
+        {"SARVA_TEST_ENV_VAR": "reached-the-real-child-process"}, tmp_path
+    )
+    assert value == "reached-the-real-child-process"
+
+
+@pytest.mark.asyncio
+async def test_connect_stdio_mcp_server_with_no_env_leaves_the_var_unset(tmp_path):
+    value = await _env_var_result(None, tmp_path)
+    assert value == "MISSING"
 
 
 @pytest.mark.asyncio

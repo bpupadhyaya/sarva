@@ -25,11 +25,14 @@ at all until it was noticed missing while poking at the CLI's own
   one-shot, tool-free, single-turn (`AgentLoop(tools=[],
   confirm=always_allow)`). The simplest possible entry point,
   deliberately with no tool access.
-- **`run TASK [--workdir .] [--image PATH] [--model ID] [--auto] [--session NAME] [--mcp-server CMD]... [--mcp-header "Name: Value"]...`**
+- **`run TASK [--workdir .] [--image PATH] [--model ID] [--auto] [--session NAME] [--mcp-server CMD]... [--mcp-header "Name: Value"]... [--mcp-env "NAME=VALUE"]...`**
   — the full agent loop with `BUILTIN_TOOLS` (files, shell) plus any MCP
   servers. `--mcp-server` is repeatable; each value is shell-split and
   connected via `connect_stdio_mcp_server` inside an `AsyncExitStack`
-  (see the MCP chapter), its tools appended to the built-in list. Without
+  (see the MCP chapter — `--mcp-env` is `--mcp-header`'s stdio
+  counterpart, threading real environment variables like an auth token
+  through to a local server subprocess), its tools appended to the
+  built-in list. Without
   `--auto`, every destructive tool call stops for a real
   `typer.confirm(f"Allow {call.name}({call.arguments})?")` prompt;
   `--auto` swaps that for `always_allow`. `--image` landed later than

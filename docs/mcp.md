@@ -79,6 +79,15 @@ sarva run "..." --mcp-server https://example.com/mcp --auto
 # from the command line until --mcp-header closed that gap:
 sarva run "..." --mcp-server https://example.com/mcp \
     --mcp-header "Authorization: Bearer sk-..." --auto
+
+# A real npx/uvx-run stdio server often reads its own auth token from
+# its process environment rather than an HTTP header --
+# connect_stdio_mcp_server() has always accepted an env dict, but
+# nothing threaded one through from the command line until --mcp-env
+# closed that gap too:
+sarva run "..." \
+    --mcp-server "npx -y some-server-that-needs-a-token" \
+    --mcp-env "GITHUB_TOKEN=ghp_..." --auto
 ```
 
 `--mcp-server` is repeatable, and each value is dispatched by shape —
@@ -115,6 +124,28 @@ servers in one run needing different auth isn't supported. Malformed
 entries (no `:`) fail immediately with a clear error rather than being
 silently dropped, the same "reject, don't guess" discipline session-name
 validation already applies elsewhere in this file.
+
+**`--mcp-env` (repeatable, `"NAME=VALUE"`) is `--mcp-header`'s stdio
+counterpart, and closes a real gap two separate Explore-agent sweeps
+found but the first one didn't pick up.**
+`connect_stdio_mcp_server`'s `env` parameter has accepted a dict since
+MCP support shipped, but nothing threaded one through from the command
+line at all — a real, common case (an `npx`/`uvx`-run server reading
+its own auth token from its process environment, since a local
+subprocess has no HTTP headers to carry one in) genuinely couldn't
+receive it. It's merged on top of the underlying MCP SDK's own fixed
+safe-to-inherit environment (`PATH`, `HOME`, ...) rather than replacing
+it outright — confirmed directly by reading `stdio_client()`'s own
+source (`{**get_default_environment(), **server.env}` when `env` is
+given), not assumed. Applies to every stdio server in the same
+invocation alike, the same named per-run limit `--mcp-header` has.
+**Verified against a real spawned subprocess, not just parsed and
+passed along:** `tests/fixtures/mcp_echo_server.py` gained a third
+tool, `env_var(name)`, returning the named environment variable's real
+value (or `"MISSING"`) — a real MCP round trip through a real
+subprocess proves the value set via `env=` genuinely lands in that
+child process's own environment, and a matching test with `env=None`
+confirms nothing leaks in in the other direction either.
 
 ## Content conversion, honestly scoped
 

@@ -5865,3 +5865,52 @@ per-entry call site). Batching (§3.6f), F1's distributed training
 infra, Gemini's Files API for long video, and desktop
 code-signing/notarization remain deferred for the reasons already
 logged above.
+
+## `sarva run --mcp-env` — closing a gap two separate sweeps found, only the second one picked up
+
+`connect_stdio_mcp_server`'s `env` parameter has accepted a dict since
+MCP support first shipped, but nothing ever threaded one through from
+the command line — a real, common case (an `npx`/`uvx`-run stdio
+server reading its own auth token from its process environment, since
+a local subprocess has no HTTP headers to carry one in the way an
+`http(s)://` server does) genuinely couldn't receive it via `sarva
+run`. `--mcp-header` already closed the equivalent gap for HTTP
+servers; this closes the stdio counterpart, mirroring its exact CLI
+shape and parsing discipline (`--mcp-env "NAME=VALUE"`, repeatable,
+rejecting a malformed entry immediately rather than silently dropping
+it) but split on `=` instead of `:`.
+
+**A real, non-obvious detail confirmed by reading the MCP SDK's own
+source rather than assumed:** `env=` doesn't *replace* the subprocess's
+environment, it's merged on top of `get_default_environment()`'s fixed
+safe-to-inherit allowlist (`{**get_default_environment(), **server.env}`
+inside `stdio_client()`) — so `--mcp-env` only ever *adds* variables, it
+can't accidentally strip `PATH`/`HOME`/etc. out from under the spawned
+server.
+
+**Verified against a real spawned subprocess, not just parsed and
+passed along — the same bar this project's own MCP client docs state
+for everything in this area:** `tests/fixtures/mcp_echo_server.py`
+gained a third real tool, `env_var(name)`, returning the named
+environment variable's actual value (or `"MISSING"`) from inside the
+real child process. Two new tests round-trip through a genuine MCP
+stdio connection: one proves a value passed via `env=` really lands in
+that subprocess's own environment, the other proves `env=None` leaves
+it genuinely unset — not just that the parameter was accepted without
+erroring either way. `test_list_tools_reflects_the_real_server`'s
+pinned tool-name set needed updating for the new tool, the one
+pre-existing test this touched.
+
+7 new tests (`_parse_mcp_env` unit tests, `--mcp-env` CLI wiring
+tests, and two real-subprocess env round-trip tests against the
+fixture MCP server), 532 → 539 Python tests. `ruff check`/`format
+--check` clean. `docs/mcp.md` and `docs/packaging.md` updated.
+
+**Next:** the other real gap found by the last sweep — one corrupted
+session file among several good ones crashes `sarva sessions list`
+entirely (a pydantic `ValidationError`, technically already a
+`ValueError` subclass, but never caught at this specific per-entry call
+site), hiding the valid sessions too. Batching (§3.6f), F1's
+distributed training infra, Gemini's Files API for long video, and
+desktop code-signing/notarization remain deferred for the reasons
+already logged above.
