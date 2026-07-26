@@ -5914,3 +5914,42 @@ site), hiding the valid sessions too. Batching (§3.6f), F1's
 distributed training infra, Gemini's Files API for long video, and
 desktop code-signing/notarization remain deferred for the reasons
 already logged above.
+
+## One corrupted session file crashed `sarva sessions list` entirely, hiding every other good session too
+
+The last real candidate from the corrupted-config sweep, picked up
+directly. Confirmed live: with two saved sessions, one good and one
+holding invalid JSON, `sarva sessions list` printed a full traceback
+and exited 1 — not just failing to report the corrupt one, but hiding
+the perfectly good session too, since `sessions_list()` looped over
+every saved name calling `store.load(name)` with no error handling at
+all. `SessionStore.load()` raises a pydantic `ValidationError` for a
+file that isn't valid JSON or doesn't match the expected `list[Message]`
+shape — a real `ValueError` subclass, the same base `_sanitize()`
+already raises for a malformed on-disk filename, so a corrupted
+*filename* would have hit the identical uncaught path too.
+
+**Fixed with a per-entry `try`/`except ValueError`, not a whole-command
+guard:** one bad file now reports `NAME  (corrupt or unreadable)` and
+the loop continues, rather than the entire command aborting — the
+difference matters specifically here, since the whole point of `list`
+is showing what's actually there, and a single bad file shouldn't hide
+everything else that's fine.
+
+**Verified the new test is real:** reverted the fix and watched it fail
+with the raw, uncaught `ValidationError` (`exit_code == 1`, not `0`)
+before re-applying — same discipline as every fix in this journal since
+the MCP tool-name escaping milestone.
+
+1 new test, 539 → 540 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated. **This closes out every real gap
+found by the corrupted-config sweep — worth another fresh sweep next
+time rather than continued ad-hoc searching.**
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral — real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have — likely stays deferred).

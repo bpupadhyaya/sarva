@@ -564,7 +564,20 @@ def sessions_list() -> None:
         console.print("no saved sessions")
         return
     for name in names:
-        count = len(store.load(name))
+        try:
+            count = len(store.load(name))
+        except ValueError:
+            # A real bug found by actually corrupting one session file
+            # among several good ones: SessionStore.load() raises a
+            # pydantic ValidationError (a ValueError subclass, the same
+            # base _sanitize() already raises for a malformed on-disk
+            # filename) with nothing here to catch it -- one bad file
+            # crashed this whole command with a raw traceback, hiding
+            # every *other*, perfectly good session's listing too. Now
+            # reported per-entry so one corrupt file can't take down the
+            # rest of the listing.
+            console.print(f"{name}  (corrupt or unreadable)")
+            continue
         console.print(f"{name}  ({count} messages)")
 
 

@@ -609,6 +609,28 @@ def test_sessions_list_and_clear_reflect_a_real_saved_session(monkeypatch, tmp_p
     assert "keepsake" not in final_list.stdout
 
 
+def test_sessions_list_with_one_corrupted_file_still_lists_the_good_ones(monkeypatch, tmp_path):
+    # A real bug found by actually corrupting one session file among
+    # several good ones: SessionStore.load() raises a pydantic
+    # ValidationError (a ValueError subclass) with nothing in
+    # sessions_list() to catch it -- one bad file crashed the whole
+    # command with a raw traceback, hiding every other, perfectly good
+    # session's listing too.
+    _clear_provider_env(monkeypatch)
+    _isolate_sessions(monkeypatch, tmp_path)
+    runner.invoke(app, ["chat", "hi", "--session", "good-session"])
+    (tmp_path / "sessions" / "corrupt-session.json").write_text("not valid json at all")
+
+    result = runner.invoke(app, ["sessions", "list"])
+
+    assert result.exit_code == 0
+    assert "Traceback" not in result.stdout
+    assert "good-session" in result.stdout
+    assert "messages" in result.stdout
+    assert "corrupt-session" in result.stdout
+    assert "corrupt or unreadable" in result.stdout
+
+
 def _isolate_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
     for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):

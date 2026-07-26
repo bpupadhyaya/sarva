@@ -82,7 +82,17 @@ at all until it was noticed missing while poking at the CLI's own
   checked fast — before `eval` prints its own benchmark header, before
   `distill` writes anything — rather than failing mid-run.
 - **`sessions list`** / **`sessions clear NAME`** — inspect or delete
-  persisted chat sessions.
+  persisted chat sessions. **A real bug found by actually corrupting one
+  session file among several good ones:** `SessionStore.load()` raises
+  a pydantic `ValidationError` (a `ValueError` subclass, the same base
+  `_sanitize()` already raises for a malformed on-disk filename) for a
+  file that isn't valid JSON or doesn't match the expected shape, and
+  `sessions list` called it with no error handling at all — one bad
+  file crashed the whole command with a raw traceback, hiding every
+  other, perfectly good session's listing too. Fixed by catching
+  `ValueError` per entry and reporting `NAME  (corrupt or unreadable)`
+  instead of aborting, so one bad file can't take the rest of the
+  listing down with it.
 - **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...]`**
   / **`config show`** / **`config unset [--anthropic-api-key] [--openai-api-key] [--gemini-api-key]`**
   — manage provider API keys in `~/.sarva/config.json` from the command
