@@ -278,10 +278,35 @@ class FoundryProvider:
         bundles = discover_checkpoint_bundles(checkpoints_dir)
         if not bundles:
             raise ValueError(f"no valid foundry checkpoint bundles found under {checkpoints_dir}")
-        self._loaded: dict[str, tuple[Any, Any, Any]] = {
-            bundle_name: load_checkpoint_bundle(bundle_path)
-            for bundle_name, bundle_path in bundles.items()
-        }
+        # A real bug found by actually corrupting a real bundle's
+        # model.pt (truncating it, simulating an interrupted save or
+        # disk corruption) and calling the real build_providers():
+        # torch.load() raised an uncaught OSError, and since this used
+        # to be a plain dict comprehension with no error handling at
+        # all, one bad bundle crashed every caller of build_providers()
+        # -- every CLI command, /chat, /ws/chat, server startup -- not
+        # just a request that tried to use that specific checkpoint.
+        # discover_checkpoint_bundles only checks that the three bundle
+        # files *exist*, never that they're actually valid, so this was
+        # reachable any time a bundle got corrupted after being
+        # discovered. Same "one bad case shouldn't take down everything"
+        # posture already applied in sarva.eval.harness.run_benchmark:
+        # a broken bundle is recorded (name -> error message, publicly
+        # readable via self.broken_bundles) and skipped, not silently
+        # dropped and not fatal to every OTHER valid bundle.
+        self._loaded: dict[str, tuple[Any, Any, Any]] = {}
+        self.broken_bundles: dict[str, str] = {}
+        for bundle_name, bundle_path in bundles.items():
+            try:
+                self._loaded[bundle_name] = load_checkpoint_bundle(bundle_path)
+            except Exception as e:
+                self.broken_bundles[bundle_name] = f"{type(e).__name__}: {e}"
+        if not self._loaded:
+            detail = "; ".join(f"{name}: {reason}" for name, reason in self.broken_bundles.items())
+            raise ValueError(
+                f"found {len(bundles)} checkpoint bundle(s) under {checkpoints_dir}, but "
+                f"none could actually be loaded: {detail}"
+            )
 
     def _resolve(self, model_id: str) -> tuple[Any, Any, Any]:
         bundle_name = model_id.split("/", 1)[1] if "/" in model_id else model_id

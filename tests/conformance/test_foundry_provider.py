@@ -189,6 +189,48 @@ def test_foundry_provider_construction_fails_clearly_on_an_empty_directory(tmp_p
         FoundryProvider(tmp_path)
 
 
+def test_foundry_provider_skips_a_corrupted_bundle_instead_of_crashing_construction(
+    tmp_path: Path,
+):
+    # A real bug found by actually corrupting a real bundle's model.pt
+    # (truncating it, simulating an interrupted save or disk
+    # corruption) and calling the real build_providers(): torch.load()
+    # raised an uncaught OSError, and since FoundryProvider.__init__
+    # used to be a plain dict comprehension over every discovered
+    # bundle with no error handling, one bad bundle crashed
+    # construction entirely -- and therefore every caller of
+    # build_providers() (every CLI command, /chat, /ws/chat, server
+    # startup), not just a request that tried to use that specific
+    # checkpoint. discover_checkpoint_bundles only checks that the
+    # three bundle files *exist*, never that they're actually valid.
+    _make_bundle(tmp_path / "good")
+    bad_dir = tmp_path / "bad"
+    _make_bundle(bad_dir)
+    model_pt = bad_dir / "model.pt"
+    raw = model_pt.read_bytes()
+    model_pt.write_bytes(raw[: len(raw) // 2])  # truncated, not just malformed
+
+    provider = FoundryProvider(tmp_path)
+
+    assert "good" in provider._loaded
+    assert "bad" not in provider._loaded
+    assert "bad" in provider.broken_bundles
+    assert "good" not in provider.broken_bundles
+
+
+def test_foundry_provider_construction_fails_clearly_when_every_bundle_is_broken(
+    tmp_path: Path,
+):
+    bad_dir = tmp_path / "bad"
+    _make_bundle(bad_dir)
+    model_pt = bad_dir / "model.pt"
+    raw = model_pt.read_bytes()
+    model_pt.write_bytes(raw[: len(raw) // 2])
+
+    with pytest.raises(ValueError, match="none could actually be loaded"):
+        FoundryProvider(tmp_path)
+
+
 async def test_foundry_provider_generate_produces_a_real_completion(tmp_path: Path):
     _make_bundle(tmp_path / "toy")
     provider = FoundryProvider(tmp_path)

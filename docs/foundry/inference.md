@@ -80,6 +80,33 @@ discovered and registered into the registry dynamically
 They're never a default routing candidate for real tasks; use them via an
 explicit `--model foundry/<name>` override.
 
+**A real bug found by actually corrupting a real bundle and calling
+`build_providers()`, not assumed impossible:** `discover_checkpoint_bundles`
+only checks that a bundle's three files *exist* — never that they're
+actually valid — and `FoundryProvider.__init__` used to load every
+discovered bundle via a plain dict comprehension with no error
+handling at all. A bundle with a truncated `model.pt` (an interrupted
+save, disk corruption — a realistic failure mode, not a contrived one)
+made `torch.load()` raise an uncaught `OSError`, which crashed
+`FoundryProvider` construction entirely — and since `build_providers()`
+calls it with no try/except either, this crashed *every* caller of
+`build_providers()` (every CLI command, `/chat`, `/ws/chat`, server
+startup), not just a request that tried to use that specific
+checkpoint. The same "corrupted on-disk state" bug class already fixed
+twice elsewhere in this project (`~/.sarva/config.json`, a saved
+session file), just not yet closed here.
+
+Fixed the same way `sarva.eval.harness.run_benchmark` already treats a
+single bad case: `FoundryProvider.__init__` now loads each bundle in
+its own `try`/`except`, records a broken bundle's name and error
+message on `provider.broken_bundles` (a plain `dict[str, str]`, publicly
+readable, not silently swallowed), and skips it — every *other* valid
+bundle still loads and the provider still constructs successfully.
+Construction only fails (the same `ValueError` shape as the existing
+"no bundles found at all" case) when literally every discovered bundle
+turned out to be broken, since a `FoundryProvider` serving zero models
+isn't meaningfully different from one that failed to construct.
+
 ## What the adapter honestly does and doesn't do
 
 - **No chat template.** The prompt sent to the model is just the

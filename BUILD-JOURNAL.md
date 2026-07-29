@@ -6394,3 +6394,65 @@ that wrapper still gets a raw traceback instead of the documented
 with a raw, uncaught exception -- the same "corrupted on-disk state"
 bug class already fixed twice for `config.json` and session files, just
 not yet picked up for foundry checkpoints.
+
+## A corrupted foundry checkpoint bundle crashed build_providers() -- and therefore nearly every command -- picked up from the last sweep's second finding
+
+The other real candidate the audio-SIGBUS sweep surfaced but didn't
+pick up. Confirmed live: built a real, minimal checkpoint bundle via
+`sarva_foundry`'s own `Trainer`/`ByteLevelBPETokenizer`/
+`save_checkpoint_bundle` (the exact same helper
+`test_foundry_provider.py` already uses), truncated `model.pt`
+(simulating an interrupted save or disk corruption -- a realistic
+failure mode, not contrived), pointed `SARVA_FOUNDRY_CHECKPOINTS` at
+it, and called the real `build_providers()`: `torch.load()` raised an
+uncaught `OSError: [Errno 22] Invalid argument`, crashing provider
+construction entirely. `discover_checkpoint_bundles()` only checks that
+a bundle's three files *exist*, never that they're actually valid, so
+this was reachable any time a bundle got corrupted after being
+discovered -- and since neither `FoundryProvider.__init__` (a plain
+dict comprehension over every bundle, no error handling) nor
+`build_providers()`'s own call site caught anything, one bad bundle
+took down every caller of `build_providers()`: every CLI command,
+`/chat`, `/ws/chat`, server startup, not just a request that tried to
+use that specific checkpoint. The exact same "corrupted on-disk state"
+bug class already fixed twice this project (`~/.sarva/config.json`, a
+saved session file), just not yet closed for foundry checkpoints.
+
+**Fixed with the identical "one bad case shouldn't take down
+everything" posture `sarva.eval.harness.run_benchmark` already
+established**, not a new pattern invented for this fix:
+`FoundryProvider.__init__` now loads each bundle in its own
+`try`/`except`, recording a broken bundle's name and error message on
+a new, publicly readable `provider.broken_bundles: dict[str, str]`
+(not silently swallowed -- a caller that wants to know why a bundle
+didn't load can check it) and skipping it, so every *other* valid
+bundle still loads. Verified live: a directory with one good bundle and
+one truncated one now constructs successfully with only the good
+bundle loaded and the bad one recorded in `broken_bundles`.
+Construction still fails cleanly (the same `ValueError` shape the
+existing "no bundles found at all" case already used) only when
+literally every discovered bundle turns out to be broken -- a provider
+serving zero models isn't meaningfully different from a failed
+construction, so that case keeps its existing hard-failure semantics
+rather than silently succeeding with nothing to serve.
+
+**Verified the new tests are real:** reverted the fix and re-ran both
+new tests, watched them fail with the raw, uncaught `OSError` from
+`torch.load()` for exactly the right reason before re-applying -- same
+discipline as every fix in this journal since the MCP tool-name
+escaping milestone. All 14 pre-existing foundry-provider tests
+(save/load round trips, MoE/RoPE-scaling config round trips, backward
+compatibility with pre-MoE bundles, discovery, generation, unknown
+model id) still pass unchanged.
+
+2 new tests, 552 -> 554 Python tests. `ruff check`/`format --check`
+clean. `docs/foundry/inference.md` updated.
+
+**This closes both real findings from the last Explore-agent sweep**
+(the audio SIGBUS fix, and now this) -- the remaining minor finding
+from that same sweep (`ImageToTextDegrader` not catching `PIL.Image.
+DecompressionBombError`, already low severity since `AgentLoop`'s
+broadened degradation fallback catches it one layer up) remains open
+for a future pass, along with the standing deferred list: batching
+(§3.6f), F1's distributed training infra, Gemini's Files API for long
+video, and desktop code-signing/notarization.
