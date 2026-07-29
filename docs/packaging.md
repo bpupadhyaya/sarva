@@ -192,6 +192,18 @@ watched all four new tests fail with the raw, uncaught `OSError`
 propagating (an empty `stdout`, the traceback going to `stderr`
 instead) before re-applying.
 
+**`_write_bytes_or_exit` (`speak --out`'s own write) had the identical
+interrupted-write bug already found and fixed at five other real call
+sites** (`WriteFileTool`, foundry checkpoint/tokenizer saving,
+`distill.save_jsonl` — see the memory and foundry-training chapters).
+It used a plain `path.write_bytes(data)`, which truncates the target to
+0 bytes the instant it's opened, before a single byte of new content is
+written — confirmed live, a crash mid-write destroys a previously-good
+audio file with no error. Found by a sweep specifically re-checking
+whether the earlier propagation milestone had actually found *every*
+real call site (it hadn't — this was the sixth). Fixed via the same
+shared `sarva.atomic_write` helper.
+
 **Session persistence works identically for `chat` and `run`:** both
 load prior history via `SessionStore().load(name)` before the turn, and
 save the full transcript afterward — but only if the run actually

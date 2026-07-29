@@ -8503,3 +8503,72 @@ have); Gemini's Files API for long-video input (no API key here to
 verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this
 environment doesn't have -- likely stays deferred).
+
+## A sixth real call site with the identical atomic-write bug, missed by the propagation sweep -- speak --out's own write
+
+A round-30 sweep, specifically re-checking whether the prior
+propagation milestone (the previous journal entry) had actually found
+*every* real call site with the interrupted-write data-loss pattern,
+not just the ones an Explore-agent report happened to name. It hadn't:
+`sarva.cli._write_bytes_or_exit` -- the shared helper backing `speak
+--out`'s own write, added several rounds ago to give a clean, non-
+traceback failure on a bad output path -- still used a plain
+`path.write_bytes(data)` underneath its own `try`/`except OSError`.
+`write_bytes()`'s own `open("wb")` truncates the target to 0 bytes
+the instant it's opened, before a single byte of new content is
+written -- the identical mechanism already fixed at five other real
+call sites. Confirmed live: wrote a real 10000-byte "good" file, then
+reproduced `write_bytes()`'s own open-then-write sequence and stopped
+partway through -- the file ended up 0 bytes, the prior audio content
+gone, no error raised.
+
+**Lower severity than the other five sites** (a generated WAV file a
+user can simply regenerate by re-running `speak`, not a config key,
+session history, or real GPU-hours of training progress) but the same
+unfixed mechanism, and the previous milestone's own docstring in
+`sarva.atomic_write` claimed to close this bug class "at every real
+call site currently in this codebase" -- a claim this round's sweep
+found to be one site short.
+
+**Fixed the same way as the other five:** `_write_bytes_or_exit` now
+calls `sarva.atomic_write.atomic_write_bytes` instead of
+`path.write_bytes` directly, inside the same existing `try`/`except
+OSError` (an interrupted `os.replace()` still raises `OSError`, so
+the clean-failure behavior `speak --out`'s own tests already pin is
+unaffected). **Verified the new test is real:** tested directly against
+the helper (not through `sarva speak` itself, so it doesn't depend on
+a real TTS engine being installed) -- reverted and watched it fail with
+`Failed: DID NOT RAISE Exit` before re-applying, since the reverted
+code never calls `os.replace()` at all. All 63 pre-existing CLI tests
+pass unchanged. 1 new test, 612 -> 613 Python tests. `ruff check`/
+`format --check` clean. `docs/packaging.md` and `docs/memory.md`
+updated.
+
+**Also caught and fixed on this same pass:** the previous journal
+entry itself had a counting error -- "8 new regression tests (604
+pre-existing + 8 new)" when the real count was 13 new tests, 599
+pre-existing + 13 new = 612. Caught before pushing the private dotfiles
+log entry at the time, but the public journal correction was never
+committed -- fixed now with a dedicated correction commit, the same
+discipline already used once before for an identical class of mistake
+(the config.json race-fix entry's own counting error).
+
+**This is itself a small instance of a discipline worth naming
+explicitly: a claim that a sweep found "every" instance of something
+is only as good as the sweep, and is worth re-checking with a fresh
+pass rather than taken on faith** -- the same reasoning that already
+caught the `answer_reward`/`contains_match` sign-blindness duplication
+and the five-site atomic-write propagation gap in the first place.
+
+**Next:** the Tauri `csp: null` gap (still deferred, needs a GUI/
+Windows machine this environment lacks); the no-retry-cap gap on
+`AgentLoop` (still deferred, a real feature decision); a fresh
+Explore-agent sweep at round 30 found nothing else concretely
+exploitable beyond this one finding and the two known-deferred items --
+batching multiple concurrent inference requests (§3.6f, still a
+deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this
+environment doesn't have); Gemini's Files API for long-video input (no
+API key here to verify live); a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have -- likely stays deferred).

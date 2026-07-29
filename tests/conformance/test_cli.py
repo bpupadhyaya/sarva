@@ -21,6 +21,7 @@ import sarva.cli as cli_module
 import sarva.config as config_module
 import sarva.memory.session as session_module
 import sarva.runtime as runtime
+import typer
 from sarva.audio import stt_extra_installed, tts_engine_available
 from sarva.cli import _parse_mcp_env, _parse_mcp_headers, app
 from sarva.memory.session import SessionStore
@@ -936,6 +937,41 @@ def test_config_unset_with_no_flags_fails_cleanly(monkeypatch, tmp_path):
 
     assert result.exit_code != 0
     assert "nothing to remove" in result.stdout
+
+
+def test_write_bytes_or_exit_does_not_destroy_the_previous_file_if_interrupted_mid_write(
+    tmp_path, monkeypatch
+):
+    # A real bug found by a sweep looking for other real call sites with
+    # the same interrupted-write pattern already fixed via
+    # sarva.atomic_write at five other sites (WriteFileTool, foundry
+    # checkpoint/tokenizer saving, distill.save_jsonl) -- speak --out's
+    # own write went through this helper's plain path.write_bytes(),
+    # which had the identical unfixed bug. Confirmed live: write_bytes's
+    # own open("wb") truncates the target to 0 bytes the instant it's
+    # opened, before a single byte of new content is written. Tested
+    # directly against the helper rather than through `sarva speak`
+    # itself so it doesn't depend on a real TTS engine being installed.
+    import os
+
+    path = tmp_path / "out.wav"
+    cli_module._write_bytes_or_exit(path, b"first, good audio bytes", "output file")
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated crash during os.replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    with pytest.raises(typer.Exit):
+        cli_module._write_bytes_or_exit(path, b"second write, interrupted", "output file")
+
+    assert path.read_bytes() == b"first, good audio bytes"
 
 
 @pytest.mark.skipif(not tts_engine_available(), reason="no local TTS engine detected")

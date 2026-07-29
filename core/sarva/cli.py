@@ -21,6 +21,7 @@ from rich.markup import escape
 
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, Tool, always_allow
+from sarva.atomic_write import atomic_write_bytes
 from sarva.config import ConfigError
 from sarva.mcp_client import connect_http_mcp_server, connect_stdio_mcp_server, list_mcp_tools
 from sarva.memory.session import SessionStore
@@ -113,8 +114,17 @@ def _read_text_or_exit(path: Path, description: str) -> str:
 
 
 def _write_bytes_or_exit(path: Path, data: bytes, description: str) -> None:
+    # Atomic write, not a direct path.write_bytes(): the same
+    # interrupted-write bug already found and fixed at five other real
+    # call sites (WriteFileTool, foundry checkpoint/tokenizer saving,
+    # distill.save_jsonl -- see sarva.atomic_write) had an unfixed sixth
+    # twin here. Confirmed live: write_bytes()'s own open("wb") truncates
+    # the target to 0 bytes the instant it's opened, before a single
+    # byte of new content lands -- a crash mid-write (e.g. speak --out
+    # writing over a real, previously-generated audio file) destroys
+    # whatever was there before with no error.
     try:
-        path.write_bytes(data)
+        atomic_write_bytes(path, data)
     except OSError as e:
         _print_file_error("write", description, path, e)
         raise typer.Exit(1) from e

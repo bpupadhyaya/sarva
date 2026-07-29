@@ -109,6 +109,10 @@ training-side equivalent, covering `Trainer.save_checkpoint`,
 `ByteLevelBPETokenizer.save`, and the checkpoint bundle's `config.json`
 write in `sarva.providers.foundry_provider.save_checkpoint_bundle`.
 
+**A sixth site, missed by that sweep, found by a follow-up one:**
+`sarva.cli._write_bytes_or_exit` (backing `speak --out`'s own write)
+had the identical unfixed pattern — see the packaging chapter.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:
