@@ -88,8 +88,37 @@ def contains_match(output: str, case: BenchmarkCase) -> bool:
     echo was silently graded "correct" on several cases. This wasn't a
     hypothetical risk: `sarva eval --model mock` measurably reported
     30% accuracy before this fix, not the honest 0% every prior claim
-    in this project assumed without re-checking the real number."""
-    pattern = r"\b" + re.escape(case.expected.strip()) + r"\b"
+    in this project assumed without re-checking the real number.
+
+    A real, later bug in the same function, sign-blindness: `\\b`
+    treats `-` as a non-word character, so a word boundary already
+    exists between a minus sign and the digits that follow it -- the
+    pattern above matched `"45"` inside a wrong `"-45"` just as readily
+    as inside a correct `"45"`. Confirmed live and concretely reachable
+    via this project's own bundled `ARITHMETIC` benchmark: `sub-1`
+    expects `"45"` for `"92 - 47"`, and a model that reverses operand
+    order (a common weak-model mistake -- computing `47 - 92 = -45`
+    instead) got full credit for a numerically wrong answer.
+
+    Fixed by replacing `\\b` with explicit lookaround that treats `-`
+    as significant rather than relying on word/non-word transitions:
+    `(?<![\\w-])` before the pattern rejects a match immediately
+    preceded by a digit/letter *or* a minus sign (closing the
+    sign-blind gap above), and `(?!\\w)` after it rejects a match
+    immediately followed by a digit/letter (preserving the original
+    digit-adjacency fix -- `"9"` still can't match inside `"89"`).
+    This also fixes a second, related bug the sign-blind one's own
+    `\\b`-based pattern had and this project's tests hadn't caught
+    yet: a genuinely negative `expected` value (e.g. `"-5"`) never
+    matched at all under the old pattern, for the identical reason --
+    `\\b` doesn't fire between two non-word characters (a space and a
+    leading `-`), so `contains_match` would have scored a correctly
+    negative model answer as wrong. Not reachable via any bundled
+    `ARITHMETIC` case today (none has a negative `expected`), but a
+    real, separate defect in the same boundary logic, fixed by the
+    same change rather than left in place alongside the sign-blindness
+    fix."""
+    pattern = r"(?<![\w-])" + re.escape(case.expected.strip()) + r"(?!\w)"
     return re.search(pattern, output.strip(), re.IGNORECASE) is not None
 
 

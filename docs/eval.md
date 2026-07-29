@@ -75,6 +75,41 @@ test meant to catch this asserted `"0%" in result.stdout` — which
 silently passing throughout, whatever the real number was. Fixed to
 check the precise `"0/10"` marker instead.
 
+## The word-boundary fix above was itself sign-blind, and its own inverse never matched at all
+
+A later sweep, checking `contains_match` again rather than assuming
+the word-boundary fix above closed every gap in the same shape:
+`\b` treats `-` as a non-word character, so a word boundary already
+exists between a minus sign and the digits that follow it. Confirmed
+live and concretely reachable via `ARITHMETIC`'s own bundled cases:
+`sub-1` expects `"45"` for `"92 - 47"`, and a model that reverses
+operand order (a common weak-model mistake — computing `47 - 92 = -45`
+instead) got full credit for a numerically wrong answer, since `"45"`
+inside a wrong `"-45"` satisfied the exact same `\b45\b` pattern a
+correct `"45"` did.
+
+**A second, related defect surfaced while verifying that fix, not
+reachable by any bundled case today but real:** the mirror-image bug.
+`\b` doesn't fire between two non-word characters either — a space and
+a leading `-` — so a genuinely negative `expected` value (e.g.
+`"-5"`) never matched *at all* under the same `\b`-based pattern; a
+correctly negative model answer would have been scored wrong. No
+bundled `ARITHMETIC` case has a negative `expected` answer, so this
+never fired in practice, but it's the same root defect (`\b` treating
+`-` inconsistently) manifesting in the opposite direction, not a
+separate, unrelated issue.
+
+Fixed by replacing `\b` with explicit lookaround that treats `-` as
+significant on purpose, rather than relying on word/non-word
+transitions to get it right by accident: `(?<![\w-])` before the
+pattern (rejects a match preceded by a digit, a letter, *or* a minus
+sign) and `(?!\w)` after it (rejects a match followed by a digit or
+letter, preserving the original digit-adjacency fix — `"9"` still
+can't match inside `"89"`). Verified the new tests are real: reverted
+the fix and watched both fail — the sign-blind case scoring `-45` as a
+match, the negative-expected case never matching `-5` at all — before
+re-applying. All 11 pre-existing eval-harness tests pass unchanged.
+
 ## A `ProviderError` on one case doesn't sink the whole run
 
 If a case's request fails (rate limit, auth, any `ProviderError`), that

@@ -7942,3 +7942,61 @@ environment doesn't have); Gemini's Files API for long-video input (no
 API key here to verify live); a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have -- likely stays deferred).
+
+## contains_match's own word-boundary fix was itself sign-blind, and its exact inverse never matched a negative expected answer at all -- picked up from the CSWSH-milestone sweep's second, deferred finding
+
+Picked up directly from the last milestone's own deferred list. A
+prior sweep's word-boundary fix (`\bexpected\b`) closed a real bug
+where `contains_match` graded a wrong `"89"` as correct for an expected
+`"9"`. That fix never re-examined what `\b` actually does around a
+minus sign specifically, and it has two distinct problems there, in
+opposite directions.
+
+**Confirmed live, sign-blindness:** `\b` treats `-` as a non-word
+character, so a word boundary already exists between a minus sign and
+the digits that follow it -- `"45"` inside a wrong `"-45"` satisfied
+the exact same `\b45\b` pattern a correct `"45"` did. Concretely
+reachable via this project's own bundled `ARITHMETIC` benchmark:
+`sub-1` expects `"45"` for `"92 - 47"`, and a model that reverses
+operand order (a common weak-model mistake -- computing `47 - 92 = -45`
+instead) got full credit for a numerically wrong answer.
+
+**A second, related defect surfaced while verifying the sign-blindness
+fix, the mirror image of it:** `\b` doesn't fire between two non-word
+characters either -- a space and a leading `-` -- so a genuinely
+negative `expected` value (e.g. `"-5"`) never matched *at all* under
+the same pattern. Not reachable via any bundled `ARITHMETIC` case
+today (none has a negative expected answer), but a real, separate
+consequence of the exact same root defect (`\b` treating `-`
+inconsistently depending on which side of it the check happens),
+found only by actually testing the sign-blindness fix against a
+negative-expected case rather than assuming the fix was complete.
+
+**Fixed by replacing `\b` with explicit lookaround that treats `-` as
+significant on purpose, rather than relying on word/non-word
+transitions to get it right by accident:** `(?<![\w-])` before the
+pattern rejects a match immediately preceded by a digit, a letter, or
+a minus sign (closing the sign-blind gap); `(?!\w)` after it rejects a
+match immediately followed by a digit or letter (preserving the
+original digit-adjacency fix -- `"9"` still can't match inside `"89"`).
+One change fixes both directions, since both were the same underlying
+defect.
+
+**Verified the new tests are real:** reverted the fix and watched both
+fail -- the sign-blind test failing because `-45` was still scored a
+match, the negative-expected test failing because `-5` matched
+nothing at all -- before re-applying. All 11 pre-existing eval-harness
+tests pass unchanged. 2 new tests, 588 -> 590 Python tests. `docs/
+eval.md` updated.
+
+**Next:** the Tauri `csp: null` gap named in the CSWSH milestone (real,
+but a bigger, riskier change to make blind without a GUI/Windows
+machine to verify against); the config.json concurrent-process-write
+race; the no-retry-cap gap on `AgentLoop`; batching multiple
+concurrent inference requests (§3.6f, still a deliberate deferral --
+real correctness risk); F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have);
+Gemini's Files API for long-video input (no API key here to verify
+live); a first pass at code-signing/notarization for the desktop
+release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

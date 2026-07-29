@@ -53,6 +53,35 @@ def test_contains_match_does_not_false_positive_on_a_longer_wrong_number():
     assert contains_match("9", case)
 
 
+def test_contains_match_is_not_sign_blind():
+    # A real bug found by actually running this against a model that
+    # reverses subtraction operand order (a common weak-model mistake):
+    # "9" is a non-word character to \b, so a word boundary already
+    # exists between a minus sign and the digits that follow it -- the
+    # old pattern matched "45" inside a wrong "-45" just as readily as
+    # inside a correct "45". Concretely reachable via this project's own
+    # bundled ARITHMETIC benchmark: sub-1 expects "45" for "92 - 47", and
+    # computing 47 - 92 = -45 used to score full credit for a
+    # numerically wrong answer.
+    case = BenchmarkCase(id="sub-1", prompt="p", expected="45")
+    assert not contains_match("The answer is -45", case)
+    assert not contains_match("-45", case)
+    assert contains_match("The answer is 45", case)  # the real fix must not break this
+
+
+def test_contains_match_still_recognizes_a_genuinely_negative_expected_answer():
+    # A second, related bug found while verifying the sign-blindness fix
+    # above: \b never fires between two non-word characters (a space
+    # and a leading "-"), so a genuinely negative `expected` value never
+    # matched at all under the old \b-based pattern -- not reachable via
+    # any bundled ARITHMETIC case today (none has a negative expected
+    # answer), but a real, separate defect in the same boundary logic.
+    case = BenchmarkCase(id="neg-1", prompt="p", expected="-5")
+    assert contains_match("The answer is -5", case)
+    assert contains_match("-5", case)
+    assert not contains_match("The answer is -55", case)  # still rejects a longer wrong number
+
+
 def test_arithmetic_benchmark_is_bundled_and_has_real_cases():
     assert ARITHMETIC.name == "arithmetic"
     assert len(ARITHMETIC.cases) == 10
