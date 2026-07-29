@@ -477,6 +477,28 @@ also has no Windows machine to verify runtime behavior on, only CI's
 `windows-latest` `cargo check` job, which confirms the code compiles
 correctly for the target, not that it behaves correctly at runtime.
 
+**A real bug found by actually checking what a `log::info!`/`log::warn!`
+call does with no logger registered** (a standalone `log`-crate repro,
+not just reading the plugin's source): it's a genuine silent no-op —
+`log::max_level()` reads back as `Off`, confirmed directly. This
+mattered here because `tauri_plugin_log`'s registration was gated
+behind `cfg!(debug_assertions)`, so a real release build never
+registered a logger at all — every sidecar stdout/stderr line, and the
+one place a sidecar crash is ever noticed at all
+(`CommandEvent::Terminated`), vanished with zero record: no console
+line, no log file, nothing a user or support engineer could look at.
+The module's own doc comment claims "the failure surfaces as a log line
+from the sidecar process" — true only in debug builds until this fix.
+Fixed by registering the plugin unconditionally; `Builder::default()`'s
+own default targets already write to both stdout *and* a real log file
+in the platform's app-log directory, so releases get real, persisted
+sidecar diagnostics with no extra target configuration needed. Verified
+with `cargo check --locked` (this project's own established
+verification depth for `src-tauri/`, since there's no Windows machine
+or GUI runtime available here — see the grandchild-reaping fix above
+for the same caveat) plus the standalone `log`-crate repro proving the
+no-logger behavior this bug depended on.
+
 Real, working cross-platform installers do exist:
 `.github/workflows/release-bundle.yml` ("Release bundle (unsigned)")
 builds `.dmg` (macOS), `.msi`/`.exe` (Windows), and `.AppImage`/`.deb`

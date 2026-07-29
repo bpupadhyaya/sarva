@@ -7206,3 +7206,67 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## The desktop app's sidecar logging was silently disabled in every real release build -- picked up from the last sweep's own deferred, lower-confidence finding
+
+The candidate flagged but not picked up at the end of the distill()
+milestone: `apps/desktop/src-tauri/src/lib.rs`'s `setup()` only
+registered `tauri_plugin_log` `if cfg!(debug_assertions)`. Re-verified
+it was still real (rather than assuming the earlier sweep's read was
+right) with a standalone `log`-crate repro built fresh in the
+scratchpad, independent of Tauri entirely: with no logger registered,
+`log::max_level()` reads back as `Off` and a `log::info!`/`log::warn!`
+call is a genuine, confirmed silent no-op -- nothing printed, nothing
+written anywhere.
+
+That matters concretely here because every sidecar diagnostic in this
+file goes through those macros: `CommandEvent::Stdout`/`Stderr`
+forwarding, and -- the one that matters most -- `CommandEvent::
+Terminated`, the only place a sidecar crash is ever noticed at all. In
+a real release build (the only kind an actual end user ever runs),
+none of that was ever registered anywhere: no console line, no log
+file, nothing. The module's own doc comment claims "the failure
+surfaces as a log line from the sidecar process" -- true only in debug
+builds until this fix, an honesty gap in the file's own documentation
+as much as a functional one.
+
+Checked why the gate existed in the first place before assuming intent:
+`git log -L` on the exact lines shows it was written this way from the
+very first commit that introduced this file (T4 step 1), with no
+documented rationale -- reads as a common "only log in dev" Tauri
+boilerplate pattern copied in, not a deliberate choice weighed against
+this project's own "no black boxes, verify everything" discipline.
+
+**Fixed by registering the plugin unconditionally.** No extra target
+configuration was needed to fix the release-build blind spot:
+`tauri_plugin_log::Builder::default()`'s own default targets already
+write to both stdout AND a real log file in the platform's app-log
+directory (confirmed via the plugin's own documented default,
+`[Target::new(TargetKind::Stdout), Target::new(TargetKind::LogDir {
+file_name: None })]`), so simply always calling `.build()` gives
+release builds real, persisted sidecar diagnostics for free.
+
+**Verified at the depth this project's own established discipline
+allows for `src-tauri/`:** there's no Windows machine or any GUI
+runtime available in this environment (already true for the earlier
+grandchild-reaping fix in this same file), so `cargo check --locked`
+(this repo's own CI verification depth for this crate) plus the
+standalone `log`-crate repro proving the exact no-logger behavior this
+bug depended on is the real, honest verification ceiling here -- not a
+GUI-driven confirmation this environment genuinely cannot produce.
+`cargo check --locked` passes clean with the fix. No test suite exists
+for this crate beyond that compile check (matches the existing
+`desktop` CI job's own scope, unchanged by this fix).
+
+`docs/packaging.md` and the module's own doc comment updated.
+
+No open candidates remain from recent sweeps -- worth a fresh
+Explore-agent sweep next time.
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

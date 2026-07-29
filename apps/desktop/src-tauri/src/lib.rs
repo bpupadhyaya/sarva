@@ -12,8 +12,16 @@
 //! README quickstart is already running there), the spawn itself still
 //! succeeds — the failure surfaces as a log line from the sidecar process,
 //! and the UI transparently ends up talking to whichever process actually
-//! holds the port. See BUILD-JOURNAL.md for what's verified vs. not yet
-//! (cross-platform release bundles, code signing).
+//! holds the port. That claim is only actually true in every build now,
+//! not just debug ones: `tauri_plugin_log`'s registration used to be
+//! gated behind `cfg!(debug_assertions)`, so a real release build had no
+//! logger at all and every `log::info!`/`log::warn!` call below —
+//! including the one place a sidecar crash (`CommandEvent::Terminated`)
+//! is ever noticed — was a silent no-op, confirmed directly against the
+//! `log` crate's own documented behavior with no logger registered
+//! (`log::max_level()` is `Off`). Registered unconditionally now — see
+//! `run()`'s own comment for the rest. See BUILD-JOURNAL.md for what's
+//! verified vs. not yet (cross-platform release bundles, code signing).
 //!
 //! `on_window_event`'s `CloseRequested` handler only fires for a graceful
 //! window close — it does not run when the app process is killed directly
@@ -101,13 +109,27 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // A real bug found by actually checking what happens with no
+            // logger registered (a standalone `log`-crate repro, not just
+            // reading the plugin's source): `log::max_level()` is `Off`
+            // and every `log::info!`/`log::warn!` call below is a silent
+            // no-op -- confirmed directly, not assumed. Gating this
+            // registration on `cfg!(debug_assertions)` (as originally
+            // written) meant every sidecar stdout/stderr line AND the one
+            // place a sidecar crash is ever noticed
+            // (`CommandEvent::Terminated`) vanished with no record at all
+            // in a real release build -- the module doc comment's own
+            // claim that "the failure surfaces as a log line from the
+            // sidecar process" was only true in debug builds. Registered
+            // unconditionally now; `Builder::default()`'s own default
+            // targets already write to both stdout AND a real log file in
+            // the platform's app-log directory, so this needs no extra
+            // target configuration to fix the release-build blind spot.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
 
             let (mut rx, child) = app
                 .shell()
