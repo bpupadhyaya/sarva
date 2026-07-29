@@ -7780,3 +7780,74 @@ long-video input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have -- likely stays
 deferred).
+
+## A hung tool call blocked the entire turn forever, silently withholding every other concurrent tool's already-completed result -- the last named candidate from the confirm-gate-bypass sweep, closed out
+
+The last remaining candidate from that sweep, picked up directly.
+`AgentLoop.run()`'s concurrent tool dispatch (`asyncio.gather` over
+every call in one turn) had a real consequence never guarded against:
+`gather` withholds every result until every coroutine finishes, no
+exceptions. `RunShellTool` self-protects with its own internal 60-second
+timeout (already fixed in an earlier milestone), but that's the only
+built-in tool that does -- `McpToolAdapter.run()` (a remote or stdio
+MCP server's `call_tool`) has none at all.
+
+**Confirmed live, not reasoned about in the abstract:** a turn with one
+fast tool (returns instantly) and one that never returns at all left
+the fast tool's own `ToolFinishedEvent` undelivered indefinitely, even
+though it completed in microseconds -- a real reproduction using an
+outer 5-second `asyncio.timeout` guard that never unblocked, confirmed
+the hang is genuine, not a slow-but-eventually-resolving case. Not a
+crash and not silent corruption -- a run that simply never reaches a
+terminal state, with no error, no event, nothing a caller could act on
+except waiting forever.
+
+**Fixed by wrapping each tool call's `tool.run(...)` in
+`asyncio.wait_for` with a 90-second backstop.** Deliberately longer
+than `RunShellTool`'s own 60 seconds -- a tool with its own internal
+timeout gets to fire first and report its own specific reason; this new
+timeout is purely a backstop for tools that don't self-protect (chiefly
+`McpToolAdapter`), not a replacement for `RunShellTool`'s existing fix.
+A timeout is scored exactly the way a raised exception already is: a
+real, visible `is_error=True` `ToolResultBlock` the model sees and can
+react to, reusing the identical "a tool failure never crashes the loop"
+shape this file already establishes for exceptions -- no new failure
+category invented, just a new trigger for the existing one.
+
+**Honestly scoped, matching the same discipline this journal already
+applied to `RunShellTool`'s own pre-fix bug:** cancelling the `await`
+stops *this loop* from waiting, but whether the real underlying
+resource behind a specific tool (an MCP server's network connection,
+say) tears down promptly depends on that tool's own cancellation
+handling, not on this timeout alone -- named directly rather than
+implied to be a complete fix for every possible resource leak. What
+this closes, unconditionally, is the symptom that actually mattered:
+the turn itself always reaches a terminal state, and no other
+concurrent tool's already-completed result is held hostage by one that
+never finishes.
+
+**Verified the new test is real:** reverted the fix and watched it
+fail with `AttributeError: <module 'sarva.agent.loop'> has no
+attribute '_TOOL_TIMEOUT_SECONDS'` before re-applying -- the test
+monkeypatches that constant down to make the check fast, so its
+absence on the reverted code is itself proof the fix wasn't there yet.
+All 28 pre-existing agent-loop tests pass unchanged. 1 new test, 585 ->
+586 Python tests. `docs/agent-loop.md` updated.
+
+**This closes out every real, actionable candidate from the
+confirm-gate-bypass sweep** (the duplicate-tool_call_id bypass, the
+build_router() checkpoint crash, the save()-destroys-good-data bug, the
+TTS subprocess timeout, and now this) -- no open candidates remain,
+worth a fresh Explore-agent sweep next time.
+
+**Next:** the config.json concurrent-process-write race (a
+lost-update race between two processes both loading/editing/writing
+back -- a real, separate, harder problem than the atomic-rename fix
+already closes, needing real file locking); batching multiple
+concurrent inference requests (§3.6f, still a deliberate deferral --
+real correctness risk); F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have);
+Gemini's Files API for long-video input (no API key here to verify
+live); a first pass at code-signing/notarization for the desktop
+release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

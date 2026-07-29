@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import shutil
 from pathlib import Path
@@ -187,6 +188,62 @@ async def test_tool_errors_do_not_kill_the_loop(run_root):
     finished = [e for e in events if e.type == "tool_finished"]
     assert finished[0].result.is_error is True
     assert events[-1].state == AgentState.DONE
+
+
+@pytest.mark.asyncio
+async def test_a_hung_tool_times_out_instead_of_blocking_every_other_result_forever(
+    run_root, monkeypatch
+):
+    # A real bug found by actually running a turn with one fast tool
+    # call and one that never returns: asyncio.gather withholds ALL
+    # results until EVERY coroutine finishes, so the hung tool blocked
+    # the whole turn forever -- silently discarding the fast tool's
+    # already-completed result too, confirmed live with an outer guard
+    # that never unblocked. RunShellTool self-protects with its own
+    # internal timeout, but a tool with none at all (e.g. a remote MCP
+    # server that never responds) had no recovery path whatsoever.
+    import sarva.agent.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "_TOOL_TIMEOUT_SECONDS", 0.2)
+
+    class _HungTool:
+        spec = ToolSpec(
+            name="hung",
+            description="never returns",
+            input_schema={"type": "object", "properties": {}},
+            destructive=False,
+        )
+
+        async def run(self, args, ctx: ToolContext):
+            await asyncio.sleep(3600)
+            raise AssertionError("never actually reached")
+
+    calls = [
+        ToolCallBlock(id="fast", name="echo", arguments={"text": "quick"}),
+        ToolCallBlock(id="slow", name="hung", arguments={}),
+    ]
+    provider = MockProvider(script=[ScriptedTurn(tool_calls=calls), ScriptedTurn(text="done")])
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_EchoTool(), _HungTool()],
+        run_root=run_root,
+    )
+
+    events = await asyncio.wait_for(
+        _collect(loop.run("run both")), timeout=5
+    )  # the real proof: this must not hang past the tool's own short timeout
+
+    finished = {f.result.tool_call_id: f.result for f in events if f.type == "tool_finished"}
+    assert finished["fast"].is_error is False
+    assert finished["fast"].content[0].text == "quick"
+    assert finished["slow"].is_error is True
+    assert "timed out" in finished["slow"].content[0].text
+    assert events[-1].state == AgentState.DONE
+
+
+async def _collect(agen):
+    return [e async for e in agen]
 
 
 @pytest.mark.asyncio

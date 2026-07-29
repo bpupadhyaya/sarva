@@ -127,6 +127,48 @@ at all, because the supposedly-denied call actually executed, the
 exact bug this closes — before re-applying. All 27 pre-existing
 agent-loop tests pass unchanged.
 
+### A hung tool call used to block the whole turn forever — including every other, already-completed tool's result
+
+The concurrent-dispatch design above (`asyncio.gather` over every call
+in one turn) has a real consequence that wasn't guarded against until
+now: `gather` withholds **every** result until **every** coroutine
+finishes. Confirmed live: a turn with one fast tool (returns instantly)
+and one that never returns at all left the fast tool's own
+`ToolFinishedEvent` undelivered indefinitely, even though it completed
+in microseconds — an outer 5-second guard around the whole run never
+unblocked. `RunShellTool` self-protects with its own internal 60-second
+timeout (see above), but that's the *only* built-in tool that does;
+`McpToolAdapter.run()` (a remote or stdio MCP server's `call_tool`,
+`sarva.mcp_client`) has none at all, so any hung or unresponsive MCP
+server had zero recovery path — not a clean failure, not an error
+event, just a run that never finishes.
+
+Fixed by wrapping each tool call's `tool.run(...)` in `asyncio.wait_for`
+with a 90-second backstop timeout — deliberately longer than
+`RunShellTool`'s own 60 seconds, so a tool with its own internal
+timeout gets to fire first and report its own specific reason; this is
+purely a backstop for tools that don't self-protect, not a replacement
+for `RunShellTool`'s fix. A timeout is scored exactly the way a raised
+exception already is: a real, visible `is_error=True` `ToolResultBlock`
+the model sees and can react to, not a special case. **Honestly scoped,
+not a guaranteed cure for every underlying resource:** cancelling the
+`await` stops *this loop* from waiting on it, the same way it already
+did for `RunShellTool`'s own pre-fix bug — whether the real resource
+behind a specific tool (an MCP server's network connection, say)
+actually tears down promptly depends on that tool's own cancellation
+handling, not on this timeout alone. What this closes, unconditionally,
+is the symptom that actually mattered: the turn itself always reaches a
+terminal state instead of hanging forever, and no other concurrent
+tool's already-completed result is held hostage by one that never
+finishes.
+
+Verified the new test is real: reverted the fix and watched it fail
+with `AttributeError: <module 'sarva.agent.loop'> has no attribute
+'_TOOL_TIMEOUT_SECONDS'` before re-applying — the test monkeypatches
+that constant down to make the check fast, so its absence is itself
+proof the fix wasn't there yet. All 28 pre-existing agent-loop tests
+pass unchanged.
+
 ### `WebFetchTool` and a real SSRF gap it had, found and closed
 
 `WebFetchTool` is marked `destructive=False` — deliberately, since

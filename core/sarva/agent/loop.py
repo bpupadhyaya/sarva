@@ -67,6 +67,21 @@ from sarva.providers.base import (
 )
 from sarva.providers.registry import Router, TaskClass, UnknownModelError
 
+# A real bug found by actually running a turn with one fast tool call
+# and one that never returns: asyncio.gather withholds ALL results
+# until EVERY coroutine finishes, so the hung tool blocked the entire
+# turn forever -- silently discarding the fast tool's already-completed
+# result too, confirmed live with a 5-second outer guard that never
+# unblocked. RunShellTool self-protects with its own internal 60s
+# timeout (core/sarva/agent/tools.py), but that's the only built-in
+# tool that does; McpToolAdapter.run() (a remote or stdio MCP server's
+# call_tool) has none at all, so any hung/unresponsive MCP server had no
+# recovery path whatsoever. 90s (longer than RunShellTool's own 60s) so
+# a tool with its own internal timeout gets to fire first and produce
+# its own specific message -- this is purely a backstop for tools that
+# don't self-protect, not a replacement for RunShellTool's own timeout.
+_TOOL_TIMEOUT_SECONDS = 90
+
 
 def _required_modalities(messages: list[Message]) -> set[Modality]:
     """What the routed model must support, computed from what's actually in
@@ -379,8 +394,26 @@ class AgentLoop:
                     )
                 else:
                     try:
-                        raw = await tool.run(call.arguments, ctx)
+                        raw = await asyncio.wait_for(
+                            tool.run(call.arguments, ctx), timeout=_TOOL_TIMEOUT_SECONDS
+                        )
                         result = raw.model_copy(update={"tool_call_id": call.id})
+                    except TimeoutError:
+                        # A hung tool call is scored the same way a raised
+                        # exception already is -- a real, visible
+                        # is_error=True result the model sees and can react
+                        # to -- rather than blocking every OTHER concurrent
+                        # tool call's already-completed result forever, the
+                        # real bug this closes.
+                        result = ToolResultBlock(
+                            tool_call_id=call.id,
+                            content=[
+                                TextBlock(
+                                    text=f"tool call timed out after {_TOOL_TIMEOUT_SECONDS}s"
+                                )
+                            ],
+                            is_error=True,
+                        )
                     except Exception as e:  # a tool error never crashes the loop
                         result = ToolResultBlock(
                             tool_call_id=call.id,
