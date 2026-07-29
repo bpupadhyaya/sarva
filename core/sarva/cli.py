@@ -575,7 +575,7 @@ def distill_cmd(
 
 
 async def _distill(prompts_file: Path, model: str, out: Path, system: str | None) -> None:
-    from sarva.distill import distill, save_jsonl
+    from sarva.distill import DistillationError, distill, save_jsonl
 
     router = _build_router()
     providers = _build_providers()
@@ -590,7 +590,30 @@ async def _distill(prompts_file: Path, model: str, out: Path, system: str | None
     prompts_text = _read_text_or_exit(prompts_file, "prompts file")
     prompts = [line.strip() for line in prompts_text.splitlines() if line.strip()]
     console.print(f"Distilling {len(prompts)} prompts from {model}...")
-    records = await distill(prompts, provider, model=model, system=system)
+    try:
+        records = await distill(prompts, provider, model=model, system=system)
+    except DistillationError as e:
+        # A real bug found by actually running a provider that fails on
+        # prompt N of a larger batch: before this, the ProviderError
+        # propagated with every completion already generated simply
+        # discarded -- the same "expensive work thrown away" concern
+        # this function's own save_jsonl handling below already names,
+        # just reached from the generation side instead of the write
+        # side. distill() now raises DistillationError carrying every
+        # completion it managed before the failure, so those aren't lost
+        # just because a later prompt in the same batch failed.
+        console.print(f"[red]{e}[/red]")
+        if e.partial_records:
+            try:
+                save_jsonl(e.partial_records, out)
+            except OSError as write_err:
+                _print_file_error("write", "output file", out, write_err)
+                raise typer.Exit(1) from write_err
+            console.print(
+                f"[yellow]saved {len(e.partial_records)} completed record(s) to {out} "
+                "before the failure[/yellow]"
+            )
+        raise typer.Exit(1) from e
     try:
         save_jsonl(records, out)
     except OSError as e:

@@ -619,6 +619,46 @@ def test_distill_with_an_unwritable_out_path_fails_cleanly_not_a_traceback(monke
     assert not bad_out.exists()
 
 
+def test_distill_saves_already_generated_records_when_a_later_prompt_fails(monkeypatch, tmp_path):
+    # A real bug found by actually running a provider that fails on
+    # prompt N of a larger batch: distill() used to let the ProviderError
+    # propagate straight out with every already-generated (real,
+    # potentially expensive) completion simply discarded -- never
+    # returned, never persisted. distill() now raises DistillationError
+    # carrying those completions, and _distill() saves them to --out
+    # instead of losing them just because a later prompt failed.
+    import sarva.distill as distill_module
+
+    _clear_provider_env(monkeypatch)
+    prompts_file = tmp_path / "prompts.txt"
+    prompts_file.write_text("p1\np2\np3\n")
+    out_file = tmp_path / "out.jsonl"
+
+    async def fake_distill(prompts, provider, model, system=None):
+        raise distill_module.DistillationError(
+            "generation failed after 2/3 prompts: simulated failure",
+            partial_records=[
+                distill_module.DistillationRecord(prompt="p1", completion="c1", model=model),
+                distill_module.DistillationRecord(prompt="p2", completion="c2", model=model),
+            ],
+        )
+
+    monkeypatch.setattr(distill_module, "distill", fake_distill)
+
+    result = runner.invoke(
+        app, ["distill", str(prompts_file), "--model", "mock", "--out", str(out_file)]
+    )
+
+    assert result.exit_code == 1
+    assert "generation failed after 2/3 prompts" in result.stdout
+    assert "saved 2 completed record" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert out_file.exists()
+    lines = out_file.read_text().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["prompt"] == "p1"
+
+
 def test_distill_fails_cleanly_for_a_provider_that_is_not_configured(monkeypatch, tmp_path):
     _clear_provider_env(monkeypatch)
     prompts_file = tmp_path / "prompts.txt"

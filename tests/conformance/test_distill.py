@@ -9,8 +9,7 @@ split as every other live-only concern in this project.
 from __future__ import annotations
 
 import pytest
-from sarva.distill import DistillationRecord, distill, load_jsonl, save_jsonl
-from sarva.providers.base import ProviderError
+from sarva.distill import DistillationError, DistillationRecord, distill, load_jsonl, save_jsonl
 from sarva.providers.mock import MockProvider, ScriptedTurn
 
 
@@ -38,10 +37,43 @@ async def test_distill_propagates_a_provider_error_rather_than_masking_it():
     # Unlike run_benchmark (which scores a failing case as incorrect and
     # continues), distillation output becomes training data -- a silent
     # or garbage record is worse than a loud failure. A ProviderError on
-    # any prompt must propagate, not get swallowed into a record.
+    # any prompt must propagate (wrapped as DistillationError, not
+    # swallowed into a record).
     provider = MockProvider(script=[ScriptedTurn(error="rate limited")])
-    with pytest.raises(ProviderError):
+    with pytest.raises(DistillationError):
         await distill(["hello"], provider, model="mock")
+
+
+async def test_distill_error_carries_every_record_already_generated():
+    # A real bug found by actually running a provider that fails on
+    # prompt N of a larger batch: before this, the exception propagated
+    # straight out of distill() with the records list holding every
+    # already-generated (real, potentially expensive) completion simply
+    # discarded -- never returned, never persisted. DistillationError
+    # now carries those already-succeeded records so a caller isn't
+    # forced to throw away real work just because a later prompt in the
+    # same batch failed.
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(text="Paris"),
+            ScriptedTurn(text="four"),
+            ScriptedTurn(error="rate limited"),
+        ]
+    )
+
+    with pytest.raises(DistillationError) as excinfo:
+        await distill(
+            ["capital of France?", "2+2?", "this one fails", "never reached"],
+            provider,
+            model="mock",
+        )
+
+    partial = excinfo.value.partial_records
+    assert partial == [
+        DistillationRecord(prompt="capital of France?", completion="Paris", model="mock"),
+        DistillationRecord(prompt="2+2?", completion="four", model="mock"),
+    ]
+    assert "2/4" in str(excinfo.value)
 
 
 async def test_distill_passes_the_system_prompt_through():

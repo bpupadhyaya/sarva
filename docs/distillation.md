@@ -55,6 +55,27 @@ propagates immediately rather than being caught. Distillation output
 becomes training data; a silently-missing or garbage record is a worse
 outcome than a loud failure a caller can retry or investigate.
 
+**"Propagates" used to mean "discards," which was itself a real bug.**
+A real bug found by actually running a provider that fails on prompt N
+of a larger batch: the raw `ProviderError` propagated with the
+`records` list holding every already-generated (real, potentially
+expensive) completion simply lost — never returned, never persisted,
+since nothing was handed back to the caller until the whole loop
+finished successfully. That's a materially worse outcome than the loud
+failure this module intends: failing loudly on bad output is right,
+but throwing away *already-good* output in the process isn't the same
+thing. Fixed with a new `DistillationError`, raised in place of the raw
+`ProviderError`, carrying every record generated before the failure on
+a `partial_records` attribute. `sarva distill`'s own CLI command now
+catches it and saves those records to `--out` before exiting 1 — the
+same "don't throw away expensive work already done" principle already
+applied to this command's write-failure fix (see the packaging
+chapter), just closed on the generation side instead of the write side.
+**Verified the new tests are real:** reverted the fix and watched the
+whole test module fail to even collect (`ImportError: cannot import
+name 'DistillationError'`) before re-applying, the same discipline
+already used for the `VectorMemoryStore` fix.
+
 ## Try it
 
 ```bash

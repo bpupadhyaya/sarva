@@ -7134,3 +7134,75 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## distill() discarded every already-generated (real, paid-for) completion when a later prompt in the same batch failed
+
+A fresh Explore-agent sweep at twenty rounds deep, pointed at
+increasingly specific angles: `agent/tools.py`'s individual tools
+(clean -- every real call site already routes through `AgentLoop`'s own
+established `except Exception`), the router's zero-model/all-mismatch
+edge cases (clean), foundry's tokenizer/dataset degenerate-input edges
+(clean, or too speculative to report), the Tauri sidecar's own logging
+gate (a real but lower-confidence finding, not picked up this round),
+and env-var `int()`/`float()` parsing (clean). The one clear, concrete
+finding: `core/sarva/distill.py`'s `distill()` loop had no error
+handling around its own per-prompt generation call.
+
+`distill()`'s own docstring is explicit that this is *intentional* in
+one respect -- unlike `run_benchmark` (which scores a failing case
+incorrect and keeps going), a `ProviderError` here is meant to
+propagate loudly rather than get silently swallowed into a garbage
+record, since distillation output becomes real training data. That
+design choice is sound. The bug is a side effect of how it was
+implemented: `records` was a plain local list, never returned or
+persisted until the whole loop finished successfully, so when prompt N
+of a larger batch raised `ProviderError`, every completion already
+generated before that point -- real, potentially expensive, already-paid
+API calls -- was simply lost along with the exception. Confirmed live:
+a `FlakyProvider` failing on the 3rd of 5 prompts crashed `distill()`
+with the 2 successful completions generated so far gone for good, never
+returned, never written anywhere. `cli.py`'s `_distill()` had no
+try/except around the `await distill(...)` call either, so this
+surfaced as a raw traceback.
+
+This is the identical "expensive work thrown away" concern already
+named and fixed once for this exact command, just on the opposite side:
+the write-failure fix (`save_jsonl`'s `OSError` handling, a few
+milestones back) protects the *output* of a successful distillation run
+from being lost to a bad `--out` path; this bug threw away the *input*
+to that write step whenever a mid-batch failure happened first --
+strictly more common, since any single rate limit or transient timeout
+on a large prompt list triggers it, not just a misconfigured output
+path.
+
+**Fixed with a new `DistillationError`** (in `sarva.distill`), raised in
+place of the raw `ProviderError`, carrying every record already
+generated on a `partial_records` attribute -- the loud-failure principle
+stays intact (a caller still can't mistake a partial batch for a
+complete one), but the real work already done is no longer thrown away
+with it. `cli.py`'s `_distill()` now catches `DistillationError`,
+prints the real reason, and saves `partial_records` to `--out` (itself
+wrapped in the same clean `OSError` handling the full-success path
+already has) before exiting 1, rather than losing everything.
+
+**Verified the new tests are real:** reverted both files and watched
+the whole affected test module fail to even collect
+(`ImportError: cannot import name 'DistillationError'`) before
+re-applying -- the same discipline already used once for the
+`VectorMemoryStore` fix. Also updated the one pre-existing test whose
+assumption the fix deliberately changed (`ProviderError` propagating
+raw -> `DistillationError` wrapping it) rather than leaving it silently
+inconsistent with the new contract. All other pre-existing distill/CLI
+tests pass unchanged. 3 new/updated tests, 571 -> 573 Python tests.
+`docs/distillation.md` updated.
+
+**Next:** the Tauri sidecar's `tauri_plugin_log` registration being
+gated on `cfg!(debug_assertions)` (found this same sweep, lower
+confidence and Rust/desktop-specific -- worth a dedicated look);
+batching multiple concurrent inference requests (§3.6f, still a
+deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).
