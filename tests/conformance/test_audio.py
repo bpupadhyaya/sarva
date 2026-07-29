@@ -12,8 +12,13 @@ same proof."""
 
 from __future__ import annotations
 
+import io
+import math
+import random
 import shutil
+import struct
 import subprocess
+import wave
 from pathlib import Path
 
 import pytest
@@ -199,3 +204,72 @@ def test_espeak_synthesis_then_transcribe_round_trips_real_words(monkeypatch):
     lowered = text.lower()
     assert "quick brown fox" in lowered
     assert "lazy dog" in lowered
+
+
+def _synthetic_wav_bytes(duration_s: float = 1.0, freq: int = 440, rate: int = 16000) -> bytes:
+    """A real, tiny, stdlib-decodable WAV -- a pure sine wave encoded
+    with the stdlib `wave` module itself, not a fixture file checked
+    into the repo or dependent on any locally installed TTS engine, so
+    this test's own base audio is portable and regenerable on any
+    platform CI happens to run on (the same discipline
+    test_degraders.py's `_synthetic_video_bytes` already established
+    for the video degrader's own SIGBUS regression test)."""
+    n = int(duration_s * rate)
+    samples = [int(32767 * 0.5 * math.sin(2 * math.pi * freq * i / rate)) for i in range(n)]
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(struct.pack(f"<{n}h", *samples))
+    return buf.getvalue()
+
+
+def _fuzzed_wav_bytes(seed: int, trials: int) -> bytes:
+    """Deterministically regenerates one specific fuzzed variant from a
+    fixed-seed random-byte-flip fuzzing run over a real, valid WAV --
+    the exact methodology (and the same underlying PyAV/libavcodec
+    dependency) that found a real SIGBUS crash in this project's own
+    video degrader (see `_video_worker.py`'s docstring) and,
+    independently, in `faster_whisper.audio.decode_audio()` (see
+    `sarva._audio_decode_worker`'s own docstring): this exact seed and
+    trial count reliably reproduces one of several confirmed
+    process-killing fuzzed variants found by mutating this base WAV's
+    header bytes, confirmed directly against the real installed
+    `av`/libavcodec build in this environment, not assumed. Regenerating
+    the exact byte sequence here (rather than checking in an opaque
+    binary fixture) keeps the crash trigger self-documenting and
+    reproducible against whatever PyAV build is actually installed when
+    this test runs."""
+    rng = random.Random(seed)
+    raw = bytearray(_synthetic_wav_bytes())
+    fuzzed = raw
+    for _ in range(trials):
+        fuzzed = bytearray(raw)
+        n_flips = rng.randint(1, 20)
+        for _ in range(n_flips):
+            idx = rng.randrange(min(len(fuzzed), 2000))
+            fuzzed[idx] = rng.randrange(256)
+    return bytes(fuzzed)
+
+
+@pytest.mark.skipif(not stt_extra_installed(), reason="sarva[audio] (faster-whisper) not installed")
+def test_transcribe_survives_a_native_decoder_crash_not_just_a_python_exception():
+    # A real bug found by directly fuzzing a valid WAV (random byte
+    # flips) and running the exact faster_whisper.audio.decode_audio()
+    # call this module used to make in-process: some fuzzed variants
+    # don't raise a Python exception at all, they kill the process
+    # outright with a real SIGBUS -- the identical native-crash bug
+    # class already found and fixed in the video degrader
+    # (sarva.multimodal.degraders._video_worker), confirmed here
+    # independently rather than merely assumed to apply by analogy,
+    # since faster-whisper uses the same PyAV/libavcodec dependency for
+    # its own audio decoding. Fixed by running the actual decode in an
+    # isolated subprocess (sarva._audio_decode_worker) -- a crash there
+    # only kills that subprocess. This test's own success (it completes
+    # at all, in the same pytest process that started it) is the actual
+    # proof the isolation works, not just an assertion on the result.
+    fuzzed = _fuzzed_wav_bytes(seed=55, trials=7)
+
+    with pytest.raises(RuntimeError, match="could not decode audio"):
+        transcribe(fuzzed)

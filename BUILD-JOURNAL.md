@@ -6303,3 +6303,94 @@ to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred). No open candidates remain from
 recent sweeps -- worth another fresh one next time.
+
+## Audio transcription had the identical native-SIGBUS gap as video -- confirmed independently, not assumed by analogy
+
+A fresh Explore-agent sweep, pointed specifically at checking whether
+the "native process crash" bug class the video-degrader fix just
+closed existed anywhere else in the codebase that processes untrusted
+binary input through a native library. It did: `faster_whisper.audio.
+decode_audio()` -- called from `sarva.audio.transcribe()`, in turn
+called from `AudioToTextDegrader.degrade()` and the `sarva transcribe`
+CLI command -- uses the exact same PyAV/libavcodec `av.open`/
+`container.decode` call that crashed the video decoder. Confirmed
+independently rather than assumed to apply by analogy: fuzzing a real
+WAV (random byte flips concentrated in the header, across many seeded
+trials, against two different base WAVs -- one from this project's own
+`synthesize()` TTS output, one a pure-stdlib sine wave) reliably killed
+the process outright with a real SIGBUS (signal 10), not a Python
+exception, when fed through `sarva.audio.transcribe()`.
+
+**Fixed with the same process-isolation pattern as the video fix, with
+one deliberate refinement.** The video fix isolated the *entire*
+decode+sample step since PyAV decoding was the whole job. Here,
+`WhisperModel.transcribe()` does two very different things: a cheap
+native decode (the risky part) and expensive model inference (loading
++ running a real neural network, cached in-process via `lru_cache`
+specifically because reloading it every call would be a real
+performance regression). Reading `faster-whisper`'s own source
+confirmed `transcribe()` accepts an already-decoded `numpy.ndarray`
+directly and skips its internal `decode_audio()` call when given one --
+so only the actual decode moved to a new subprocess
+(`sarva._audio_decode_worker`, spawned via `python -m`, reading raw
+audio bytes over stdin and writing raw float32 samples back over
+stdout), while the whisper model itself stays cached and in-process
+exactly as before. This is a more surgical isolation than the video
+fix needed, made possible by the SDK's own API shape rather than a
+project design choice -- confirmed the sample rate matches exactly too
+(`FeatureExtractor`'s fixed 16000Hz default, read directly from
+`faster-whisper`'s own source, not assumed).
+
+`subprocess.run(timeout=...)` handles kill-and-reap automatically on
+timeout (Python's own documented behavior), so unlike the `asyncio`-based
+timeout fixes elsewhere in this project (`RunShellTool`, the video
+worker), no manual `proc.kill()`/`proc.wait()` was needed here --
+`transcribe()` was already a synchronous, non-async function, so a
+synchronous `subprocess.run()` call fits its existing shape without
+requiring `sarva.audio`'s public API to become async (which would have
+been a much larger, riskier change rippling into the CLI's `transcribe`
+command and `AudioToTextDegrader`, neither of which needed to change at
+all for this fix).
+
+**Verified with the same strength of revert-and-verify as the video
+fix.** The regression test regenerates a confirmed-crashing fuzzed byte
+sequence deterministically from a pure-stdlib-generated base WAV (not
+dependent on any locally installed TTS engine, so it's portable across
+whatever CI runner's audio stack happens to be available -- a
+deliberate refinement over an earlier draft of this test that used
+`synthesize()`'s own OS-native TTS output as the base, which would have
+made the specific crash-triggering byte sequence non-portable across
+platforms). Reverting the fix and re-running that test didn't produce a
+failing assertion -- it genuinely killed the `pytest` process itself
+with the same fatal-signal native stack dump the video fix's own
+revert-and-verify produced, before re-applying.
+
+All pre-existing audio tests (real TTS->STT round trips, model-size
+selection, the missing-extra error path, ...) still pass unchanged
+against the new implementation -- `transcribe()`'s public signature and
+return type never changed, only its internal decode step.
+
+1 new test, 551 -> 552 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated. **This closes the native-crash bug
+class for both media types this project decodes via PyAV (video,
+audio) -- worth checking whether any other native-library codepath
+(image, foundry checkpoint loading) shares it next time.**
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred). A minor, lower-severity finding
+from the same sweep, not yet picked up: `ImageToTextDegrader.degrade()`
+doesn't catch `PIL.Image.DecompressionBombError` for a tiny image
+declaring huge pixel dimensions -- already caught one layer up by
+`AgentLoop`'s broadened degradation-fallback `except Exception`, so
+severity is low, but a direct/library caller of the degrader outside
+that wrapper still gets a raw traceback instead of the documented
+`ImageDecodeError`. Also flagged: a corrupted foundry checkpoint bundle
+(`torch.load` on a truncated `model.pt`) crashes `build_providers()`
+with a raw, uncaught exception -- the same "corrupted on-disk state"
+bug class already fixed twice for `config.json` and session files, just
+not yet picked up for foundry checkpoints.

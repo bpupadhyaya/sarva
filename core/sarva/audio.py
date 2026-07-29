@@ -67,7 +67,6 @@ standing in for one.
 
 from __future__ import annotations
 
-import io
 import platform
 import shutil
 import subprocess
@@ -222,6 +221,49 @@ def _whisper_model(model_size: str):
     return WhisperModel(model_size, device="cpu", compute_type="int8")
 
 
+_DECODE_TIMEOUT_SECONDS = 30
+
+
+def _decode_audio_isolated(audio_bytes: bytes):
+    """Runs `faster_whisper.audio.decode_audio()` in an isolated
+    subprocess (`sarva._audio_decode_worker`, see its own docstring for
+    the full story) rather than in-process. A real bug found by
+    directly fuzzing a real WAV file: `decode_audio()` uses the same
+    PyAV/libavcodec call that crashed the video degrader with a native
+    SIGBUS -- several fuzzed variants killed the whole process the
+    identical way, confirmed directly, not assumed from the video fix
+    alone. A crash here now only kills this subprocess; the timeout
+    (mirroring `RunShellTool`'s own fix for a hung/resource-exhausting
+    subprocess) is handled by `subprocess.run` itself, which kills and
+    reaps the child on expiry -- no manual cleanup needed the way the
+    asyncio-based fixes elsewhere in this project require.
+
+    Raises `RuntimeError` (never propagates a raw PyAV/ctranslate2
+    exception, and never lets a native crash escape uncaught) on any
+    decode failure -- ordinary or a native crash, deliberately
+    indistinguishable to the caller, since both mean the same thing:
+    "couldn't safely decode this audio." """
+    import subprocess
+    import sys
+
+    import numpy as np
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "sarva._audio_decode_worker"],
+            input=audio_bytes,
+            capture_output=True,
+            timeout=_DECODE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("audio decode timed out") from e
+
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"could not decode audio{f': {detail}' if detail else ''}")
+    return np.frombuffer(result.stdout, dtype=np.float32)
+
+
 def transcribe(audio_bytes: bytes, model_size: str = "tiny") -> str:
     """Real local speech-to-text via `faster-whisper`. Raises
     `ImportError` (with a clear `pip install sarva[audio]` message) if
@@ -235,11 +277,19 @@ def transcribe(audio_bytes: bytes, model_size: str = "tiny") -> str:
     substrate, sensible default, no fabricated benchmark claiming a
     bigger model is `sarva[audio]`'s default" discipline this project
     applies elsewhere; a caller who wants better accuracy passes a
-    larger `model_size` explicitly."""
+    larger `model_size` explicitly.
+
+    The actual audio decode (not the whisper model inference itself)
+    runs in an isolated subprocess -- see `_decode_audio_isolated`'s own
+    docstring for the real, confirmed bug this closes. Only the risky
+    native-decode step is isolated, not the (expensive to reload)
+    whisper model itself, which stays cached in-process via
+    `_whisper_model`'s `lru_cache`."""
     if not stt_extra_installed():
         raise ImportError(
             "faster-whisper is not installed -- pip install sarva[audio] for local speech-to-text"
         )
+    audio_array = _decode_audio_isolated(audio_bytes)
     model = _whisper_model(model_size)
-    segments, _info = model.transcribe(io.BytesIO(audio_bytes))
+    segments, _info = model.transcribe(audio_array)
     return " ".join(segment.text.strip() for segment in segments).strip()

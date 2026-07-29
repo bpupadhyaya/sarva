@@ -517,6 +517,31 @@ mock. A full `espeak-ng` → `faster-whisper` round trip (real
 synthesized speech, transcribed back, words checked) passed the same
 way the `say` round trip already had.
 
+**A corrupted audio attachment could crash the whole process with a
+native SIGBUS — the identical bug class already found and fixed for
+the video degrader.** `faster_whisper.audio.decode_audio()` uses the
+exact same PyAV/libavcodec `av.open`/`container.decode` call that
+crashed the video decoder; confirmed directly, not assumed from that
+earlier fix alone, by fuzzing a real WAV (random byte flips
+concentrated in the header, across several seeds): multiple fuzzed
+variants killed the process outright with a real SIGBUS (signal 10),
+not a Python exception, when fed through `sarva.audio.transcribe()`.
+No `try`/`except`, however broad, can catch a native memory fault.
+Fixed the same way as the video degrader: the actual decode step now
+runs in an isolated subprocess (`sarva._audio_decode_worker`, spawned
+via `python -m`), with `subprocess.run`'s own `timeout=` handling
+kill-and-reap automatically (no manual `proc.kill()`/`proc.wait()`
+needed the way the `asyncio`-based fixes elsewhere in this project
+require). Only the risky decode step moved to a subprocess — the
+expensive-to-reload whisper model itself stays cached in-process via
+`_whisper_model`'s existing `lru_cache`, since `WhisperModel.transcribe()`
+accepts an already-decoded numpy array directly and skips its own
+internal decode step when given one. `transcribe()`'s and
+`AudioToTextDegrader`'s existing behavior for an ordinary (non-crashing)
+bad-audio failure is unchanged — both still degrade cleanly, just now
+via a clean `RuntimeError` from the isolated decode step instead of
+whatever exception the in-process call used to raise.
+
 **`synthesize()` itself could crash with a raw subprocess error, found
 by actually running it against the real `espeak-ng` binary with a bad
 `--voice`.** `espeak-ng` genuinely exits 1 for an unrecognized voice
