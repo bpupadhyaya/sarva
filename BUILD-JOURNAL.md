@@ -6456,3 +6456,54 @@ broadened degradation fallback catches it one layer up) remains open
 for a future pass, along with the standing deferred list: batching
 (§3.6f), F1's distributed training infra, Gemini's Files API for long
 video, and desktop code-signing/notarization.
+
+## ImageToTextDegrader's last uncaught PIL exception type -- a small, low-severity cleanup closing out the current candidate list
+
+The last remaining finding from the audio-SIGBUS sweep, small enough
+to close in one pass. `ImageToTextDegrader`'s `except (UnidentifiedImageError,
+OSError)` clause -- already widened twice this project for the
+truncated-image `OSError` bug -- still missed one real PIL exception
+type: `PIL.Image.DecompressionBombError`, raised when `Image.open()`
+itself decides a declared width x height is implausibly large (a
+built-in guard against a classic "tiny file, huge declared dimensions"
+denial-of-service pattern). Confirmed live with a hand-crafted, ~69-byte
+PNG whose IHDR chunk declares a 20000x20000 image (no real pixel data
+needed at all -- the check fires from the header alone, before any
+pixel decoding): `Image.open()` raised the raw, uncaught
+`DecompressionBombError` straight out of `ImageToTextDegrader.degrade()`.
+
+**Lower severity than the previous two image-degrader fixes, and
+explicitly named as such rather than overstated:** `AgentLoop`'s own
+degradation-fallback `except Exception` (widened two milestones ago for
+the corrupt/truncated-image crash) already catches this one layer up,
+so it was never reaching a real skin as a crash. But a direct caller of
+this degrader outside that wrapper -- a test, a future library user --
+still got a raw PIL exception instead of the degrader's own documented
+`ImageDecodeError`, the same "give callers one exception type to catch,
+not a leaky implementation detail" reasoning behind every previous fix
+in this family.
+
+Fixed by widening the `except` clause once more, to
+`(UnidentifiedImageError, OSError, Image.DecompressionBombError)` --
+the third and (as far as this project's own repeated auditing has
+found) final gap in this specific exception-handling chain. Verified
+the new test is real: reverted the fix and watched it fail with the
+raw, uncaught `DecompressionBombError` before re-applying, same
+discipline as every fix in this journal since the MCP tool-name
+escaping milestone. All 32 pre-existing degrader tests still pass
+unchanged.
+
+1 new test, 554 -> 555 Python tests. `ruff check`/`format --check`
+clean. `docs/agent-loop.md` updated. **This closes out every real
+finding from the last two Explore-agent sweeps (image-degradation
+crash, Ollama/Anthropic/OpenAI/Google SDK exceptions, video SIGBUS,
+audio SIGBUS, foundry checkpoint corruption, and now this) -- worth a
+fresh sweep next time rather than continued incremental cleanup.**
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import io
 import random
+import struct
 import wave
+import zlib
 
 import av
 import pytest
@@ -33,6 +35,26 @@ def _png_bytes(width: int, height: int) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (width, height), color=(255, 0, 0)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _huge_declared_dimensions_png_bytes(width: int, height: int) -> bytes:
+    """A hand-crafted, ~69-byte PNG whose IHDR chunk *declares* a huge
+    width/height (no real pixel data is ever encoded -- Pillow's
+    decompression-bomb check fires from the declared dimensions alone,
+    before any pixel decoding happens), used to reproduce a real bug:
+    Image.open() raises PIL.Image.DecompressionBombError for this, a
+    plain Exception subclass distinct from OSError/UnidentifiedImageError,
+    confirmed directly against the real installed Pillow in this
+    environment."""
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+    idat = zlib.compress(b"")
+    return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
 def _stt_installed() -> bool:
@@ -180,6 +202,23 @@ async def test_degrade_raises_a_clear_error_on_a_truncated_real_image():
     # regression pin either way).
     raw = _png_bytes(64, 32)
     block = ImageBlock(media_type="image/png", data=raw[:20])
+    with pytest.raises(ImageDecodeError, match="could not decode image for degradation"):
+        await ImageToTextDegrader().degrade(block)
+
+
+async def test_degrade_raises_a_clear_error_on_a_declared_decompression_bomb():
+    # A real bug found the same way as the truncated-image one above: a
+    # tiny (~69-byte) PNG declaring a huge width/height in its header
+    # makes Image.open() itself raise PIL.Image.DecompressionBombError
+    # -- a plain Exception subclass, not OSError/UnidentifiedImageError,
+    # the only two this degrader's except clause used to catch. Lower
+    # severity than the truncated-image bug (AgentLoop's own broadened
+    # degradation-fallback `except Exception` already catches this one
+    # layer up), but a direct caller of this degrader outside that
+    # wrapper still got a raw PIL exception instead of the documented
+    # ImageDecodeError.
+    raw = _huge_declared_dimensions_png_bytes(20000, 20000)
+    block = ImageBlock(media_type="image/png", data=raw)
     with pytest.raises(ImageDecodeError, match="could not decode image for degradation"):
         await ImageToTextDegrader().degrade(block)
 

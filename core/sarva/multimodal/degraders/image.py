@@ -41,7 +41,7 @@ class ImageToTextDegrader:
             with Image.open(io.BytesIO(raw)) as img:
                 width, height = img.size
                 image_format = img.format or block.media_type
-        except (UnidentifiedImageError, OSError) as e:
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
             # A real bug found by actually degrading a genuinely
             # truncated (not just unrecognizable) real JPEG: Pillow
             # raises a plain OSError ("Truncated File Read") reading
@@ -49,6 +49,19 @@ class ImageToTextDegrader:
             # UnidentifiedImageError -- that case reached this function's
             # caller as a raw, uncontextualized PIL error instead of this
             # degrader's own documented ImageDecodeError.
+            #
+            # DecompressionBombError is the same class of gap, found the
+            # same way: a hand-crafted PNG declaring a huge width/height
+            # in its header (69 real bytes, no actual pixel data) makes
+            # Image.open() itself raise it -- a plain Exception subclass,
+            # not OSError/UnidentifiedImageError, so it reached this
+            # function's caller unwrapped too. AgentLoop's own
+            # degradation fallback already catches Exception broadly
+            # (see loop.py), so this was never a process-crashing gap
+            # the way the video/audio SIGBUS bugs were -- but a direct
+            # caller of this degrader (a test, a future library user)
+            # outside that wrapper still got a raw PIL exception instead
+            # of this degrader's own documented ImageDecodeError.
             raise ImageDecodeError(f"could not decode image for degradation: {e}") from e
 
         size_kb = len(raw) / 1024

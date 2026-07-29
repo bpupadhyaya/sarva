@@ -184,6 +184,19 @@ a truncated image reached this fallback as a raw, uncontextualized PIL
 error instead of `ImageDecodeError`; fixed by widening that degrader's
 own `except` to `(UnidentifiedImageError, OSError)`.
 
+**A third, lower-severity sibling found the same way in a later pass:**
+`PIL.Image.DecompressionBombError` (a tiny, hand-crafted PNG declaring
+a huge width/height in its header — no real pixel data needed, since
+Pillow's check fires from the declared dimensions alone) is a plain
+`Exception` subclass, not `OSError`/`UnidentifiedImageError`, so it
+reached `ImageToTextDegrader`'s caller unwrapped too. Already caught
+one layer up by this loop's own broadened `except Exception` above, so
+this was never a crash reaching a real skin — but a direct caller of
+the degrader outside that wrapper (a test, a future library user)
+still got a raw PIL exception instead of the documented
+`ImageDecodeError`. `except` widened once more, to
+`(UnidentifiedImageError, OSError, Image.DecompressionBombError)`.
+
 ## Failure handling, named explicitly rather than left implicit
 
 - A provider crash (any exception escaping `provider.generate()`, not
