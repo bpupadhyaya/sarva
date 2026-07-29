@@ -651,6 +651,30 @@ library level and through the actual CLI, and confirmed the new tests
 are real by reverting the fix and watching both fail for the right
 reason before re-applying.
 
+**`synthesize()`'s three `subprocess.run` calls had no timeout at
+all — a real bug found by actually running it against a hung TTS
+binary, not a theoretical concern.** The sibling STT decode path
+(`_decode_audio_isolated`) explicitly mirrors `RunShellTool`'s own
+timeout fix, but that reasoning was never applied to TTS. Confirmed
+live: a fake `say` binary that never returns hung `synthesize()`
+indefinitely, with no way to recover — this module's own docstring
+already names the real threat model this matters for ("an agent
+speaking its own output"), so `text` can be arbitrary, potentially
+adversarial model-generated content, not just a short human-typed
+phrase, and a wedged or resource-exhausted OS speech engine has no
+guard at all. Fixed by adding `timeout=60` (mirroring `RunShellTool`'s
+own 60-second timeout) to all three `subprocess.run` calls (`say`,
+PowerShell/SAPI, `espeak`/`espeak-ng`), and a new `except
+subprocess.TimeoutExpired` clause in `synthesize()` turning it into the
+same clean `RuntimeError` shape the "engine itself fails" case above
+already produces. `subprocess.run`'s own `timeout=` already kills and
+reaps the child on expiry — no manual cleanup needed, the same
+"`TimeoutExpired` handles it" discipline the STT decode path already
+established. Verified the new test is real: reverted the fix and
+watched it fail with a raw `TypeError` (the fake `subprocess.run` in
+the test expects a `timeout` keyword argument the reverted code never
+passes) before re-applying.
+
 **Windows had no engine at all until now** — this module's own
 docstring named it as genuinely unimplemented, not just unverified.
 It's closed the same way the other two branches are: shell out to an

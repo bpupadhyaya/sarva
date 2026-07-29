@@ -7715,3 +7715,68 @@ environment doesn't have); Gemini's Files API for long-video input (no
 API key here to verify live); a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have -- likely stays deferred).
+
+## synthesize()'s TTS subprocess calls had no timeout -- one of the two gaps named but deliberately deferred from the previous milestone, closed directly
+
+Picked up from the atomic-write milestone's own deferred list: all
+three `subprocess.run` calls in `_synthesize_with_detected_engine`
+(`say`, PowerShell/SAPI, `espeak`/`espeak-ng`) had no `timeout=` at
+all, unlike the sibling STT decode path
+(`_decode_audio_isolated`), which explicitly mirrors `RunShellTool`'s
+own timeout fix and even says so in its own docstring -- that
+reasoning simply never got applied to the TTS side of the same module.
+
+**Confirmed live, not assumed:** built a fake `say` binary (a shell
+script that just `sleep`s), pointed `PATH` at it so `shutil.which("say")`
+resolved to the fake, and called `_synthesize_with_detected_engine`
+under a `SIGALRM`-based outer guard so the demonstration itself
+couldn't actually hang -- the call was still blocked past 5 seconds
+with zero recovery, confirming the underlying `subprocess.run` call
+genuinely never returns on a wedged engine. This module's own docstring
+already names the real threat model this matters for: "an agent
+speaking its own output" -- `text` reaching `synthesize()` can be
+arbitrary, potentially large or adversarial model-generated content,
+not just a short human-typed CLI argument, making a hang here a real
+(if lower-probability) production risk, not a purely theoretical one.
+
+**Fixed by adding `timeout=60`** (mirroring `RunShellTool`'s own
+60-second timeout, `core/sarva/agent/tools.py`) to all three
+`subprocess.run` calls, plus a new `except subprocess.TimeoutExpired`
+clause in `synthesize()`'s existing wrapper, turning it into the same
+clean `RuntimeError` shape the "engine itself fails" case (the prior
+`CalledProcessError` fix) already produces. `subprocess.run`'s own
+`timeout=` parameter already kills and reaps the child process on
+expiry -- no manual cleanup needed, the identical "TimeoutExpired
+handles it" discipline the STT decode path already established, so
+this needed no new process-management code, just the parameter itself
+plus the corresponding except clause.
+
+**Verified the new test is real:** reverted the fix and watched it
+fail with a raw `TypeError` -- the test's fake `subprocess.run`
+expects a `timeout` keyword argument the reverted code never passes at
+all -- before re-applying. One pre-existing test (the Windows-branch
+hermetic argv/file-content check) needed its own fake `subprocess.run`
+signature updated to accept the new `timeout` keyword, since it stands
+in for the real call entirely; this is a mechanical accommodation of
+the fix, not a behavior change to what that test actually verifies.
+All other pre-existing audio tests pass unchanged. 1 new test, 584 ->
+585 Python tests. `docs/packaging.md` updated.
+
+**Next:** the other gap named alongside this one, still deferred:
+`AgentLoop.run()`'s `asyncio.gather` over concurrent tool calls has no
+per-tool or per-turn timeout -- a hung MCP server blocks the entire
+turn forever, silently withholding every other tool's already-completed
+result too. Bigger than this fix (picking a timeout duration and
+per-tool vs. loop-wide scope is closer to a design decision), so still
+named rather than picked up. Also still open: the config.json
+concurrent-process-write race (a lost-update race between two
+processes, not a corruption risk -- the atomic-rename fix already
+closes the corruption angle); the no-retry-cap gap named alongside the
+AgentLoop AssertionError fix; batching multiple concurrent inference
+requests (§3.6f, still a deliberate deferral -- real correctness risk);
+F1's real distributed training infrastructure (needs real multi-node
+compute this environment doesn't have); Gemini's Files API for
+long-video input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have -- likely stays
+deferred).

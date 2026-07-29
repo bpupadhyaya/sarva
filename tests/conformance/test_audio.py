@@ -88,6 +88,31 @@ def test_synthesize_raises_a_clear_runtime_error_with_no_engine(monkeypatch):
         synthesize("this should fail")
 
 
+def test_synthesize_raises_a_clean_runtime_error_on_a_hung_engine(monkeypatch):
+    # A real bug found by actually running synthesize() against a hung
+    # TTS binary (a fake `say` that never returns): none of the
+    # subprocess.run calls in _synthesize_with_detected_engine had a
+    # timeout at all, unlike the sibling STT decode path -- confirmed
+    # live, the call hung indefinitely with no way to recover. Pinned
+    # here without an actual hang (which would make this test itself
+    # hang): a fake subprocess.run raising the exact TimeoutExpired
+    # subprocess.run's own real timeout= parameter would raise.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        audio_module.shutil, "which", lambda cmd: "/usr/bin/say" if cmd == "say" else None
+    )
+
+    def fake_run(args, check, capture_output, timeout):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="text-to-speech engine timed out"):
+        synthesize("this should time out")
+
+
 @pytest.mark.skipif(not _has_espeak, reason="espeak/espeak-ng not installed")
 def test_synthesize_falls_back_to_espeak_when_say_is_unavailable(monkeypatch):
     # On real macOS the Darwin branch (say) always wins, so this is the
@@ -158,7 +183,7 @@ def test_windows_branch_never_puts_raw_text_on_the_command_line(monkeypatch):
         audio_module.shutil, "which", lambda cmd: "powershell.exe" if cmd == "powershell" else None
     )
 
-    def fake_run(args, check, capture_output):
+    def fake_run(args, check, capture_output, timeout):
         # Inspect the temp text/script files *inside* the fake call --
         # synthesize()'s own TemporaryDirectory is cleaned up as soon as
         # it returns, so this is the only point they're on disk.

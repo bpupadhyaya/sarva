@@ -76,6 +76,17 @@ from pathlib import Path
 
 DEFAULT_MACOS_VOICE = "Samantha"
 
+# Mirrors RunShellTool's own timeout (core/sarva/agent/tools.py) -- a real
+# bug found by actually running synthesize() against a hung TTS binary
+# (a fake `say` that never returns): every subprocess.run call below had
+# no `timeout=` at all, unlike the sibling STT decode path
+# (_DECODE_TIMEOUT_SECONDS), so a wedged or resource-exhausted OS speech
+# engine hung the whole call indefinitely. This module's own docstring
+# names the real threat model this guards against -- "an agent speaking
+# its own output" -- so `text` here can be arbitrary, potentially huge,
+# model-generated content, not just a short human-typed phrase.
+_TTS_TIMEOUT_SECONDS = 60
+
 # Deliberately parameterized, never string-formatted with `text` itself --
 # `text` reaches this script only via `Get-Content` on a temp file passed as
 # a separate argv element, so arbitrary (e.g. model-produced) text can never
@@ -124,6 +135,19 @@ def synthesize(text: str, voice: str | None = None) -> bytes:
     synthesize."""
     try:
         return _synthesize_with_detected_engine(text, voice)
+    except subprocess.TimeoutExpired as e:
+        # A real bug found by actually running synthesize() against a
+        # hung TTS binary (a fake `say` that never returns): every
+        # subprocess.run call in _synthesize_with_detected_engine had no
+        # timeout at all, so a wedged or resource-exhausted OS speech
+        # engine hung this call indefinitely with no way to recover --
+        # confirmed live. subprocess.run's own `timeout=` already kills
+        # and reaps the child on expiry (no manual cleanup needed, the
+        # same "TimeoutExpired handles it" discipline the sibling STT
+        # decode path already established), so this only needs to turn
+        # the raw exception into the same clean RuntimeError every other
+        # engine failure below already produces.
+        raise RuntimeError(f"text-to-speech engine timed out after {e.timeout}s") from e
     except subprocess.CalledProcessError as e:
         # A real bug found by actually running `synthesize(text,
         # voice="bogus")` against the real espeak-ng branch: the raw
@@ -156,6 +180,7 @@ def _synthesize_with_detected_engine(text: str, voice: str | None) -> bytes:
                 ],
                 check=True,
                 capture_output=True,
+                timeout=_TTS_TIMEOUT_SECONDS,
             )
             return out_path.read_bytes()
 
@@ -183,7 +208,7 @@ def _synthesize_with_detected_engine(text: str, voice: str | None) -> bytes:
                 ]
                 if voice:
                     args += ["-VoiceName", voice]
-                subprocess.run(args, check=True, capture_output=True)
+                subprocess.run(args, check=True, capture_output=True, timeout=_TTS_TIMEOUT_SECONDS)
                 return out_path.read_bytes()
 
     engine = shutil.which("espeak-ng") or shutil.which("espeak")
@@ -196,7 +221,7 @@ def _synthesize_with_detected_engine(text: str, voice: str | None) -> bytes:
             if voice:
                 args += ["-v", voice]
             args.append(text)
-            subprocess.run(args, check=True, capture_output=True)
+            subprocess.run(args, check=True, capture_output=True, timeout=_TTS_TIMEOUT_SECONDS)
             return out_path.read_bytes()
 
     raise RuntimeError(
