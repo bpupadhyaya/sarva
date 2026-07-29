@@ -97,6 +97,29 @@ async def test_pure_tool_result_message_produces_no_leftover_main_message():
     assert out[0]["role"] == "tool"
 
 
+async def test_tool_result_with_an_image_raises_instead_of_silently_dropping_it():
+    # A real bug found by actually constructing a ToolResultBlock
+    # carrying an ImageBlock: the plain `"".join(... TextBlock)` this
+    # adapter used to build tool-message content silently dropped
+    # anything that wasn't a TextBlock, with no error. Unlike Anthropic/
+    # Gemini, this genuinely can't be fixed by sending the image along
+    # instead -- OpenAI's own SDK type
+    # (ChatCompletionToolMessageParam.content) only accepts text parts,
+    # confirmed by reading it directly -- so this must raise rather than
+    # guess at an unsupported wire shape.
+    m = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_call_id="t1", content=[ImageBlock(media_type="image/png", data=b"\x89PNG")]
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="ImageBlock"):
+        await _to_openai_messages(m)
+
+
 async def test_thinking_block_is_explicitly_dropped_not_translated():
     # Deliberate, named skip -- OpenAI has no documented way to accept a
     # caller-supplied reasoning trace back on the next turn. Verifies it

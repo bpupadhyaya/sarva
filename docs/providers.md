@@ -291,6 +291,53 @@ async-stream infra), 547 → 550 Python tests. **This closes the
 adapters (Anthropic, OpenAI, Google) — Ollama's own equivalent
 (malformed NDJSON, not an SDK exception) was already closed earlier.**
 
+### A `ToolResultBlock` carrying an image was silently dropped by all three real adapters — each fixed to match what its own SDK actually supports, not a uniform guess
+
+A fresh sweep, checking each adapter's request-translation logic beyond
+exception handling for the first time. All three built a tool result's
+wire-format content with the identical shape: `"".join(c.text for c in
+b.content if isinstance(c, TextBlock))` — silently discarding any block
+that wasn't a `TextBlock`. `ToolResultBlock.content`'s own type comment
+already names `ImageBlock` as an anticipated case, not a hypothetical
+— a screenshot or image-generation tool returning its result this way
+would have that image vanish with no error, on every adapter, the
+moment any built-in tool actually returned one (none does yet, so this
+was latent, not yet a live crash).
+
+**This isn't a uniform gap with a uniform fix — the three real SDKs
+genuinely disagree about whether a tool result can carry an image at
+all, confirmed by reading each SDK's own type definitions directly,
+not assumed:**
+
+- **Anthropic** (`ToolResultBlockParam.content: Union[str,
+  Iterable[Content]]`, where `Content` includes `ImageBlockParam`) —
+  genuinely supports it. Fixed by building a content list mixing text
+  and image parts whenever a result contains anything beyond plain
+  text; a text-only result still sends a plain string exactly as
+  before, so the overwhelmingly common case is unaffected.
+- **Google Gemini** (`FunctionResponse.parts:
+  list[FunctionResponsePart]`) — also genuinely supports it, via a
+  separate `parts` field alongside the plain `response` dict. Fixed by
+  attaching a `FunctionResponsePart.from_bytes(...)` for each image
+  found.
+- **OpenAI** (`ChatCompletionToolMessageParam.content: Union[str,
+  Iterable[ChatCompletionContentPartTextParam]]`) — text only, no
+  image variant exists in the type at all. Unlike the other two, this
+  genuinely can't be fixed by sending the image along — there's no
+  wire shape for it. Fixed the same way this project already treats
+  every other untranslatable block (the top-level `else: raise
+  ValueError(...)` a few lines above each of these fixes): raises a
+  clear `ValueError` naming the unsupported block type, rather than
+  silently completing the request with content missing.
+
+**Verified the new tests are real:** reverted all three adapters and
+watched each new test fail for the specific, correct reason — the
+Anthropic/Gemini tests failed on a missing image in the translated
+output, the OpenAI test failed with `Failed: DID NOT RAISE ValueError`
+— before re-applying. All 27 pre-existing tests across the three
+adapters' test files pass unchanged. 3 new tests, 574 → 577 Python
+tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

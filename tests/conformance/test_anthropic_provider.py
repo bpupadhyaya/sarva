@@ -73,6 +73,35 @@ async def test_tool_call_and_result_translation():
     }
 
 
+async def test_tool_result_with_an_image_sends_it_instead_of_silently_dropping_it():
+    # A real bug found by actually constructing a ToolResultBlock
+    # carrying an ImageBlock (e.g. a screenshot tool's result --
+    # ToolResultBlock.content's own type comment already names this as
+    # an anticipated shape): the plain `"".join(... TextBlock)` this
+    # adapter used to build tool_result content silently dropped
+    # anything that wasn't a TextBlock, with no error. Anthropic's own
+    # SDK type genuinely accepts a list mixing text and image blocks
+    # inside a tool result, confirmed by reading it directly.
+    raw = b"\x89PNG\r\n\x1a\n"
+    result = ToolResultBlock(
+        tool_call_id="t1",
+        content=[
+            TextBlock(text="here's the screenshot:"),
+            ImageBlock(media_type="image/png", data=raw),
+        ],
+    )
+    m = Message(role="user", content=[result])
+
+    out = await _to_anthropic_message(m)
+
+    tool_result = out["content"][0]
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["content"][0] == {"type": "text", "text": "here's the screenshot:"}
+    image_part = tool_result["content"][1]
+    assert image_part["type"] == "image"
+    assert base64.standard_b64decode(image_part["source"]["data"]) == raw
+
+
 async def test_thinking_block_with_a_signature_round_trips_to_the_wire_shape():
     # Anthropic requires the ORIGINAL signature back to accept a
     # thinking block as genuine history (an anti-tampering check) --

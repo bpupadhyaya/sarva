@@ -99,6 +99,32 @@ async def _to_openai_messages(m: Message) -> list[dict[str, Any]]:
                 }
             )
         elif isinstance(b, ToolResultBlock):
+            # A real bug found by actually constructing a ToolResultBlock
+            # carrying an ImageBlock (e.g. a screenshot/image-generation
+            # tool's result -- ToolResultBlock.content's own type comment
+            # already names this as an anticipated shape, not a
+            # hypothetical): the plain `"".join(... TextBlock)` here
+            # silently dropped it with no error. Unlike Anthropic/Gemini,
+            # this genuinely can't just be fixed by sending the image
+            # along instead -- OpenAI's own SDK type
+            # (`ChatCompletionToolMessageParam.content`) only accepts
+            # `str | Iterable[ChatCompletionContentPartTextParam]`, text
+            # parts only, confirmed by reading it directly. Silently
+            # dropping non-text content would still send Claude/GPT a
+            # tool result missing content the caller believes is
+            # present -- the same "materially misleading response" the
+            # `else: raise` a few lines below this exists to prevent for
+            # top-level blocks -- so this raises instead of guessing at a
+            # wire shape OpenAI doesn't actually support. Text-only
+            # results (the overwhelming common case) are completely
+            # unaffected.
+            for c in b.content:
+                if not isinstance(c, TextBlock):
+                    raise ValueError(
+                        f"OpenAIProvider cannot translate a {type(c).__name__!r} content "
+                        "block inside a tool result (OpenAI's tool-message content field "
+                        "only accepts text; no wire-format mapping exists for anything else)"
+                    )
             tool_messages.append(
                 {
                     "role": "tool",

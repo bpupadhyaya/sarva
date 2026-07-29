@@ -89,11 +89,55 @@ async def _to_anthropic_message(m: Message) -> dict[str, Any]:
         elif isinstance(b, ToolCallBlock):
             blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.arguments})
         elif isinstance(b, ToolResultBlock):
+            # A real bug found by actually constructing a ToolResultBlock
+            # carrying an ImageBlock (e.g. a screenshot/image-generation
+            # tool's result -- ToolResultBlock.content's own type comment
+            # already names this as an anticipated shape, not a
+            # hypothetical): the plain `"".join(... TextBlock)` here
+            # silently dropped it with no error, sending Claude a tool
+            # result missing content the caller believes is present --
+            # the exact "materially misleading response" the `else:
+            # raise` a few lines below this exists to prevent for
+            # top-level blocks, just never applied one level down inside
+            # a tool result. Anthropic's own SDK type
+            # (`ToolResultBlockParam.content`) genuinely accepts a list
+            # mixing text and image blocks, confirmed by reading it
+            # directly, not assumed -- so this is a real capability gap,
+            # not a wire-format limitation. Text-only results (the
+            # overwhelming common case) still send a plain string exactly
+            # as before, so no existing behavior changes for them.
+            tool_result_content: str | list[dict[str, Any]]
+            if all(isinstance(c, TextBlock) for c in b.content):
+                tool_result_content = "".join(c.text for c in b.content if isinstance(c, TextBlock))
+            else:
+                parts: list[dict[str, Any]] = []
+                for c in b.content:
+                    if isinstance(c, TextBlock):
+                        parts.append({"type": "text", "text": c.text})
+                    elif isinstance(c, ImageBlock):
+                        c_bytes = await resolve_media_bytes(c)
+                        parts.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": c.media_type,
+                                    "data": base64.standard_b64encode(c_bytes).decode(),
+                                },
+                            }
+                        )
+                    else:
+                        raise ValueError(
+                            f"AnthropicProvider cannot translate a {type(c).__name__!r} "
+                            "content block inside a tool result (no wire-format mapping "
+                            "exists for it yet)"
+                        )
+                tool_result_content = parts
             blocks.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": b.tool_call_id,
-                    "content": "".join(c.text for c in b.content if isinstance(c, TextBlock)),
+                    "content": tool_result_content,
                     "is_error": b.is_error,
                 }
             )

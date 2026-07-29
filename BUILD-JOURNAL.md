@@ -7359,3 +7359,70 @@ this environment doesn't have); Gemini's Files API for long-video input
 (no API key here to verify live); a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have -- likely stays deferred).
+
+## A ToolResultBlock carrying an image was silently dropped by all three real provider adapters -- picked up from the last sweep's own medium-severity finding, fixed three different ways per what each real SDK actually supports
+
+The second-ranked candidate from the AgentLoop retry-crash sweep,
+picked up directly. All three real adapters
+(`anthropic_provider.py`/`openai_provider.py`/`google_provider.py`)
+built a tool result's wire-format content with the identical shape --
+`"".join(c.text for c in b.content if isinstance(c, TextBlock))` --
+silently discarding any block that wasn't a `TextBlock`.
+`ToolResultBlock.content`'s own type comment already names `ImageBlock`
+as an anticipated case, not a hypothetical one invented for this
+finding -- a screenshot or image-generation tool's result would have
+lost its image on every adapter, with zero error, the moment any
+built-in tool actually returned one. Latent today (no current tool
+does), but a real, confirmed gap this project's own "never silently
+drop content" discipline is built specifically to catch -- the
+identical top-level `else: raise ValueError(...)` this file already
+applies to an untranslatable *top-level* block type had simply never
+been applied one level down, inside a tool result's own content list.
+
+**Not a uniform bug with a uniform fix -- the three real SDKs genuinely
+disagree about whether a tool result can even carry an image, confirmed
+by reading each SDK's own installed type definitions directly, not
+assumed from a shared mental model of "providers are basically the
+same":**
+
+- **Anthropic** (`ToolResultBlockParam.content: Union[str,
+  Iterable[Content]]`, `Content` including `ImageBlockParam`) --
+  genuinely supports it. Fixed by building a mixed text+image content
+  list whenever a result has anything beyond plain text; a text-only
+  result still sends the exact same plain string as before, so the
+  overwhelmingly common case (and the one pre-existing test covering
+  it) is completely unaffected.
+- **Google Gemini** (`FunctionResponse.parts:
+  list[FunctionResponsePart]`) -- also genuinely supports it, via a
+  separate `parts` field alongside the plain `response` dict, confirmed
+  by reading `types.FunctionResponse`'s real source
+  (`FunctionResponsePart.from_bytes(data=..., mime_type=...)`).
+- **OpenAI** (`ChatCompletionToolMessageParam.content: Union[str,
+  Iterable[ChatCompletionContentPartTextParam]]`) -- text only, no
+  image variant exists in the real type at all. Unlike the other two,
+  this genuinely cannot be fixed by sending the image along -- there is
+  no wire shape for it to occupy. Fixed the same way this project
+  already treats every other untranslatable block: raises a clear
+  `ValueError` naming the block type, rather than silently completing a
+  request with content missing (a materially misleading response is
+  worse than a loud, immediate failure).
+
+**Verified the new tests are real:** reverted all three adapter files
+together and watched each new test fail for its own specific, correct
+reason -- Anthropic and Gemini's tests failed on the image silently
+missing from the translated output, OpenAI's failed with `Failed: DID
+NOT RAISE ValueError` -- before re-applying. All 27 pre-existing tests
+across the three adapters' test files pass unchanged. 3 new tests,
+574 -> 577 Python tests. `docs/providers.md` updated.
+
+**Next:** `build_sft_batch`/`build_dpo_batch` crashing with an
+unhelpful raw `ValueError` on an empty example list (low severity,
+library-only, no CLI wires it to external input yet); the no-retry-cap
+gap named alongside the AgentLoop AssertionError fix (a real feature,
+not a bug fix); batching multiple concurrent inference requests
+(§3.6f, still a deliberate deferral -- real correctness risk); F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video input
+(no API key here to verify live); a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have -- likely stays deferred).

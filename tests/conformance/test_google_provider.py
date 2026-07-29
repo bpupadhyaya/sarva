@@ -105,6 +105,37 @@ async def test_tool_result_error_uses_the_error_key():
     assert out.parts[0].function_response.response == {"error": "boom"}
 
 
+async def test_tool_result_with_an_image_attaches_it_instead_of_silently_dropping_it():
+    # A real bug found by actually constructing a ToolResultBlock
+    # carrying an ImageBlock (e.g. a screenshot tool's result --
+    # ToolResultBlock.content's own type comment already names this as
+    # an anticipated shape): the plain `"".join(... TextBlock)` this
+    # adapter used to build the function response silently dropped
+    # anything that wasn't a TextBlock, with no error. Gemini's own SDK
+    # type (FunctionResponse.parts) genuinely supports attaching inline
+    # media alongside a function response, confirmed by reading it
+    # directly, not assumed.
+    raw = b"\x89PNG\r\n\x1a\n"
+    m = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_call_id="t1",
+                content=[
+                    TextBlock(text="screenshot:"),
+                    ImageBlock(media_type="image/png", data=raw),
+                ],
+            )
+        ],
+    )
+    out = await _to_gemini_content(m, {"t1": "take_screenshot"})
+
+    fr = out.parts[0].function_response
+    assert fr.response == {"output": "screenshot:"}
+    assert fr.parts[0].inline_data.mime_type == "image/png"
+    assert fr.parts[0].inline_data.data == raw
+
+
 async def test_thinking_block_is_explicitly_dropped_not_translated():
     # Deliberate, named skip -- Gemini surfaces "thought" parts on the
     # way out (ThinkingDeltaEvent) but there's no documented way to feed

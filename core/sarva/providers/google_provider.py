@@ -152,13 +152,42 @@ async def _to_gemini_content(m: Message, call_names: dict[str, str]) -> types.Co
             call = types.FunctionCall(id=b.id, name=b.name, args=b.arguments)
             parts.append(types.Part(function_call=call))
         elif isinstance(b, ToolResultBlock):
+            # A real bug found by actually constructing a ToolResultBlock
+            # carrying an ImageBlock (e.g. a screenshot/image-generation
+            # tool's result -- ToolResultBlock.content's own type comment
+            # already names this as an anticipated shape, not a
+            # hypothetical): the plain `"".join(... TextBlock)` here
+            # silently dropped it with no error. Gemini's own SDK type
+            # (`FunctionResponse.parts: list[FunctionResponsePart]`)
+            # genuinely supports attaching inline media alongside a
+            # function response, confirmed by reading it directly, not
+            # assumed -- so, like Anthropic and unlike OpenAI, this is a
+            # real capability gap, not a wire-format limitation.
             text = "".join(c.text for c in b.content if isinstance(c, TextBlock))
+            response_parts: list[types.FunctionResponsePart] = []
+            for c in b.content:
+                if isinstance(c, TextBlock):
+                    continue
+                elif isinstance(c, ImageBlock):
+                    c_bytes = await resolve_media_bytes(c)
+                    response_parts.append(
+                        types.FunctionResponsePart.from_bytes(data=c_bytes, mime_type=c.media_type)
+                    )
+                else:
+                    raise ValueError(
+                        f"GoogleProvider cannot translate a {type(c).__name__!r} content "
+                        "block inside a tool result (no wire-format mapping exists for it "
+                        "yet)"
+                    )
             response = {"error": text} if b.is_error else {"output": text}
             name = call_names.get(b.tool_call_id, b.tool_call_id)
             parts.append(
                 types.Part(
                     function_response=types.FunctionResponse(
-                        id=b.tool_call_id, name=name, response=response
+                        id=b.tool_call_id,
+                        name=name,
+                        response=response,
+                        parts=response_parts or None,
                     )
                 )
             )
