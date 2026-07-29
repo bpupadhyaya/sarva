@@ -8090,3 +8090,69 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have -- likely stays
 deferred).
+
+## ws_confirm's own confirmation-reply read had no timeout and no shape validation -- a crash and a hang, one layer deeper than every previous /ws/chat fix
+
+A fresh Explore-agent sweep at twenty-six rounds deep, pointed at
+genuinely creative/deep angles after two consecutive severe security
+fixes (CSWSH, DNS-rebinding SSRF): the REST-endpoint CORS surface
+(clean), budget enforcement mid-turn (clean, matches the checked-
+between-turns design honestly), unbounded-field DoS risk in
+`Message`/`ContentBlock` (plausible but low-confidence, not picked up),
+`_is_same_origin`'s handling of a missing `Host` header (clean, degrades
+safely), and a repo-wide `eval`/`exec`/`pickle`/`yaml.load`/unintended
+`shell=True` grep (clean -- the only `shell=True`-equivalent is
+`RunShellTool`'s own by-design usage). One angle produced a real,
+well-scoped, live-reproduced finding: `ws_confirm`, the closure
+`AgentLoop`'s own confirm callback invokes when a destructive tool call
+needs a decision.
+
+**Confirmed live, two distinct failure modes, neither covered by any
+prior `/ws/chat` fix (all of which guard the *initial* payload frame,
+not this one):**
+
+1. A malformed reply (a JSON array instead of `{"approved": bool}`)
+   made `reply.get(...)` raise an uncaught `AttributeError`, crashing
+   the whole ASGI call with no `run_done` frame sent -- the identical
+   bare-disconnect shape every prior raw-JSON fix on this endpoint
+   targets, just reached through the confirmation round-trip instead
+   of the initial frame.
+2. `receive_json()` had no timeout at all: a client that simply never
+   replies hung the connection forever, with the run stuck in
+   `AWAITING_CONFIRMATION` and zero recovery path -- the confirmation-
+   layer counterpart to the already-fixed hung-tool-call bug, but a
+   genuinely distinct call site: that fix bounds `run_one`'s own
+   `tool.run(...)` await inside `AgentLoop`; this is `AgentLoop`'s own
+   confirm callback itself, invoked *before* any tool runs at all.
+
+**Fixed by wrapping the read in `asyncio.wait_for`** (a 300-second
+timeout -- deliberately much longer than the 90-second per-tool-
+execution backstop, since a real person has to read a prompt and click
+a button, not an automated process complete a call) **and validating
+the reply is actually a dict before reading `"approved"` from it.**
+Both failure modes -- timeout and malformed shape -- resolve to the
+same outcome: a plain decline, never a crash and never a hang. Matches
+the "reject, don't guess" discipline this file already applies to
+malformed `--mcp-header`/`--mcp-env` entries: a destructive action
+given an ambiguous or absent confirmation signal must never default to
+running.
+
+**Verified the new tests are real:** reverted the fix and watched both
+fail -- the malformed-reply test with the raw, uncaught
+`AttributeError`; the never-replies test with `AttributeError: <module
+'sarva.server.app'> has no attribute '_CONFIRM_TIMEOUT_SECONDS'` (the
+new constant itself) -- before re-applying. All 35 pre-existing server
+tests pass unchanged. 2 new tests, 591 -> 593 Python tests. `docs/
+packaging.md` updated.
+
+**Next:** the Tauri `csp: null` gap; the config.json concurrent-
+process-write race; the no-retry-cap gap on `AgentLoop`; the
+unbounded-`Message`-field DoS angle from this sweep (plausible, lower
+confidence, not yet confirmed live); batching multiple concurrent
+inference requests (§3.6f, still a deliberate deferral -- real
+correctness risk); F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have);
+Gemini's Files API for long-video input (no API key here to verify
+live); a first pass at code-signing/notarization for the desktop
+release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

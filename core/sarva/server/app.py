@@ -19,6 +19,7 @@ experience. Without it, this is API-only — nothing breaks either way.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -45,6 +46,13 @@ from sarva.server.schemas import (
 )
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# A real, human-facing prompt -- someone actually has to read it and
+# click a button -- so this is deliberately much longer than
+# AgentLoop's own 90-second per-tool-execution backstop
+# (core/sarva/agent/loop.py's _TOOL_TIMEOUT_SECONDS), which bounds an
+# automated tool call, not a person.
+_CONFIRM_TIMEOUT_SECONDS = 300
 
 
 def _is_same_origin(origin: str | None, host: str | None) -> bool:
@@ -325,7 +333,36 @@ def create_app() -> FastAPI:
             model = payload.get("model")
 
             async def ws_confirm(call: ToolCallBlock) -> bool:
-                reply = await websocket.receive_json()
+                # A real bug found by actually sending a malformed
+                # confirmation reply (a JSON array instead of
+                # {"approved": bool}), and by actually never replying
+                # at all: `reply.get(...)` on a non-dict raised an
+                # uncaught AttributeError that crashed the whole ASGI
+                # call with no run_done frame sent (the same bare
+                # ClosedResourceError this file's other raw-JSON fixes
+                # exist to prevent), and receive_json() had no timeout
+                # at all, so a client that never replies -- deliberately
+                # or by just closing its own tab without the browser
+                # noticing -- hung the connection forever with no
+                # recovery, the confirmation-layer counterpart to the
+                # already-fixed hung-tool-call bug (a different call
+                # site entirely: this is AgentLoop's own confirm
+                # callback, not `run_one`'s tool.run() wrapper). Both
+                # failure modes are treated as a plain decline, not a
+                # crash or a hang: a destructive action given an
+                # ambiguous or absent confirmation signal must never
+                # default to running, the same "reject, don't guess"
+                # discipline this file already applies to malformed
+                # --mcp-header/--mcp-env-style input elsewhere in this
+                # project.
+                try:
+                    reply = await asyncio.wait_for(
+                        websocket.receive_json(), timeout=_CONFIRM_TIMEOUT_SECONDS
+                    )
+                except (TimeoutError, ValueError):
+                    return False
+                if not isinstance(reply, dict):
+                    return False
                 return bool(reply.get("approved", False))
 
             store = SessionStore()

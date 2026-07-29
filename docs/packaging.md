@@ -270,6 +270,47 @@ Verified the new tests are real: reverted the fix and watched the
 cross-origin test fail with `DID NOT RAISE WebSocketDisconnect` (the
 connection was still fully accepted) before re-applying.
 
+### The confirmation-reply read itself had no timeout and no shape validation — a crash and a hang, one layer deeper than every previous `/ws/chat` fix
+
+`ws_confirm`'s own `reply = await websocket.receive_json(); return
+bool(reply.get("approved", False))` had two real gaps, distinct from
+every other raw-JSON fix on this endpoint: those all guard the
+*initial* payload frame; this is `AgentLoop`'s own confirm callback,
+invoked from a completely different point deep inside the run, only
+when a destructive tool call is actually pending.
+
+**Confirmed live, two failure modes:** a malformed reply (a JSON array
+instead of `{"approved": bool}`) made `reply.get(...)` raise an
+uncaught `AttributeError`, crashing the whole ASGI call with no
+`run_done` frame sent — the identical bare-disconnect shape every prior
+raw-JSON fix on this endpoint targets, just reached through the
+confirmation round-trip instead of the initial frame. Separately,
+`receive_json()` had no timeout at all: a client that simply never
+replies — deliberately, or by closing its tab in a way the browser
+doesn't surface as a clean disconnect — hung the connection forever,
+with the run stuck in `AWAITING_CONFIRMATION` and no recovery path.
+This is the confirmation-layer counterpart to the already-fixed
+hung-tool-call bug, but a genuinely separate call site: that fix
+bounds `run_one`'s own `tool.run(...)` await; this one is `AgentLoop`'s
+confirm callback itself, invoked before any tool runs at all.
+
+Fixed by wrapping the read in `asyncio.wait_for` (a 300-second timeout
+— deliberately much longer than the 90-second per-tool-execution
+backstop, since a real person has to read a prompt and click a button,
+not an automated process) and validating the reply is actually a dict
+before reading `"approved"` from it. Both failure modes — timeout and
+malformed shape — resolve to the same outcome: **a plain decline**, not
+a crash and not a hang. This matches the "reject, don't guess"
+discipline already applied elsewhere in this file (malformed
+`--mcp-header`/`--mcp-env` entries): a destructive action given an
+ambiguous or absent confirmation signal must never default to running.
+Verified the new tests are real: reverted the fix and watched both fail
+— the malformed-reply test with the raw, uncaught `AttributeError`; the
+never-replies test with `AttributeError: <module 'sarva.server.app'>
+has no attribute '_CONFIRM_TIMEOUT_SECONDS'` (the constant this fix
+introduces) — before re-applying. All 35 pre-existing server tests pass
+unchanged.
+
 **A real gap found by checking what the desktop app actually calls, not
 what the server merely supports:** `/chat` has taken optional
 `image_base64`/`image_media_type` fields since images were wired into

@@ -645,6 +645,81 @@ def test_websocket_tool_confirmation_denied_skips_the_tool(tmp_path, monkeypatch
     assert events[-1]["state"] == "done"
 
 
+def test_websocket_a_malformed_confirmation_reply_is_treated_as_a_decline_not_a_crash(
+    tmp_path, monkeypatch
+):
+    # A real bug found by actually sending a JSON array instead of
+    # {"approved": bool} as the confirmation reply: reply.get(...) on a
+    # non-dict raised an uncaught AttributeError that crashed the whole
+    # ASGI call with no run_done frame sent -- the same bare
+    # ClosedResourceError this file's other raw-JSON fixes exist to
+    # prevent, just one layer deeper (AgentLoop's own confirm callback,
+    # not the initial payload). Treated the same way an explicit decline
+    # already is: an ambiguous confirmation signal must never default to
+    # running a destructive action.
+    monkeypatch.chdir(tmp_path)
+    call = ToolCallBlock(id="c1", name="write_file", arguments={"path": "hi.txt", "content": "hi"})
+    _use_scripted_mock(
+        monkeypatch,
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="ok, skipped")],
+    )
+
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "write a file for me"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "needs_confirmation":
+                ws.send_json(["not", "a", "dict"])
+            if data["type"] == "run_done":
+                break
+
+    finished = [e for e in events if e["type"] == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0]["result"]["is_error"] is True
+    assert not (tmp_path / "hi.txt").exists()
+    assert events[-1]["state"] == "done"
+
+
+def test_websocket_a_confirmation_reply_that_never_arrives_times_out_as_a_decline(
+    tmp_path, monkeypatch
+):
+    # A real bug found by actually running a turn that needs
+    # confirmation and never replying at all: receive_json() had no
+    # timeout, so the connection hung forever with no recovery -- the
+    # confirmation-layer counterpart to the already-fixed hung-tool-call
+    # bug, a different call site entirely (AgentLoop's own confirm
+    # callback, not run_one's tool.run() wrapper).
+    import sarva.server.app as app_module
+
+    monkeypatch.setattr(app_module, "_CONFIRM_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.chdir(tmp_path)
+    call = ToolCallBlock(id="c1", name="write_file", arguments={"path": "hi.txt", "content": "hi"})
+    _use_scripted_mock(
+        monkeypatch,
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="ok, skipped")],
+    )
+
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "write a file for me"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            # Deliberately never reply to needs_confirmation.
+            if data["type"] == "run_done":
+                break
+
+    finished = [e for e in events if e["type"] == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0]["result"]["is_error"] is True
+    assert not (tmp_path / "hi.txt").exists()
+    assert events[-1]["state"] == "done"
+
+
 def test_websocket_auto_true_never_blocks_on_a_client_reply(tmp_path, monkeypatch):
     """`auto: true` still emits `needs_confirmation` (a destructive call did
     happen — that's informational, from the loop itself, not policy-gated),
