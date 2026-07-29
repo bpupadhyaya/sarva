@@ -495,6 +495,31 @@ def test_distill_writes_a_real_jsonl_file_from_mock_completions(monkeypatch, tmp
     assert "[mock] received: what is 2+2?" in records[0]["completion"]
 
 
+def test_distill_with_an_unwritable_out_path_fails_cleanly_not_a_traceback(monkeypatch, tmp_path):
+    # A real bug found by actually running `sarva distill ... --out
+    # /nonexistent-dir/out.jsonl`: save_jsonl()'s plain `path.open("w")`
+    # raised a raw FileNotFoundError straight through Typer -- the write
+    # side of the same file-path bug class already fixed for the read
+    # side (the prompts file argument). Worse than the read-side case:
+    # this only surfaces *after* every real API call to the teacher
+    # model has already completed, throwing away the one thing
+    # distillation exists to produce with no way to recover it short of
+    # re-running the whole distillation from scratch.
+    _clear_provider_env(monkeypatch)
+    prompts_file = tmp_path / "prompts.txt"
+    prompts_file.write_text("hi\n")
+    bad_out = tmp_path / "nonexistent-dir" / "out.jsonl"
+
+    result = runner.invoke(
+        app, ["distill", str(prompts_file), "--model", "mock", "--out", str(bad_out)]
+    )
+
+    assert result.exit_code == 1
+    assert "cannot write output file" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert not bad_out.exists()
+
+
 def test_distill_fails_cleanly_for_a_provider_that_is_not_configured(monkeypatch, tmp_path):
     _clear_provider_env(monkeypatch)
     prompts_file = tmp_path / "prompts.txt"

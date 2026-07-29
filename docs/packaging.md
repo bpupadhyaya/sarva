@@ -81,6 +81,20 @@ at all until it was noticed missing while poking at the CLI's own
   both commands the identical message and a clean nonzero exit,
   checked fast — before `eval` prints its own benchmark header, before
   `distill` writes anything — rather than failing mid-run.
+
+  **A second, later bug found on the *write* side, not the read side
+  every prior file-path fix in this project had covered:**
+  `sarva.distill.save_jsonl()`'s plain `path.open("w")` raised a raw
+  `FileNotFoundError`/`PermissionError` straight through Typer for a
+  bad `--out` path — confirmed live with both a missing parent
+  directory and a read-only one. Worse than every other file-path bug
+  fixed so far: this one only surfaces *after* every real (potentially
+  rate-limited, non-free) API call to the teacher model has already
+  completed, throwing away the one artifact distillation exists to
+  produce, with no way to recover it short of re-running the whole
+  distillation from scratch. Fixed by wrapping the `save_jsonl(records,
+  out)` call in `except OSError`, reusing the same `_print_file_error`
+  helper `chat --image`/`speak --out`/`transcribe` already share.
 - **`sessions list`** / **`sessions clear NAME`** — inspect or delete
   persisted chat sessions. **A real bug found by actually corrupting one
   session file among several good ones:** `SessionStore.load()` raises

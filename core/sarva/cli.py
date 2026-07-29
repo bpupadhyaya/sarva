@@ -551,7 +551,21 @@ async def _distill(prompts_file: Path, model: str, out: Path, system: str | None
     prompts = [line.strip() for line in prompts_text.splitlines() if line.strip()]
     console.print(f"Distilling {len(prompts)} prompts from {model}...")
     records = await distill(prompts, provider, model=model, system=system)
-    save_jsonl(records, out)
+    try:
+        save_jsonl(records, out)
+    except OSError as e:
+        # A real bug found by actually running `sarva distill ... --out
+        # /nonexistent-dir/out.jsonl` (and the equivalent for a
+        # read-only directory): save_jsonl()'s plain `path.open("w")`
+        # raised a raw FileNotFoundError/PermissionError straight
+        # through Typer -- and unlike every other file-path bug this
+        # project has fixed, this one only surfaces *after* every real
+        # (potentially expensive, rate-limited) API call to the teacher
+        # model has already completed, throwing away the one thing
+        # distillation exists to produce with no way to recover it
+        # short of re-running the whole distillation from scratch.
+        _print_file_error("write", "output file", out, e)
+        raise typer.Exit(1) from e
     console.print(f"Wrote {len(records)} records to {out}")
 
 

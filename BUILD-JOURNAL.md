@@ -6507,3 +6507,63 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## sarva distill crashed on a bad --out path -- after already burning every real API call to the teacher model
+
+A fresh Explore-agent sweep, pointed specifically at angles not yet
+checked as hard as the provider adapters and multimodal degraders:
+write-failure handling, not just the read-side file-path corruption
+already fixed repeatedly. Found it in `sarva.distill.save_jsonl()`:
+a plain `path.open("w")` with zero error handling, called from
+`cli.py`'s `_distill()` with no try/except either -- the one file-path
+call site in this file NOT already wrapped in this project's now-
+standard clean-failure pattern, despite `_require_known_model`'s own
+docstring already mentioning `distill` by name for a different,
+already-fixed bug. Confirmed live: `sarva distill prompts.txt --model
+mock --out /nonexistent-dir/out.jsonl` and the equivalent read-only-
+directory case both printed a full Python traceback ending in a raw
+`FileNotFoundError`/`PermissionError` instead of a clean message and
+exit code.
+
+**Worse than every other file-path bug fixed in this project so far,
+not just another instance of the same shape:** every prior file-path
+fix (`chat --image`, `speak --out`, `transcribe`, the prompts-file
+*read* side of `distill` itself) fails before any real work has
+happened. This one fails *after* every real API call to the teacher
+model has already completed -- for a non-mock model, real,
+potentially rate-limited, non-free requests -- throwing away the one
+artifact distillation exists to produce, with no way to recover it
+short of re-running the whole distillation from scratch. A crash here
+isn't just an inconvenience; it's wasted real cost.
+
+**Fixed with the smallest possible change, not a new pattern:**
+wrapped the one `save_jsonl(records, out)` call site in
+`except OSError`, reusing the exact `_print_file_error` helper
+`chat --image`/`speak --out`/`transcribe` already share -- no new
+abstraction needed, since the shared helper was already built to
+handle both read and write verbs generically.
+
+**Verified the new test is real:** reverted the fix and watched it
+fail with the raw, uncaught `FileNotFoundError` (checked via
+`result.stdout` missing the clean message, not just a bare exit-code
+check) before re-applying -- same discipline as every fix in this
+journal since the MCP tool-name escaping milestone.
+
+1 new test, 555 -> 556 Python tests. `ruff check`/`format --check`
+clean. `docs/packaging.md` updated.
+
+**Next:** the same sweep also surfaced `VectorMemoryStore.__init__`
+crashing on a corrupted `memory.db` (a raw `sqlite3.DatabaseError`) --
+the fourth instance of the "corrupted on-disk state" bug class already
+fixed three times (`config.json`, session files, foundry checkpoints).
+Lower severity than most: both real callers (`RememberTool`/
+`RecallMemoryTool`) are only ever reached through `AgentLoop.run()`'s
+tool-dispatch `except Exception`, so it doesn't crash a live request
+today -- similar severity profile to the `DecompressionBombError` fix,
+worth closing for the same "one documented exception type, not a
+leaky sqlite3 error" reasoning. Batching (§3.6f), F1's distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).
