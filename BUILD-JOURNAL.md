@@ -8228,12 +8228,13 @@ watched both fail -- one with `ImportError: cannot import name
 tests pass unchanged. 2 new tests, 593 -> 595 Python tests. `docs/
 packaging.md` updated.
 
-**This closes out every one of the three previously-deferred, real
-candidates except the Tauri `csp: null` gap** (still genuinely blocked
-on needing a GUI/Windows machine this environment doesn't have to
-verify a CSP change doesn't break real app behavior) and the AgentLoop
-no-retry-cap gap (still genuinely a feature decision -- picking a
-retry-cap policy -- not a narrow correctness fix).
+**This closes out one of the three previously-deferred, real
+candidates.** The other two stay deferred, for the same reasons named
+each time they came up: the Tauri `csp: null` gap (still genuinely
+blocked on needing a GUI/Windows machine this environment doesn't have
+to verify a CSP change doesn't break real app behavior) and the
+AgentLoop no-retry-cap gap (still genuinely a feature decision --
+picking a retry-cap policy -- not a narrow correctness fix).
 
 **Next:** the Tauri `csp: null` gap (still deferred, needs a GUI);
 the no-retry-cap gap on `AgentLoop` (still deferred, a real feature
