@@ -6224,3 +6224,82 @@ to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred). No open candidates remain from
 the last two Explore-agent sweeps -- worth another fresh one next time.
+
+## A corrupted video attachment could crash the whole process with a native SIGBUS, not just a Python exception -- picked up from an earlier deferred finding
+
+A severity-3 finding from a sweep two milestones back had been
+deliberately deferred as "needs a design decision (subprocess
+sandboxing scope) before implementing" rather than picked up
+immediately, unlike the shape-B "widen an except clause" fixes that
+sweep's other two candidates turned out to be. Re-verified it was still
+real before investing implementation effort: directly fuzzing a real,
+valid mp4 (random byte flips across many seeded trials, encoded fresh
+with PyAV itself so the base video is regenerable, not a checked-in
+fixture) and running the exact `av.open`/`container.decode` call
+`VideoToTextDegrader` used to make in-process reproduced the crash
+independently -- several fuzzed variants across two different base
+videos (one ffmpeg-encoded, one PyAV-encoded matching the test suite's
+own `_synthetic_video_bytes` shape) killed the Python process outright
+with a real SIGBUS (signal 10), not a Python exception at all. This is
+a fundamentally different bug class than every "unhandled exception"
+fix in this journal so far: no `try`/`except`, however broad (the same
+`except Exception` fix that closed the image-degradation crash two
+milestones ago), can catch a native memory fault. A user- or
+attacker-supplied corrupted video attachment reaching
+`chat`/`run`/`/chat`/`/ws/chat` with degraders configured -- all
+already-wired, production call sites -- could crash the entire `sarva
+serve`/CLI process outright, not just fail one request.
+
+**Fixed with process isolation, the only real fix for a native
+crash:** the actual decode now runs in a brand-new module,
+`sarva.multimodal.degraders._video_worker`, spawned via `python -m` as
+a genuine subprocess (`asyncio.create_subprocess_exec`, reading raw
+video bytes from stdin, writing a simple length-prefixed binary framing
+of the sampled PNG frames + duration back over stdout on success). A
+native crash there only kills that subprocess; `_sample_frames()` in
+`video.py` treats a nonzero-or-killed-by-signal exit code exactly the
+same as an ordinary "couldn't decode this" failure -- both already meant
+"fall back to the metadata-only report," so the fix required no change
+to this module's own error-handling *shape*, only to *where* the actual
+decoding happens. A 30-second timeout kills and reaps the worker the
+same way `RunShellTool`'s own timeout fix does (`proc.kill()` +
+`await proc.wait()`), so a hung or resource-exhausting decode can't
+leave an orphaned process running forever either -- the identical
+discipline applied there, now reused for a second real timeout-safety
+gap.
+
+**Verified with the strongest form of revert-and-verify this project
+has produced yet.** The new regression test doesn't check in an opaque
+binary fixture -- it *regenerates* one of the confirmed-crashing fuzzed
+byte sequences deterministically (fixed seed, replayed exactly the same
+random-byte-flip sequence against the same PyAV-encoded base video the
+test suite already uses), so the crash trigger stays self-documenting
+and reproducible against whatever PyAV build is actually installed
+when the test runs, not a mysterious blob no one can regenerate.
+Reverting the fix and re-running that exact test didn't produce a
+failing assertion or a raised exception the way every other
+revert-and-verify check in this journal has -- it genuinely killed the
+`pytest` process itself, dumping Python's native fault-handler stack
+trace (`Extension modules: av._core, ...`) instead of a normal test
+result. That is about as unambiguous as proof gets that this fix was
+necessary, not defensive over-engineering.
+
+All 11 pre-existing video-degrader tests (real frame sampling, duration
+handling, empty-stream fallback, recursive degradation to text, ...)
+still pass unchanged against the new subprocess-isolated
+implementation -- `VideoToTextDegrader.degrade()`'s own public
+async-method contract never changed, only `_sample_frames()`'s internal
+implementation, and no existing test called that private helper
+directly.
+
+1 new test, 550 -> 551 Python tests. `ruff check`/`format --check`
+clean. `docs/multimodal.md` updated.
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred). No open candidates remain from
+recent sweeps -- worth another fresh one next time.

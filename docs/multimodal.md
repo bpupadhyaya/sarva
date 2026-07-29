@@ -97,6 +97,29 @@ its own worth trusting differently:
   degrader remains exactly as useful for every other provider, or a
   caller who wants the frame-sampled fallback explicitly.
 
+**A real bug found by directly fuzzing a valid mp4** (random byte
+flips across many seeded trials) and running the exact
+`av.open`/`container.decode` call this degrader used to make
+in-process: some fuzzed variants didn't raise a Python exception at
+all — they killed the whole process outright with a real SIGBUS
+(signal 10), a native memory fault inside PyAV/libavcodec that no
+`try`/`except`, however broad, can catch. A user- or attacker-supplied
+corrupted video attachment could crash the entire `sarva serve`/CLI
+process, not just fail one degradation attempt. Fixed by moving the
+actual decode into an isolated subprocess
+(`sarva.multimodal.degraders._video_worker`, invoked via `python -m`):
+a native crash there only kills that subprocess, and the parent treats
+it exactly the same as an ordinary "couldn't decode this" failure — a
+timeout kills and reaps the worker the same way `RunShellTool`'s own
+timeout fix does, so a hung decode can't leave an orphaned process
+running forever either. Verified this is a real, not hypothetical,
+concern: reverting the fix and re-running the regression test (which
+regenerates one of the confirmed-crashing fuzzed byte sequences
+deterministically, not from a checked-in binary fixture) genuinely
+killed the pytest process itself with a fatal-signal stack dump — the
+strongest form of "verify the fix is necessary" this project's
+revert-and-verify discipline has produced yet.
+
 `default_degraders()` wires all three into every real `AgentLoop` call
 site (CLI, server) — but degradation itself is opt-in at the loop level
 (`AgentLoop(degraders=...)`), not automatic: without it, a conversation

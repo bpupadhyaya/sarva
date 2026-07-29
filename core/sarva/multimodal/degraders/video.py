@@ -26,52 +26,87 @@ mislabeled as video) fall back to the original metadata-only report
 rather than raising -- "couldn't decode this particular file" is a real,
 expected case for a converter that has to handle whatever bytes a caller
 hands it, not a bug.
+
+**The actual decode runs in an isolated subprocess
+(`_video_worker.py`), not in-process.** A real bug found by directly
+fuzzing a valid MP4 (random byte flips) and running the exact
+`av.open`/`container.decode` call this module used to make directly:
+3 of 60 seeded trials killed the process outright with a real SIGBUS
+(signal 10) -- a native memory fault inside PyAV/libavcodec, not a
+catchable Python exception. No `try`/`except`, however broad, can stop
+a native crash from taking down the whole process; the worker module's
+own docstring has the full detail. `_sample_frames` now spawns that
+worker and treats a crash exactly the same as an ordinary decode
+failure -- both mean "couldn't safely decode this, fall back to the
+metadata-only report" -- so the process-isolation fix required no
+change to this module's own error-handling *shape*, only to where the
+actual decoding happens.
 """
 
 from __future__ import annotations
 
-import io
-
-import av
-from av.error import FFmpegError
+import asyncio
+import struct
+import sys
 
 from sarva.multimodal.content import ImageBlock, Modality, TextBlock, VideoBlock
 from sarva.multimodal.fetch import resolve_media_bytes
 
-_MAX_SAMPLED_FRAMES = 4
+_DECODE_TIMEOUT_SECONDS = 30
 
 
-def _sample_frames(raw: bytes) -> tuple[list[bytes], float | None] | None:
+async def _sample_frames(raw: bytes) -> tuple[list[bytes], float | None] | None:
     """Returns (sampled PNG frame bytes, real decoded duration in seconds)
     on success, or None if `raw` can't be decoded as video at all -- the
-    caller falls back to the metadata-only report either way."""
+    caller falls back to the metadata-only report either way. Runs the
+    actual decode in `_video_worker.py`, a separate subprocess, so a
+    native crash inside PyAV's decoder only kills that subprocess (see
+    this module's own docstring for why that's a real, not
+    hypothetical, concern)."""
     try:
-        with av.open(io.BytesIO(raw)) as container:
-            if not container.streams.video:
-                return None
-            stream = container.streams.video[0]
-            duration_s = float(stream.duration * stream.time_base) if stream.duration else None
-            frames = list(container.decode(stream))
-    except (FFmpegError, ValueError):
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "sarva.multimodal.degraders._video_worker",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
         return None
+
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(raw), timeout=_DECODE_TIMEOUT_SECONDS)
+    except TimeoutError:
+        # Same timeout-must-actually-kill-the-process discipline as
+        # RunShellTool's own fix for the identical class of bug: a
+        # hung decode (e.g. a video crafted to loop or exhaust memory)
+        # must not leave an orphaned worker process running forever.
+        proc.kill()
+        await proc.wait()
+        return None
+
+    # A nonzero OR negative (killed-by-signal) returncode covers both
+    # an ordinary decode failure and a native crash identically -- the
+    # whole point of routing through a subprocess is that the caller
+    # never needs to tell those two cases apart.
+    if proc.returncode != 0 or len(stdout) < 8:
+        return None
+
+    (duration_raw,) = struct.unpack(">d", stdout[:8])
+    duration_s = None if duration_raw != duration_raw else duration_raw  # NaN sentinel
+
+    frames: list[bytes] = []
+    offset = 8
+    while offset + 4 <= len(stdout):
+        (length,) = struct.unpack(">I", stdout[offset : offset + 4])
+        offset += 4
+        frames.append(stdout[offset : offset + length])
+        offset += length
 
     if not frames:
         return None
-
-    # Evenly spaced indices across the decoded frames, capped at
-    # _MAX_SAMPLED_FRAMES -- bounds output size regardless of how long the
-    # source video actually is, same spirit as the corpus pipeline's
-    # length filters bounding a single document's size.
-    count = min(_MAX_SAMPLED_FRAMES, len(frames))
-    step = len(frames) / count
-    indices = [int(i * step) for i in range(count)]
-
-    png_frames = []
-    for i in indices:
-        buf = io.BytesIO()
-        frames[i].to_image().save(buf, format="PNG")
-        png_frames.append(buf.getvalue())
-    return png_frames, duration_s
+    return frames, duration_s
 
 
 class VideoToTextDegrader:
@@ -80,7 +115,7 @@ class VideoToTextDegrader:
     async def degrade(self, block: VideoBlock) -> list[ImageBlock | TextBlock]:
         raw = await resolve_media_bytes(block)
         size_kb = len(raw) / 1024
-        sampled = _sample_frames(raw)
+        sampled = await _sample_frames(raw)
 
         if sampled is None:
             duration_text = (
