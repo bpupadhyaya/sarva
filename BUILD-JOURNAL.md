@@ -6567,3 +6567,67 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## VectorMemoryStore crashed on a corrupted memory.db -- the fourth instance of the "corrupted on-disk state" bug class, picked up directly
+
+The last real candidate from the distill-write-failure sweep, picked
+up directly rather than left for another round. Confirmed live:
+writing garbage bytes to a real `memory.db` path and constructing a
+real `VectorMemoryStore` raised an uncaught `sqlite3.DatabaseError:
+file is not a database`. `sqlite3.connect()` itself never fails on a
+bad file -- connections are lazy -- so the real error only surfaces on
+the first actual query, the `CREATE TABLE IF NOT EXISTS` this
+constructor already runs. A second, related real corruption mode
+confirmed separately: a real, previously-valid database (50 real rows
+inserted, not an empty placeholder) truncated mid-file -- simulating an
+interrupted write or disk corruption, the same realistic failure mode
+already used for the foundry checkpoint fix -- raised a *different*
+`sqlite3.DatabaseError` message ("database disk image is malformed"),
+confirmed to be the same exception class so one `except` clause covers
+both.
+
+**Lower severity than the other three instances of this bug class,
+named honestly rather than overstated:** both real callers
+(`RememberTool`/`RecallMemoryTool`) only ever reach `VectorMemoryStore`
+construction through `AgentLoop.run()`'s tool-dispatch `except
+Exception`, so this never crashed a live agent turn the way the
+corrupted-config or corrupted-foundry-checkpoint bugs did -- the tool
+call would already come back as a clean `is_error=True` result today.
+But a direct caller of `VectorMemoryStore` outside that wrapper (a
+test, a future library user, a script) still got a leaky, undocumented
+`sqlite3.DatabaseError` instead of one clean, documented exception
+type -- the same "give callers one exception type to catch, not a
+leaky implementation detail" reasoning already applied to the
+`DecompressionBombError` fix two milestones ago.
+
+**Fixed with a new `MemoryStoreError`**, raised from `__init__` in
+place of the raw sqlite3 exception -- `sqlite3.DatabaseError` is the
+real base class covering both confirmed corruption modes
+(`OperationalError`/`IntegrityError`/`ProgrammingError` are all its
+subclasses too, confirmed by reading the stdlib's own exception
+hierarchy), so one `except` clause closes this cleanly without being so
+broad it risks swallowing an unrelated bug.
+
+**Verified the new tests are real:** reverted the fix and watched both
+new tests fail -- the whole test module failed to even *collect*
+(`ImportError: cannot import name 'MemoryStoreError'`), the same class
+of unambiguous "this genuinely doesn't exist without the fix" signal
+already relied on for other fixes in this journal (e.g. the `--mcp-env`
+milestone) -- before re-applying. All 15 pre-existing vector-memory
+tests still pass unchanged.
+
+2 new tests, 556 -> 558 Python tests. `ruff check`/`format --check`
+clean. `docs/memory.md` updated. **This closes out the entire
+"corrupted on-disk state" bug class across every real on-disk store
+this project has (`config.json`, session files, foundry checkpoints,
+now the vector memory database) -- worth checking whether any other
+persistent store shares it before assuming the class is fully closed.**
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred). No open candidates remain from
+recent sweeps -- worth a fresh one next time.

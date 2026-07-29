@@ -68,6 +68,25 @@ class MemoryEntry:
     text: str
 
 
+class MemoryStoreError(Exception):
+    """`db_path` exists but isn't a valid (or is a corrupted) SQLite
+    database. The fourth instance of the "corrupted on-disk state" bug
+    class already fixed for `~/.sarva/config.json`, a saved session
+    file, and a foundry checkpoint bundle: confirmed live by writing
+    garbage bytes to a real `memory.db` path (`sqlite3.DatabaseError:
+    file is not a database`) and, separately, by truncating a real,
+    previously-valid database mid-file (`sqlite3.DatabaseError:
+    database disk image is malformed`) -- both raised a raw sqlite3
+    exception straight out of `VectorMemoryStore.__init__` uncaught.
+    Lower severity than the other three instances of this bug class:
+    both real callers (`RememberTool`/`RecallMemoryTool`) only ever
+    reach this through `AgentLoop.run()`'s tool-dispatch `except
+    Exception`, so it never crashed a live agent turn -- but a direct
+    caller of this class outside that wrapper still got a leaky,
+    undocumented `sqlite3.DatabaseError` instead of one clean,
+    documented exception type."""
+
+
 class VectorMemoryStore:
     """A SQLite-backed store of text entries, searchable by TF-IDF +
     cosine similarity. `db_path` is a real file — the same "just a file
@@ -89,16 +108,24 @@ class VectorMemoryStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(db_path.parent, 0o700)
         self._conn = sqlite3.connect(str(db_path))
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                text TEXT NOT NULL
+        try:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    text TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        self._conn.commit()
+            self._conn.commit()
+        except sqlite3.DatabaseError as e:
+            # sqlite3.connect() itself never fails on a bad file --
+            # connections are lazy, so the real error only surfaces on
+            # this first actual query. See MemoryStoreError's own
+            # docstring for the real, confirmed bug this closes.
+            self._conn.close()
+            raise MemoryStoreError(f"{db_path} is not a valid SQLite database: {e}") from e
         os.chmod(db_path, 0o600)
 
     def add(self, session_id: str, text: str) -> int:

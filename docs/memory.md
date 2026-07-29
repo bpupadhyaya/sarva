@@ -81,6 +81,26 @@ user could reach the file path, then `chmod`s the file itself to
 `0600` too (both for defense in depth and to tighten a DB an older
 version already wrote insecurely).
 
+**A real bug found by actually writing garbage bytes to a real
+`memory.db` path, the fourth instance of the "corrupted on-disk state"
+bug class already fixed for `~/.sarva/config.json`, a saved session
+file, and a foundry checkpoint bundle:** `sqlite3.connect()` itself
+never fails on a bad file — connections are lazy — so the real error
+only surfaces on the first actual query, the `CREATE TABLE IF NOT
+EXISTS` this constructor already runs. That raised a raw, uncaught
+`sqlite3.DatabaseError` — confirmed with two distinct real corruption
+modes: a file that's genuinely "not a database" at all, and a real,
+previously-valid database truncated mid-file (both produce the same
+exception class, just different messages, so one `except` clause
+covers both). Lower severity than the other three instances of this
+bug class: both real callers (`RememberTool`/`RecallMemoryTool`) only
+ever reach construction through `AgentLoop.run()`'s tool-dispatch
+`except Exception`, so it never crashed a live agent turn — but a
+direct caller of `VectorMemoryStore` outside that wrapper still got a
+leaky, undocumented `sqlite3.DatabaseError` instead of one clean
+exception type. Fixed with a new `MemoryStoreError`, raised from
+`__init__` in place of the raw sqlite3 exception.
+
 ### Why TF-IDF, not neural embeddings
 
 A real neural-embedding pipeline needs a live embedding-model API. This

@@ -9,7 +9,13 @@ import stat
 import sys
 
 import pytest
-from sarva.memory.vector import VectorMemoryStore, _cosine_similarity, _tfidf_vector, _tokenize
+from sarva.memory.vector import (
+    MemoryStoreError,
+    VectorMemoryStore,
+    _cosine_similarity,
+    _tfidf_vector,
+    _tokenize,
+)
 
 _posix_only = pytest.mark.skipif(
     sys.platform == "win32",
@@ -137,3 +143,40 @@ def test_query_with_no_overlapping_vocabulary_still_returns_results_with_zero_sc
     results = store.search("xyzzy nonexistent zzqq")
     assert len(results) == 1
     assert results[0][1] == 0.0
+
+
+def test_construction_fails_cleanly_on_a_file_that_is_not_a_database(tmp_path):
+    # A real bug found by actually writing garbage bytes to a real
+    # memory.db path and constructing a real VectorMemoryStore:
+    # sqlite3.connect() itself never fails (connections are lazy), but
+    # the first real query -- the CREATE TABLE IF NOT EXISTS this
+    # constructor already runs -- raised a raw, uncaught
+    # sqlite3.DatabaseError. The fourth instance of the "corrupted
+    # on-disk state" bug class already fixed for config.json, a saved
+    # session file, and a foundry checkpoint bundle.
+    db_path = tmp_path / "memory.db"
+    db_path.write_text("not a real sqlite database, just garbage bytes")
+
+    with pytest.raises(MemoryStoreError, match="not a valid SQLite database"):
+        VectorMemoryStore(db_path)
+
+
+def test_construction_fails_cleanly_on_a_truncated_real_database(tmp_path):
+    # A related real bug: a real, previously-valid database truncated
+    # mid-file (simulating an interrupted write or disk corruption --
+    # the same realistic failure mode already used for the foundry
+    # checkpoint fix) raises a *different* sqlite3.DatabaseError message
+    # ("database disk image is malformed") than the "not a database at
+    # all" case above -- confirmed both are the same exception class
+    # (sqlite3.DatabaseError) so one except clause covers both.
+    db_path = tmp_path / "memory.db"
+    store = VectorMemoryStore(db_path)
+    for i in range(50):
+        store.add("s1", f"some real content padding out the file {i} " * 10)
+    store.close()
+
+    raw = db_path.read_bytes()
+    db_path.write_bytes(raw[: len(raw) // 2])
+
+    with pytest.raises(MemoryStoreError, match="not a valid SQLite database"):
+        VectorMemoryStore(db_path)
