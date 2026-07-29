@@ -14,12 +14,25 @@ run` failing) before writing the fix."""
 
 from __future__ import annotations
 
+import json
+
 import sarva.runtime as runtime
 
 
 def _clear_frontier_keys(monkeypatch) -> None:
     for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
         monkeypatch.delenv(var, raising=False)
+
+
+def _stub_bundle(directory, config_data: dict) -> None:
+    # model_info_for_bundle() is documented as torch-free -- it reads
+    # only config.json -- so a real trained checkpoint isn't needed to
+    # exercise it; tokenizer.json/model.pt just need to exist for
+    # discover_checkpoint_bundles' own file-presence check.
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text(json.dumps(config_data))
+    (directory / "tokenizer.json").write_text("{}")
+    (directory / "model.pt").write_bytes(b"")
 
 
 def test_ollama_model_is_unavailable_when_reachable_but_not_the_pulled_tag(monkeypatch):
@@ -63,6 +76,38 @@ def test_no_ollama_model_is_available_when_the_server_is_unreachable(monkeypatch
 
     assert "ollama/qwen3:8b" not in router.available
     assert "mock" in router.available
+
+
+def test_build_router_skips_a_corrupted_foundry_checkpoint_instead_of_crashing(
+    monkeypatch, tmp_path
+):
+    # A real bug found by actually corrupting a bundle's config.json two
+    # ways: model_info_for_bundle() raised an uncaught
+    # json.JSONDecodeError (malformed JSON) or KeyError (valid JSON
+    # missing the required "max_seq_len" key), and build_router()'s own
+    # loop over discover_checkpoint_bundles() had no error handling at
+    # all -- one corrupted bundle crashed the whole router, and
+    # therefore every caller of build_router() (every CLI command,
+    # /chat, /ws/chat, server startup), not just a request that tried to
+    # use that specific checkpoint. discover_checkpoint_bundles only
+    # checks that the three bundle files *exist*, never that config.json
+    # is actually valid. The same "corrupted on-disk state" bug class
+    # already fixed for FoundryProvider.__init__ (a separate call site,
+    # used by build_providers()), just not closed here until now.
+    _clear_frontier_keys(monkeypatch)
+    monkeypatch.setenv("SARVA_FOUNDRY_CHECKPOINTS", str(tmp_path))
+    _stub_bundle(tmp_path / "good", {"max_seq_len": 128})
+    (tmp_path / "malformed-json").mkdir()
+    (tmp_path / "malformed-json" / "config.json").write_text("{not valid json")
+    (tmp_path / "malformed-json" / "tokenizer.json").write_text("{}")
+    (tmp_path / "malformed-json" / "model.pt").write_bytes(b"")
+    _stub_bundle(tmp_path / "missing-key", {"not_max_seq_len": 1})
+
+    router = runtime.build_router()
+
+    assert "foundry/good" in router.available
+    assert "foundry/malformed-json" not in router.available
+    assert "foundry/missing-key" not in router.available
 
 
 def test_ollama_pulled_models_parses_the_real_api_tags_response_shape(monkeypatch):

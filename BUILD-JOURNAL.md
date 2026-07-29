@@ -7562,3 +7562,59 @@ have); Gemini's Files API for long-video input (no API key here to
 verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this
 environment doesn't have -- likely stays deferred).
+
+## build_router() still crashed on a corrupted foundry checkpoint -- the same bug class already fixed for FoundryProvider.__init__, just not closed for this separate call site, closing out the confirm-gate sweep
+
+The second, previously-deferred candidate from the confirm-gate-bypass
+sweep, picked up directly. A prior sweep fixed
+`FoundryProvider.__init__` (used by `build_providers()`) to skip a
+corrupted bundle rather than crash construction entirely. That fix
+never touched `build_router()`'s own, entirely separate loop over
+`discover_checkpoint_bundles()`, which calls `model_info_for_bundle()`
+directly and unguarded to build a registry entry.
+
+**Confirmed live, two distinct corruption modes:** a bundle with
+malformed `config.json` (`{not valid json`) raised an uncaught
+`json.decoder.JSONDecodeError`; a bundle with syntactically valid JSON
+missing the required `"max_seq_len"` key raised an uncaught `KeyError`.
+Both crashed `build_router()` entirely. `discover_checkpoint_bundles`
+only checks that a bundle's three files *exist*, never that
+`config.json` is actually valid -- the identical gap the
+`FoundryProvider` fix closed for its own bundle-loading loop, just
+never applied here. Since `build_router()` backs every CLI command and
+server startup, one corrupted checkpoint's *metadata* (not even its
+weights -- `model_info_for_bundle` is documented torch-free, reading
+only `config.json`) took down everything, the same broad blast radius
+already fixed once for `~/.sarva/config.json`, a saved session file,
+`memory.db`, and `FoundryProvider` itself.
+
+**Fixed the identical way as the sibling `FoundryProvider` fix:** wrap
+`model_info_for_bundle()` per bundle in `try`/`except (OSError,
+ValueError, KeyError)`, skipping (not registering) a broken bundle
+rather than crashing the whole router -- every other, perfectly valid
+bundle still registers and the router still builds successfully.
+`json.JSONDecodeError` is a `ValueError` subclass, so `ValueError`
+alone would have covered the first mode; `KeyError` is added
+separately for the missing-field mode, confirmed as a distinct,
+real failure by actually constructing that exact bundle shape rather
+than assumed to also be a `ValueError`.
+
+**Verified the new test is real:** reverted the fix and watched it
+fail with the raw, uncaught `json.decoder.JSONDecodeError` (not a
+normal assertion failure) before re-applying. All 4 pre-existing
+runtime tests pass unchanged. 1 new test, 580 -> 581 Python tests.
+`docs/foundry/inference.md` updated.
+
+**This closes out both real candidates from the confirm-gate-bypass
+sweep** -- no open candidates remain, worth a fresh Explore-agent sweep
+next time.
+
+**Next:** the no-retry-cap gap named alongside the AgentLoop
+AssertionError fix (a real feature, not a bug fix); batching multiple
+concurrent inference requests (§3.6f, still a deliberate deferral --
+real correctness risk); F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have);
+Gemini's Files API for long-video input (no API key here to verify
+live); a first pass at code-signing/notarization for the desktop
+release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

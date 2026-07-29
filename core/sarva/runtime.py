@@ -114,7 +114,30 @@ def build_router() -> Router:
         )
 
         for bundle_name, bundle_path in discover_checkpoint_bundles(fdir).items():
-            info = model_info_for_bundle(bundle_name, bundle_path)
+            try:
+                info = model_info_for_bundle(bundle_name, bundle_path)
+            except (OSError, ValueError, KeyError):
+                # A real bug found by actually corrupting a bundle's
+                # config.json two ways (malformed JSON, and valid JSON
+                # missing the required "max_seq_len" key):
+                # model_info_for_bundle() raised an uncaught
+                # json.JSONDecodeError/KeyError with nothing here to
+                # catch it, crashing every caller of build_router() --
+                # every CLI command, /chat, /ws/chat, server startup --
+                # not just a request that tried to use that specific
+                # checkpoint. discover_checkpoint_bundles only checks
+                # that the three bundle files *exist*, never that
+                # config.json is actually valid, so this was reachable
+                # any time a bundle got corrupted after being
+                # discovered. The same "corrupted on-disk state" bug
+                # class already fixed for FoundryProvider.__init__
+                # (which covers build_providers(), a separate call
+                # site) -- just not closed here until now. Skipped
+                # (not fatal to every OTHER valid bundle), the same
+                # "one bad case shouldn't take down everything" posture
+                # FoundryProvider.__init__ and run_benchmark already
+                # apply.
+                continue
             registry.register(info)
             available.add(info.id)
     return Router(registry, routing, available)

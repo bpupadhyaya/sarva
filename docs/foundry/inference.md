@@ -107,6 +107,27 @@ Construction only fails (the same `ValueError` shape as the existing
 turned out to be broken, since a `FoundryProvider` serving zero models
 isn't meaningfully different from one that failed to construct.
 
+**The same class of bug in the sibling call site that fix didn't cover,
+found by a later sweep:** `build_router()` has its own, separate loop
+over `discover_checkpoint_bundles()` — it calls `model_info_for_bundle()`
+directly to register a registry entry, unrelated to
+`FoundryProvider.__init__`'s own bundle-loading loop above. That
+function is documented "torch-free" (it only reads `config.json`), but
+had the identical gap: no error handling at all. Confirmed live two
+ways: a bundle with malformed `config.json` raised an uncaught
+`json.JSONDecodeError`; a bundle with syntactically valid JSON missing
+the required `"max_seq_len"` key raised an uncaught `KeyError`. Either
+one crashed `build_router()` entirely — and since `build_router()` is
+called by every CLI command and server startup, one corrupted
+checkpoint's metadata (not even its weights) took down everything, the
+same broad blast radius the `FoundryProvider` fix above closed for a
+different call site. Fixed the identical way: catch `(OSError,
+ValueError, KeyError)` around `model_info_for_bundle()` per bundle and
+skip the broken one, rather than let it crash every other, perfectly
+valid bundle's registration. Verified the new test is real: reverted
+the fix and watched it fail with the raw, uncaught `JSONDecodeError`
+before re-applying. All 4 pre-existing runtime tests pass unchanged.
+
 ## What the adapter honestly does and doesn't do
 
 - **No chat template.** The prompt sent to the model is just the
