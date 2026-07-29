@@ -105,3 +105,14 @@ def test_build_sft_batch_rejects_a_batch_too_short_to_form_any_pair(tokenizer):
 
     with pytest.raises(ValueError, match="at least 2 tokens"):
         build_sft_batch([empty_example], tokenizer)
+
+
+def test_build_sft_batch_rejects_an_empty_example_list_with_a_clear_message(tokenizer):
+    # A real bug found by actually calling build_sft_batch([], ...):
+    # `max(len(ids) for ids, _ in encoded)` on an empty `encoded` list
+    # raised a bare "ValueError: max() iterable argument is empty" --
+    # technically the right exception type, but a confusing message
+    # naming an internal max() call the caller never wrote, instead of
+    # the actual problem (no examples at all).
+    with pytest.raises(ValueError, match="requires at least one example"):
+        build_sft_batch([], tokenizer)

@@ -7426,3 +7426,54 @@ this environment doesn't have); Gemini's Files API for long-video input
 (no API key here to verify live); a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have -- likely stays deferred).
+
+## build_sft_batch/build_dpo_batch crashed on an empty example list with a confusing internal-implementation-detail error -- the last low-severity candidate from the AgentLoop retry-crash sweep, closing it out
+
+Confirmed live: `build_sft_batch([], tokenizer)` raised a bare
+`ValueError: max() iterable argument is empty` -- technically the right
+exception type (a `ValueError` was already the established pattern this
+function uses for its other invalid-input case, an empty SFTExample
+producing too few tokens), but a confusing message that names an
+internal `max()` call the caller never wrote, rather than the actual
+problem. `build_dpo_batch` inherits the identical crash, since it's
+just two calls to `build_sft_batch`.
+
+**Lower severity than every other fix in this journal, named
+honestly:** no CLI or data pipeline currently wires either function to
+external input that could plausibly filter a batch down to zero
+examples -- both are exercised only by unit tests today, library-only
+surfaces. But the same reasoning behind every other "confusing internal
+error instead of a clear message" fix in this project applies: a future
+caller (e.g. a real data pipeline that filters low-quality examples out
+before batching) would hit this exact confusing error the moment a
+filter step removed everything.
+
+**Fixed with the smallest possible change:** an explicit check at the
+top of `build_sft_batch`, raising `ValueError("build_sft_batch requires
+at least one example, got an empty list")` before the `max()` call ever
+runs. `build_dpo_batch` needed no separate fix at all -- it already
+gets the same clear message for free, since it calls `build_sft_batch`
+rather than reimplementing tokenization/padding itself, the same
+"one real fix, not two" reuse this pair of functions was already built
+around.
+
+**Verified the new tests are real:** reverted the fix and watched both
+new tests (one per function) fail with the original confusing `max()`
+message before re-applying. All 14 pre-existing SFT/DPO tests pass
+unchanged. 2 new tests, 577 -> 579 Python tests. `docs/foundry/
+training.md` updated.
+
+**This closes out every real candidate from the AgentLoop
+retry-crash sweep** -- no open candidates remain, worth a fresh
+Explore-agent sweep next time.
+
+**Next:** the no-retry-cap gap named alongside the AgentLoop
+AssertionError fix (a real feature, not a bug fix -- no maximum retry
+count exists for a provider that keeps returning `retryable=True`
+forever); batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

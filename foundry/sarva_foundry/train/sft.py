@@ -70,6 +70,14 @@ def build_sft_batch(
     this — see `test_model.py`'s causal-masking test), and a padded
     position's own output is excluded from the loss via the mask.
     """
+    if not examples:
+        # A real bug found by actually calling build_sft_batch([], ...):
+        # max() on the empty `encoded` list below raised a bare
+        # "ValueError: max() iterable argument is empty" -- technically
+        # the right exception type, but a confusing, undocumented
+        # message that names an internal implementation detail (a max()
+        # call the caller never wrote) instead of the actual problem.
+        raise ValueError("build_sft_batch requires at least one example, got an empty list")
     encoded = [encode_sft_example(e, tokenizer, end_of_turn) for e in examples]
     max_len = max(len(ids) for ids, _ in encoded)
     if max_len < 2:

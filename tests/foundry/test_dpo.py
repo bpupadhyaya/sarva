@@ -86,6 +86,15 @@ def test_build_dpo_batch_reuses_sft_batch_shapes(tokenizer):
         assert x.shape[0] == 1
 
 
+def test_build_dpo_batch_rejects_an_empty_example_list_with_a_clear_message(tokenizer):
+    # build_dpo_batch just calls build_sft_batch twice, so it inherits
+    # the same real bug found by calling build_dpo_batch([], ...): a
+    # bare "ValueError: max() iterable argument is empty" instead of a
+    # message actually naming the problem (no examples at all).
+    with pytest.raises(ValueError, match="requires at least one example"):
+        build_dpo_batch([], tokenizer)
+
+
 def test_dpo_step_initial_loss_is_exactly_ln2_when_policy_equals_reference(tokenizer):
     # The strongest possible correctness check on the FULL dpo_step path
     # (real model forward passes, not the isolated-tensor test above):

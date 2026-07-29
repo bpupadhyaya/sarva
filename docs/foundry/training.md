@@ -238,6 +238,24 @@ distinct, correct response — proof the model learned to condition its
 answer on the actual question, not just memorize one fixed
 continuation.
 
+**A real bug found by actually calling `build_sft_batch([], ...)`:**
+`max(len(ids) for ids, _ in encoded)` on the (then-empty) `encoded`
+list raised a bare `ValueError: max() iterable argument is empty` --
+technically the right exception type, but a confusing message naming
+an internal `max()` call the caller never wrote, not the actual problem
+(no examples at all). Lower severity than most fixes in this project:
+no CLI or data pipeline currently wires this function to external
+input that could plausibly filter a batch down to zero examples --
+it's exercised only by unit tests today -- but any future caller that
+does (e.g. a data pipeline filtering low-quality examples out) would
+hit this same confusing error. Fixed with an explicit check raising
+`ValueError("build_sft_batch requires at least one example, got an
+empty list")` before the `max()` call ever runs. `build_dpo_batch`
+(below) inherits the same clear message for free, since it just calls
+`build_sft_batch` twice rather than reimplementing this. Verified the
+new tests are real: reverted the fix and watched both fail with the
+original confusing `max()` message before re-applying.
+
 ## DPO: teaching preference without a reward model
 
 §3.6e's post-training line continues: "SFT -> DPO/RLHF -> agentic RL."
