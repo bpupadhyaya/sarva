@@ -115,6 +115,24 @@ def test_answer_reward_does_not_reward_a_wrong_answer_containing_the_right_digit
     assert answer_reward(correct, "7") == 1.0
 
 
+def test_answer_reward_is_not_sign_blind():
+    # A fourth real reward-hacking exploit, an independent instance of
+    # the identical sign-blindness bug already found and fixed in
+    # sarva.eval.harness.contains_match: `\b` treats `-` as a non-word
+    # character, so a word boundary already exists between a minus sign
+    # and the digits that follow it -- the old `\bexpected\b` pattern
+    # matched a wrong "-45" just as readily as a correct "45". Confirmed
+    # directly before this fix: answer_reward("<think>...</think>The
+    # answer is -45", "45") returned 1.0 -- a model that reverses
+    # subtraction operand order got full training reward for a
+    # numerically wrong answer, corrupting the actual RL training
+    # signal, not just a benchmark report.
+    wrong = "<think>let me subtract</think>The answer is -45"
+    assert answer_reward(wrong, "45") == 0.0
+    correct = "<think>let me subtract</think>The answer is 45"
+    assert answer_reward(correct, "45") == 1.0
+
+
 def test_reasoning_reward_combines_format_and_answer_with_default_weights():
     both_right = "<think>2+3=5</think>5"
     assert reasoning_reward(both_right, "5") == 1.0  # 0.3*1 + 0.7*1

@@ -106,7 +106,24 @@ def answer_reward(completion_text: str, expected_answer: str) -> float:
     if completion_text.count(THINK_END) != 1:
         return 0.0
     answer_segment = completion_text.split(THINK_END, 1)[1]
-    pattern = r"\b" + re.escape(expected_answer) + r"\b"
+    # A fourth real reward-hacking exploit, an independent instance of
+    # the identical sign-blindness bug already found and fixed in
+    # sarva.eval.harness.contains_match: `\b` treats `-` as a non-word
+    # character, so a word boundary already exists between a minus
+    # sign and the digits that follow it -- this `\bexpected\b` pattern
+    # matched a wrong "-45" just as readily as a correct "45". Confirmed
+    # directly, not hypothetical: `answer_reward("<think>...</think>The
+    # answer is -45", "45")` returned `1.0` before this fix -- a model
+    # that reverses subtraction operand order got full training reward
+    # for a numerically wrong answer, corrupting the actual RL training
+    # signal itself, not just a benchmark report. This function's own
+    # word-boundary fix (a few paragraphs up in this docstring) was
+    # copied from `contains_match` before that function's own later
+    # sign-blindness fix existed, so it never inherited the correction.
+    # Fixed the identical way: `(?<![\w-])`/`(?!\w)` lookaround instead
+    # of `\b`, treating `-` as significant on purpose rather than
+    # relying on word/non-word transitions to get it right by accident.
+    pattern = r"(?<![\w-])" + re.escape(expected_answer) + r"(?!\w)"
     return 1.0 if re.search(pattern, answer_segment) else 0.0
 
 

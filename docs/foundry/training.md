@@ -542,6 +542,26 @@ answer is 17", "7")` returned `1.0` before the fix. Fixed the same way
 `contains_match` was: matched on a real word boundary
 (`\bexpected\b`), not a raw substring.
 
+**A fourth real reward-hacking exploit, an independent instance of the
+identical sign-blindness bug already found and fixed in
+`contains_match`:** the word-boundary fix above (`\bexpected\b`) was
+copied from `contains_match` before that function's own *later*
+sign-blindness fix existed, so it never inherited the correction. `\b`
+treats `-` as a non-word character, so a word boundary already exists
+between a minus sign and the digits that follow it — the pattern
+matched a wrong `"-45"` just as readily as a correct `"45"`. Confirmed
+directly, not hypothetical: `answer_reward("<think>...</think>The
+answer is -45", "45")` returned `1.0` before this fix — a model that
+reverses subtraction operand order got full training reward for a
+numerically wrong answer, corrupting the actual RL training signal
+itself, not just a benchmark report the way the eval-harness version of
+this bug did. Fixed the identical way `contains_match` was:
+`(?<![\w-])`/`(?!\w)` lookaround instead of `\b`, treating `-` as
+significant on purpose rather than relying on word/non-word transitions
+to get it right by accident. Verified the new test is real: reverted
+the fix and watched it fail with the exact reward-hacking result
+(`1.0` for a wrong answer) before re-applying.
+
 **The already-published 31% → 56% numbers below were re-checked
 against the fix, not left standing on faith:** re-ran
 `examples/17_reasoning_token_training.py` (same fixed seed,

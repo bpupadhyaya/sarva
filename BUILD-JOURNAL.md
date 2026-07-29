@@ -8325,3 +8325,87 @@ have); Gemini's Files API for long-video input (no API key here to
 verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this
 environment doesn't have -- likely stays deferred).
+
+## Reasoning-token training's own answer_reward had the identical sign-blindness bug already found and fixed in the eval harness -- an independent implementation that never inherited the correction, corrupting the actual RL training signal
+
+A fresh Explore-agent sweep at twenty-eight rounds deep, pointed at
+genuinely fresh territory: DOCX/office-format degrading (confirmed
+still an honestly-named deferred gap, nothing new to find), foundry
+loss-masking/truncation arithmetic (the specific hypothesis didn't
+apply -- `build_sft_batch` isn't currently wired into a real training
+loop -- but investigating this area is exactly what surfaced the real
+finding below), `Registry.load()` capability consistency (clean,
+`models.yaml` entries are already hand-verified), `sarva doctor`/
+`config show` key leakage (clean, values are never printed), and binary
+blobs reaching logs (clean, no logging/print touches raw content
+anywhere in this codebase). One angle -- reading through
+`foundry/sarva_foundry/train/reasoning.py` in full while investigating
+angle 2 -- surfaced a real, live-reproduced, and notably severe
+finding: the exact same bug already found and fixed once in this
+project, reimplemented independently and never patched.
+
+**The mechanism:** `answer_reward`'s own docstring explicitly says it
+follows "the same `contains_match` philosophy" as
+`sarva.eval.harness`'s default grader -- and it turned out to include
+`contains_match`'s own *retired* bug, not the current, fixed version of
+it. This function's word-boundary fix (`\bexpected\b`) was copied from
+`contains_match` at a point in this project's history *before*
+`contains_match`'s own later sign-blindness fix existed, so this
+independent copy never inherited the correction when the original was
+patched. `\b` treats `-` as a non-word character, so a word boundary
+already exists between a minus sign and the digits that follow it --
+the pattern matched a wrong `"-45"` just as readily as a correct
+`"45"`.
+
+**Confirmed live, and notably more severe than the original
+eval-harness instance of this bug:** `answer_reward("<think>...
+</think>The answer is -45", "45")` returned `1.0` -- a model that
+reverses subtraction operand order (the identical realistic mistake
+the eval-harness version targets) gets full credit. The eval-harness
+version corrupts a *reported benchmark number* -- a measurement error,
+bad but not self-reinforcing. This version corrupts the actual
+*training signal* GRPO optimizes against: a policy discovering this
+exploit during RL would be positively reinforced for learning to
+produce sign-reversed wrong answers, the reward function itself
+teaching the model to be wrong in a specific, exploitable way, not just
+misreporting how well it's already doing. The same reward-hacking bug
+*class* this project has now found and closed four separate times in
+this one function's docstring (`\bexpected\b` -> real word boundary,
+a raw substring match -> word-boundary, a repeated-`</think>` padding
+exploit -> single-closing-tag requirement, and now this) -- each one
+independently confirmed live before fixing, never assumed from the
+shape of the bug alone.
+
+**Fixed the identical way `contains_match` was:** `(?<![\w-])`/`(?!\w)`
+lookaround instead of `\b`, treating `-` as significant on purpose
+rather than relying on word/non-word transitions to get it right by
+accident -- the exact same regex this project already validated once.
+
+**Verified the new test is real:** reverted the fix and watched it fail
+with the exact reward-hacking result (`1.0` for a wrong answer, an
+`AssertionError: assert 1.0 == 0.0`) before re-applying. All 20
+pre-existing reasoning/reasoning-training tests pass unchanged. 1 new
+test, 598 -> 599 Python tests. `docs/foundry/training.md` updated.
+
+**The already-published 31% -> 56% reasoning-training numbers were
+re-checked against this fix too, not left standing on faith:** re-ran
+`examples/17_reasoning_token_training.py` (same fixed seed,
+deterministic) after the fix and got the identical 31% -> 56% result --
+expected, since single-digit addition's real answers are all
+non-negative sums, so this specific sign-blindness bug was never
+actually reachable by that example's own task, even though the exploit
+itself is real and worth closing regardless of whether this one
+example happened to trigger it.
+
+**Next:** re-running `examples/17_reasoning_token_training.py` to
+confirm the published 31% -> 56% numbers still hold after this fix;
+the Tauri `csp: null` gap (still deferred, needs a GUI/Windows machine
+this environment lacks); the no-retry-cap gap on `AgentLoop` (still
+deferred, a real feature decision); batching multiple concurrent
+inference requests (§3.6f, still a deliberate deferral -- real
+correctness risk); F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have);
+Gemini's Files API for long-video input (no API key here to verify
+live); a first pass at code-signing/notarization for the desktop
+release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).
