@@ -8,6 +8,7 @@ import base64
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sarva.memory import session as session_module
 from sarva.memory.session import SessionStore
@@ -298,6 +299,52 @@ def test_websocket_streams_events_and_ends_with_run_done(monkeypatch):
     assert events[-1]["type"] == "run_done"
     assert events[-1]["state"] == "done"
     assert any(e["type"] == "model_stream" for e in events)
+
+
+def test_websocket_rejects_a_cross_origin_connection(monkeypatch):
+    # A real bug found by actually connecting a TestClient WebSocket
+    # session with Origin: https://evil.example.com set: the handshake
+    # was fully accepted and a real run completed. WebSocket connections
+    # are NOT subject to the Same-Origin Policy/CORS the way fetch() is
+    # -- any webpage a user's browser has open can drive this endpoint
+    # regardless of which site's tab it's in, and ws_chat builds an
+    # AgentLoop with BUILTIN_TOOLS (and, with "auto": true,
+    # confirm=always_allow) -- a classic cross-site WebSocket hijacking
+    # (CSWSH) vector giving a malicious page real shell/file-tool access
+    # with every confirmation gate auto-approved.
+    _force_mock_only(monkeypatch)
+    client = _client()
+
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect(
+            "/ws/chat", headers={"Origin": "https://evil.example.com"}
+        ) as ws:
+            ws.send_json({"message": "hi"})
+            ws.receive_json()
+
+    assert excinfo.value.code == 1008
+
+
+def test_websocket_accepts_a_same_origin_connection_with_an_explicit_origin_header(monkeypatch):
+    # The regression guard for the fix above: a real browser (including
+    # the desktop app's own embedded webview, which loads its UI from
+    # this exact server) always sends Origin on a WebSocket handshake --
+    # the fix must not reject the ordinary, legitimate case.
+    _force_mock_only(monkeypatch)
+    client = _client()
+
+    with client.websocket_connect("/ws/chat", headers={"Origin": "http://testserver"}) as ws:
+        ws.send_json({"message": "hi"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "done"
 
 
 def test_websocket_with_session_persists(tmp_path, monkeypatch):

@@ -7851,3 +7851,94 @@ Gemini's Files API for long-video input (no API key here to verify
 live); a first pass at code-signing/notarization for the desktop
 release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## /ws/chat had zero Origin validation -- a real cross-site WebSocket hijacking (CSWSH) gap, externally reachable by any ordinary webpage, not a hypothetical
+
+A fresh Explore-agent sweep at twenty-four rounds deep, pointed at
+genuinely fresh angles after twenty-four prior rounds: the ARITHMETIC
+benchmark's own numbers (found a real, second bug -- see below,
+deferred this round), `degrade_message` with two modalities and one
+degrader (clean), foundry model.py's RoPE/batching numerics (clean),
+duplicate model IDs in the registry (clean), the Tauri CSP being
+explicitly `null` (real, but a bigger, riskier change to make blind in
+an environment with no GUI to verify against -- named, deferred),
+`datetime.now()`/`time.time()` used for anything security-sensitive
+(clean). The top-ranked finding is, by a genuinely different measure
+than the GRPO NaN bug or the duplicate-`tool_call_id` confirm-gate
+bypass, the most severe finding across every sweep so far: it's
+externally reachable by an ordinary webpage a user's browser has open,
+not just a malformed model response or a corrupted local file.
+
+**The mechanism:** WebSocket connections are not subject to the
+Same-Origin Policy or CORS the way `fetch()` is -- a page's own script
+can open `new WebSocket("ws://127.0.0.1:8000/ws/chat")` regardless of
+which site it came from, and the browser sends it whether the tab is
+foregrounded or a background one the user forgot about entirely.
+`ws_chat` never checked `Origin` at all. Confirmed live: a
+`TestClient` WebSocket handshake carrying `Origin:
+https://evil.example.com` was fully accepted, and a complete real run
+executed over it -- `ws_chat` builds a genuine `AgentLoop` with
+`BUILTIN_TOOLS` (file read/write, shell execution, memory), and a
+client-supplied `"auto": true` sets `confirm=always_allow`. An ordinary
+webpage, open in any tab, no user interaction beyond having it loaded,
+could silently drive real shell/file-tool access with every
+destructive-tool confirmation gate pre-approved -- purely because
+`sarva serve`/the desktop app happened to be running locally, the
+default and only documented way to use either surface.
+
+**Fixed with a standard same-origin check before `websocket.accept()`
+is ever called:** if the handshake's `Origin` header is present, it
+must name the same `host:port` the request's own `Host` header does
+(`urlsplit(origin).netloc == host`); otherwise the connection is closed
+with code `1008` (Policy Violation) before a single frame is read or an
+`AgentLoop` is constructed. `Origin` being *absent* is deliberately
+allowed through, not rejected -- real browsers always send it on a
+WebSocket handshake (RFC 6455's own requirement for browser clients
+specifically), so its absence structurally means a non-browser caller
+that the actual threat here -- an ordinary webpage silently driving the
+connection -- cannot produce; rejecting those too would be a real
+regression (breaking any legitimate non-browser client, present or
+future) with no corresponding security benefit.
+
+**Verified the fix doesn't break the one real legitimate case that
+matters:** the desktop app's own embedded webview always loads its UI
+from the exact same `http://127.0.0.1:8000` origin its own server
+serves from (`tauri.conf.json`'s `frontendDist`/`devUrl` both point at
+that literal URL, in both dev and bundled builds of this app today) --
+so its WebSocket connections are always genuinely same-origin and pass
+completely unaffected. Verified the new tests are real: reverted the
+fix and watched the cross-origin test fail with `Failed: DID NOT RAISE
+WebSocketDisconnect` (the connection was still fully accepted) before
+re-applying. All 33 pre-existing server tests pass unchanged. 2 new
+tests, 586 -> 588 Python tests. `docs/packaging.md` updated.
+
+**A second, real, lower-severity finding from the same sweep, not
+picked up this round:** the eval harness's default grader
+(`contains_match`, `core/sarva/eval/harness.py`) is sign-blind -- its
+`\b`-wrapped regex treats `-` as a non-word character, so
+`"The answer is -45"` matches an `expected="45"` case. Concretely
+reachable via the bundled `ARITHMETIC` benchmark's own subtraction
+cases: a model that reverses operand order (a common weak-model
+mistake, e.g. computing `47 - 92 = -45` for a `92 - 47` prompt) would
+score full credit for a numerically wrong answer. Real, but deferred
+this round in favor of the more severe WS-origin fix -- worth picking
+up next.
+
+**Also named, deliberately not fixed this round:** the desktop app's
+`tauri.conf.json` ships `"csp": null` (Tauri's CSP injection fully
+disabled) with no defense-in-depth if untrusted content ever reached
+the webview -- real, but a bigger, riskier change to make blind in an
+environment with no GUI/Windows machine to verify a CSP change doesn't
+break the app's own real script/style needs, unlike the WS-origin fix,
+which was fully verifiable via the existing `TestClient` test suite.
+
+**Next:** the eval harness's sign-blind `contains_match` grader named
+above; the Tauri `csp: null` gap named above; the config.json
+concurrent-process-write race; the no-retry-cap gap on `AgentLoop`;
+batching multiple concurrent inference requests (§3.6f, still a
+deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this
+environment doesn't have); Gemini's Files API for long-video input (no
+API key here to verify live); a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have -- likely stays deferred).

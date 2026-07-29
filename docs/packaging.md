@@ -225,6 +225,51 @@ branches on `event.type === "needs_confirmation"` and its
 matching the server side precisely. `GET /health` and `GET /models`
 round out the REST surface for basic liveness/registry checks.
 
+### `/ws/chat` had zero Origin validation — a real cross-site WebSocket hijacking (CSWSH) gap, not a hypothetical one
+
+**The most severe finding across every sweep of this project so far,
+by a different measure than the GRPO NaN bug or the duplicate-
+`tool_call_id` confirm-gate bypass: this one is externally reachable by
+an ordinary webpage, not just a malformed model response.** WebSocket
+connections are **not** subject to the Same-Origin Policy or CORS the
+way `fetch()` is — a browser will happily open `new
+WebSocket("ws://127.0.0.1:8000/ws/chat")` from any page's own script,
+regardless of which site that page came from, and send it whether the
+tab is in the foreground or a background one the user forgot about.
+Confirmed live: a `TestClient` WebSocket handshake carrying `Origin:
+https://evil.example.com` was fully accepted, with a complete run
+executing over it. Since `ws_chat` builds a real `AgentLoop` with
+`BUILTIN_TOOLS` (file read/write, shell execution, memory), and honors
+a client-supplied `"auto": true` by setting `confirm=always_allow`, an
+ordinary webpage — no user interaction beyond having it open — could
+silently drive real shell/file-tool access with every destructive-tool
+confirmation gate pre-approved, purely because `sarva serve`/the
+desktop app happened to be running locally. A classic cross-site
+WebSocket hijacking (CSWSH) vector, distinct from every payload-shape
+or exception-handling bug already fixed on this same endpoint — those
+all assumed the caller was legitimate and just sent malformed data;
+this one never checked whether the caller was legitimate at all.
+
+**Fixed with a standard same-origin check before `websocket.accept()`
+is ever called:** if the handshake's `Origin` header is present, it
+must name the same `host:port` the request's own `Host` header does;
+otherwise the connection is closed with code `1008` (Policy Violation)
+before any frame is read or an `AgentLoop` is even constructed. `Origin`
+being *absent* is deliberately not rejected — real browsers always send
+it on a WebSocket handshake (mandated by RFC 6455 specifically for
+browser clients), so its absence means a non-browser caller (a script,
+a future first-party client) that the actual threat this closes — an
+ordinary webpage silently driving the connection — structurally cannot
+produce; rejecting those too would be a real regression with no
+security benefit. Verified this doesn't break the legitimate case
+either: the desktop app's own webview always loads its UI from the
+exact same `http://127.0.0.1:8000` origin its server serves from
+(`tauri.conf.json`'s `frontendDist`/`devUrl`), so its own WebSocket
+connections are always genuinely same-origin and pass unaffected.
+Verified the new tests are real: reverted the fix and watched the
+cross-origin test fail with `DID NOT RAISE WebSocketDisconnect` (the
+connection was still fully accepted) before re-applying.
+
 **A real gap found by checking what the desktop app actually calls, not
 what the server merely supports:** `/chat` has taken optional
 `image_base64`/`image_media_type` fields since images were wired into

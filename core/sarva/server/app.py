@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -44,6 +45,38 @@ from sarva.server.schemas import (
 )
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _is_same_origin(origin: str | None, host: str | None) -> bool:
+    """True iff a browser-sent `Origin` header names the same host:port
+    this request's own `Host` header does -- the standard "reject
+    cross-site WebSocket hijacking" check every browser-facing WS
+    endpoint needs, since (unlike `fetch()`) the WebSocket handshake is
+    NOT subject to the Same-Origin Policy or CORS at all: any webpage a
+    user's browser has open can open `new WebSocket("ws://127.0.0.1:
+    8000/ws/chat")` and the browser will send it regardless of which
+    site's tab it came from. A real bug found by actually connecting a
+    TestClient WebSocket session with `Origin: https://evil.example.com`
+    set: the handshake was accepted and a full run completed -- and
+    `ws_chat` builds an `AgentLoop` with `BUILTIN_TOOLS` and, if the
+    client also sends `"auto": true`, `confirm=always_allow`, meaning a
+    malicious webpage could drive real shell/file-tool access with
+    every destructive-tool confirmation gate auto-approved, no user
+    interaction required, purely by being open in a background tab
+    while `sarva serve`/the desktop app is running locally -- a classic
+    cross-site WebSocket hijacking (CSWSH) vector.
+
+    `origin` being absent is NOT rejected: real browsers always send
+    `Origin` on a WebSocket handshake (mandated by RFC 6455 for browser
+    clients specifically), so its absence means a non-browser caller
+    (a script, a future first-party CLI client) that this specific
+    threat -- an ordinary webpage silently driving the connection --
+    structurally can't produce; blocking those callers too would be a
+    real regression with no security benefit, since the drive-by risk
+    this closes is inherent to *browser* WebSocket behavior."""
+    if origin is None:
+        return True
+    return urlsplit(origin).netloc == (host or "")
 
 
 def _extra_content_blocks(
@@ -249,6 +282,13 @@ def create_app() -> FastAPI:
                 ).model_dump_json()
             )
 
+        if not _is_same_origin(websocket.headers.get("origin"), websocket.headers.get("host")):
+            # Rejected before accept() -- an ordinary WebSocket close
+            # handshake, not a "clean failure" JSON frame pair, since a
+            # cross-origin caller is exactly the audience this check
+            # exists to give nothing useful to.
+            await websocket.close(code=1008)  # 1008: Policy Violation
+            return
         await websocket.accept()
         try:
             try:
