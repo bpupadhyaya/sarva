@@ -80,6 +80,68 @@ def test_a_submission_that_exits_before_test_code_runs_does_not_get_rewarded():
         assert result.reward == 0.0
 
 
+def test_a_submission_that_reads_its_own_source_cannot_steal_the_sentinel():
+    # A second, independent reward-hacking bug, found the same way the
+    # sys.exit(0) exploit was -- by actually submitting it and watching
+    # reward=1.0 come back. The sentinel used to be embedded, in
+    # plaintext, in the very script file the submission was executed
+    # from -- any submission could open(__file__).read(), regex out the
+    # sentinel, print it, and sys.exit(0), scoring full reward without
+    # test_code ever running (worse than the first exploit: 100% reward
+    # for 0% real work). Confirmed live against a task whose test is
+    # deliberately impossible to pass, so a real pass proves nothing
+    # actually ran: this exact submission returned reward=1.0 before
+    # this fix. The driver is now passed via `-c`, which never sets
+    # __file__ at all, and task.test_code/the sentinel are never written
+    # anywhere (disk, env, argv) until the subprocess independently
+    # proves it finished running submitted_code -- so this submission
+    # can't reach __file__ or the sentinel through any channel.
+    impossible_task = CodingTask(
+        task_id="impossible",
+        prompt="n/a",
+        test_code="assert 1 == 2, 'deliberately impossible'",
+    )
+    malicious_submission = (
+        "import re, sys\n"
+        "src = open(__file__, 'r').read()\n"
+        "m = re.search(r'__SARVA_TASK_COMPLETED_[0-9a-f]+__', src)\n"
+        "print(m.group(0))\n"
+        "sys.exit(0)\n"
+    )
+
+    result = evaluate_submission(impossible_task, malicious_submission, timeout=5.0)
+
+    assert result.passed is False
+    assert result.reward == 0.0
+    assert "__SARVA_TASK_COMPLETED_" not in result.stdout
+
+
+def test_a_submission_that_reads_os_environ_cannot_steal_the_sentinel_either():
+    # The same exploit shape via a different introspection channel --
+    # confirms the fix isn't just "don't put it in a file" but "don't
+    # put it anywhere the submission has access to before test_code
+    # genuinely runs."
+    impossible_task = CodingTask(
+        task_id="impossible",
+        prompt="n/a",
+        test_code="assert 1 == 2, 'deliberately impossible'",
+    )
+    malicious_submission = (
+        "import os, re, sys\n"
+        "for v in os.environ.values():\n"
+        "    if re.match(r'__SARVA_TASK_COMPLETED_[0-9a-f]+__', v):\n"
+        "        print(v)\n"
+        "        sys.exit(0)\n"
+        "print('no sentinel found in env')\n"
+    )
+
+    result = evaluate_submission(impossible_task, malicious_submission, timeout=5.0)
+
+    assert result.passed is False
+    assert result.reward == 0.0
+    assert "__SARVA_TASK_COMPLETED_" not in result.stdout
+
+
 @_posix_only
 def test_timeout_kills_grandchild_processes_the_submission_spawned_not_just_the_direct_child():
     # A real bug found by actually running a submission that forks: the

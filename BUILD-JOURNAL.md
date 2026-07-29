@@ -8652,3 +8652,118 @@ signing identity this environment doesn't have -- likely stays
 deferred). Worth a fresh Explore-agent sweep next time, now that both
 long-standing named gaps have been resolved (one fixed, one confirmed
 to genuinely need infrastructure this environment lacks).
+
+## A second, deterministic reward-hacking bypass of the RL coding-task harness -- a submission could read its own source, steal the completion sentinel, and score full reward for zero real work
+
+A round-31 sweep, explicitly instructed to re-verify a couple of prior
+rounds' "clean" reports rather than trust them blindly, and to keep
+applying the technique that has paid off three times now: grep for
+other copies of an already-fixed pattern that may not have inherited
+the fix. It found something more serious than a missed copy -- a
+SECOND, independent way to defeat the exact function
+(`evaluate_submission` in `foundry/sarva_foundry/rl/environment.py`)
+whose own docstring already documents a first reward-hacking fix
+(the `sys.exit(0)` exploit, closed with a per-call random sentinel
+printed only after `test_code` finishes).
+
+**The mechanism:** the sentinel closed the FIRST exploit, but it was
+embedded in plaintext in the very script file the submission was
+executed FROM. `evaluate_submission` wrote `submitted_code +
+task.test_code + print(sentinel)` to a temp file, THEN spawned a
+subprocess to run that file -- meaning the sentinel was sitting on disk,
+fully readable, from the very first instruction the submission
+executed. Any submission could do `open(__file__).read()`, regex out
+`__SARVA_TASK_COMPLETED_[0-9a-f]+__`, print it, and `sys.exit(0)` --
+scoring `reward=1.0` without `test_code`'s assertions ever running.
+
+**Confirmed live, independently, before touching any fix code:** against
+a task with a deliberately impossible test (`assert 1 == 2`, so a
+genuine pass is provably impossible), the exploit submission returned
+`passed=True, reward=1.0`, stdout containing only the stolen sentinel.
+Worse than the first exploit in a specific way: the first one needed
+`sys.exit(0)` to race an early exit against *not knowing* whether
+`test_code` would eventually run; this one is fully deterministic --
+it doesn't need luck or timing, it just reads the answer key.
+`examples/13_rl_coding_environment.py` and `examples/14_grpo_rl_
+training.py` both name this function as the intended reward for a real
+GRPO agentic-coding RL run, so a policy training against it would be
+positively reinforced for learning to read its own source and lie
+about completion rather than learning to code -- corrupting the actual
+training signal, the same severity class as the `answer_reward`/
+`contains_match` sign-blindness findings, arguably worse since it's a
+complete, deterministic bypass rather than a partial-credit gap.
+
+**Why no embedded-state fix can close this class, only genuine temporal
+separation can:** `submitted_code` always has to run before `task.
+test_code` in the SAME process (test code needs to call what the
+submission defines), so ANYTHING present in that process from the
+start -- a file, an env var, `sys.argv` -- is readable by `submitted_
+code` before `test_code`'s real check ever executes. Moving the
+sentinel to an env var or `argv` doesn't help; it's the same
+vulnerability through a different channel, confirmed by writing (and
+then closing) an `os.environ`-scanning variant of the same exploit
+during investigation.
+
+**Fixed with real, structural temporal separation, not another embedded
+secret:** the submission is no longer written to a script file at all.
+A small, fixed driver (passed to the interpreter via `python -u -c
+<driver>`, never touching disk -- `-c` mode's `__main__` has no
+`__file__` at all, closing the specific demonstrated channel outright)
+reads `submitted_code` from the subprocess's own stdin up to a marker
+line, execs it, and prints its OWN acknowledgment marker (not anything
+the submission controls) -- only THEN does the parent process write
+`task.test_code` plus the sentinel to that same stdin pipe. Genuine
+temporal separation, not textual/positional obfuscation: those bytes
+literally do not exist anywhere the submission could read them (not on
+disk, not in an env var, not in `argv`) until the harness has
+independently observed proof that `submitted_code` finished running.
+A submission that tries to read ahead on stdin just blocks (there's
+nothing there yet) rather than seeing anything -- the worst outcome for
+trying is a timeout and `reward=0.0`, the same clean failure a
+legitimate timeout already produces, so attempting this exploit is
+strictly worse for a training policy than doing nothing.
+
+**Implementation note, for anyone extending this module:** the parent
+now does manual, interleaved subprocess I/O (write phase 1, wait for an
+ack line via a background reader thread feeding a `queue.Queue`, THEN
+write phase 2) instead of a single `proc.communicate()` call --
+`communicate()` writes its whole input eagerly and doesn't create a
+real temporal gap, which is exactly why it couldn't be used to fix this
+class of bug. The reader thread avoids `select()`-based polling, which
+doesn't work portably on Windows for regular pipes.
+
+**Verified the new tests are real:** reverted the fix and watched the
+exact submitted exploit return `passed=True, reward=1.0` again before
+re-applying -- the strongest possible confirmation, since it's not an
+assertion-shape difference but the literal bad outcome the fix exists
+to prevent. Added a second regression test for the same exploit shape
+via `os.environ` instead of `__file__`, confirming the fix closes the
+CLASS, not just the one demonstrated channel. All 9 pre-existing
+rl_environment tests pass unchanged, including the already-hardened
+`sys.exit(0)` regression test, the grandchild-process-kill test, and
+every bundled task's reference/wrong-solution pair --
+`examples/13_rl_coding_environment.py` re-run end to end and confirmed
+still correct. 2 new tests, 614 -> 616 Python tests. `ruff check`/
+`format --check` clean. `docs/foundry/training.md` updated with this
+as the module's second documented reward-hacking fix.
+
+**Also re-verified, not just taken on faith, per this round's explicit
+instruction to double-check prior "clean" sweep reports:** the desktop
+Rust IPC surface (confirmed no `#[tauri::command]` handlers exist
+beyond `lib.rs`'s already-hardened process-tree logic), `sarva.eval`'s
+benchmark-loading/result-formatting path, `sarva_foundry.quantization`/
+`ablation`, the document degrader, and CLI `--mcp-env`/`--mcp-header`
+parsing -- all still genuinely clean on a second look. The brand-new
+`sarva.atomic_write`/`AgentLoop` retry-cap fixes from the last two
+rounds were also given a second skeptical look for any gap the fixes
+themselves might have introduced -- none found.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); batching multiple concurrent inference requests (§3.6f, still a
+deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this
+environment doesn't have); Gemini's Files API for long-video input (no
+API key here to verify live); a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have -- likely stays deferred).

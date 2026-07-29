@@ -388,7 +388,38 @@ zero *and* the sentinel actually reached stdout. Confirmed live before
 fixing: `evaluate_submission` scored a bare `sys.exit(0)` submission
 `reward=1.0` against every bundled task.
 
-**A second, related bug in the same file: the "hard wall-clock timeout"
+**A second, independent reward-hacking bug in this same function, found
+the same way the first one was — by actually submitting the exploit and
+watching `reward=1.0` come back:** the per-call sentinel closed
+`sys.exit(0)`, but it was embedded in *plaintext* in the very script
+file the submission executed from (`submitted_code` + `task.test_code`
++ `print(sentinel)`, written to disk before the subprocess even
+started). Any submission could `open(__file__).read()`, regex out the
+sentinel, print it, and `sys.exit(0)` — full reward for zero real work,
+worse than the first exploit (that one still required getting lucky on
+an early-enough exit; this one worked every time, deterministically).
+Confirmed live: this exact submission scored `reward=1.0` against a
+task whose test was deliberately impossible to pass, before this fix.
+No embedded state (file, env var, `argv`) can close this class of bug —
+`submitted_code` always runs before `task.test_code` in the same
+process (it has to, so `test_code` can call what it defines), so
+anything present in that process from the start is readable by
+`submitted_code` before `test_code`'s real check ever runs. The actual
+fix is genuine temporal separation: the submission and test code are
+now streamed to the subprocess over its own stdin in two stages — the
+driver (passed via `python -c`, so `-c` mode's `__main__` has no
+`__file__` at all) execs `submitted_code` first and prints its own
+acknowledgment marker, and only *after* the caller sees that marker
+does it write `task.test_code` and the sentinel to the same pipe. A
+submission has no channel to that content early: it isn't on disk, it
+isn't in an env var or `argv`, and trying to read ahead on stdin itself
+just blocks (there's nothing there yet) rather than revealing anything
+— the worst a submission can do by trying is time out and score `0.0`,
+same as any other timeout. Verified against both the file-read exploit
+and the same idea via `os.environ` (confirming the fix is "nothing is
+reachable early," not "just don't use a file").
+
+**A third, related bug in the same file: the "hard wall-clock timeout"
 didn't actually kill everything a submission spawned.** A submission
 that forked its own subprocess (`subprocess.Popen(["sleep", "20"])`)
 kept that grandchild running — confirmed directly against the real
