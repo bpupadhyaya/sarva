@@ -87,6 +87,46 @@ real timed-out command's side-effect file genuinely never appears,
 confirmed with the process both killed and reaped, not just reported
 as failed.
 
+### Two destructive calls sharing the same `tool_call_id` could let a declined one run anyway — the confirm-gate's own key, not a tool bug
+
+**Worse than any crash in this file: a declined destructive call
+silently executing anyway, defeating the exact guarantee the
+confirmation gate exists for.** Nothing validates that every
+`ToolCallBlock` in one model turn has a unique `.id` — a real model is
+expected to keep them unique, but a malformed or adversarial response
+isn't structurally prevented from repeating one. The confirmation loop
+used to track each call's decision in `approvals: dict[str, bool]`,
+keyed by `call.id` — the model-supplied string. Two distinct
+`ToolCallBlock`s sharing that string meant the second confirmation
+answer silently overwrote the first entry, so *both* calls read back
+whichever decision was made last.
+
+**Confirmed live, not hypothetical:** two destructive tools, both given
+`id="dup"`, with a confirm policy that explicitly denies the first and
+approves the second — the first tool ran anyway. The user's own
+"no" was silently discarded because a *different* call happened to
+share its id and get approved afterward.
+
+Fixed by keying `approvals` on `id(call)` — Python's own object
+identity — instead of the model-supplied `.id` string. Every
+`ToolCallBlock` in `calls`/`destructive_calls` is the exact same Python
+object referenced both when its confirmation is recorded and when
+`run_one` later looks it up (list comprehensions preserve identity),
+so `id(call)` is a real per-call key that can never collide the way an
+arbitrary string can — no validation, rejection, or deduplication of
+malformed ids was needed to close this, just tracking each call by
+what it actually *is* rather than by a field it merely carries.
+`ToolResultBlock.tool_call_id` (the value sent back to the model on the
+wire) is completely unaffected — it still faithfully echoes `call.id`
+exactly as before; only the loop's own internal confirm-bookkeeping
+changed.
+
+**Verified the new test is real:** reverted the fix and watched it fail
+— the reverted run had no `tool_finished` result containing "declined"
+at all, because the supposedly-denied call actually executed, the
+exact bug this closes — before re-applying. All 27 pre-existing
+agent-loop tests pass unchanged.
+
 ### `WebFetchTool` and a real SSRF gap it had, found and closed
 
 `WebFetchTool` is marked `destructive=False` — deliberately, since

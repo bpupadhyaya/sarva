@@ -7477,3 +7477,88 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## Two destructive calls sharing the same tool_call_id could let a declined one execute anyway -- worse than any crash in this project, the confirm-gate's own key was the weak point, not any individual tool
+
+A fresh Explore-agent sweep at twenty-two rounds deep, pointed at
+genuinely fresh angles after twenty-two prior rounds of increasingly
+obscure territory: `agent/loop.py`'s tool-dispatch logic specifically
+(not the degradation fallback or the retry-path AssertionError, both
+already fixed), `memory/vector.py`'s actual similarity-search math
+(clean), `quantization.py`/`rl/tasks.py`'s numeric edge cases (clean),
+`events.ts`/`App.tsx` type-shape drift (clean), and a `.pop`/`del` grep
+(clean). One angle produced the most severe finding of this entire
+sweep series so far by a different measure than the GRPO NaN bug or
+the AgentLoop retry crash: not a crash, and not silent data corruption,
+but a silent **security-gate bypass** -- a destructive tool call the
+user explicitly declined running anyway.
+
+**The mechanism:** nothing in this codebase validates that every
+`ToolCallBlock` in one model turn carries a unique `.id` -- a real
+model is expected to, but a malformed or adversarial response isn't
+structurally prevented from repeating one. The confirmation loop
+tracked each call's decision in `approvals: dict[str, bool]`, keyed by
+`call.id` -- the model-supplied string, not anything this project
+controls or validates. Two distinct `ToolCallBlock` objects sharing
+that string meant the second confirmation answer silently overwrote
+the first dict entry, so `run_one`'s later `approvals.get(call.id,
+False)` lookup returned the SAME (last-decided) answer for both calls,
+regardless of what was actually decided for each individually.
+
+**Confirmed live, not reasoned about in the abstract:** two destructive
+tools, `delete_a`/`delete_b`, both given `ToolCallBlock(id="dup", ...)`,
+with a confirm policy that explicitly denies `delete_a` and approves
+`delete_b`. Expected: `delete_a` declined, `delete_b` runs. Actual: both
+ran. The user's own "no" to a destructive action was silently discarded
+because a different, unrelated call happened to share its id and get
+approved afterward -- worse than every other fix in this journal
+(including the GRPO NaN bug), because those all failed loudly or
+silently produced wrong *output*; this one silently bypassed the one
+explicit safety control (`AWAITING_CONFIRMATION`) this entire loop
+exists to enforce for destructive actions, with the confirm callback
+itself correctly reporting "denied" the whole time.
+
+**Fixed by keying `approvals` on `id(call)` -- Python's own object
+identity -- instead of the model-supplied `.id` string.** Every
+`ToolCallBlock` in `calls`/`destructive_calls` is the exact same Python
+object referenced both when its confirmation is recorded and when
+`run_one` later looks it up (list comprehensions preserve identity, they
+don't copy), so `id(call)` is a real per-call key that structurally
+cannot collide the way an arbitrary model-supplied string can. No
+validation, rejection, or deduplication of malformed ids was needed to
+close this -- the fix tracks each call by what it actually *is*, not by
+a field it merely carries. `ToolResultBlock.tool_call_id` (the value
+echoed back to the model on the wire) is completely unaffected; only
+the loop's own internal confirm-bookkeeping changed.
+
+**Verified the new test is real:** reverted the fix and watched it
+fail -- not with a clean assertion, but with the reverted run producing
+no `tool_finished` result containing "declined" at all, because the
+supposedly-denied call actually executed (the `next(...)` generator
+expression looking for that result found nothing and raised
+`StopIteration`, surfaced by Python's async machinery as `RuntimeError:
+coroutine raised StopIteration`) -- confirmed this is the real
+consequence of the bug, not a test-authoring artifact, by reading the
+failure's own root cause directly. All 27 pre-existing agent-loop tests
+pass unchanged. 1 new test, 579 -> 580 Python tests. `docs/
+agent-loop.md` updated.
+
+**The second candidate from the same sweep, not yet picked up:** a
+malformed foundry checkpoint's `config.json` still crashes
+`build_router()` with a raw, uncaught `json.JSONDecodeError` -- a prior
+sweep's fix to `FoundryProvider.__init__` (used by `build_providers()`)
+does not cover this separate call site in `runtime.py`, which calls
+`model_info_for_bundle()` unguarded. The same "corrupted on-disk state"
+bug class already fixed four times elsewhere, just not closed for this
+specific function.
+
+**Next:** the `build_router()`/`model_info_for_bundle()` corrupted-
+checkpoint gap named above; the no-retry-cap gap named alongside the
+AgentLoop AssertionError fix (a real feature, not a bug fix); batching
+multiple concurrent inference requests (§3.6f, still a deliberate
+deferral -- real correctness risk); F1's real distributed training
+infrastructure (needs real multi-node compute this environment doesn't
+have); Gemini's Files API for long-video input (no API key here to
+verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this
+environment doesn't have -- likely stays deferred).

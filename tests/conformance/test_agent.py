@@ -242,6 +242,65 @@ async def test_confirmation_gating_deny(run_root):
 
 
 @pytest.mark.asyncio
+async def test_two_destructive_calls_sharing_the_same_id_are_confirmed_independently(run_root):
+    # A real bug found by actually constructing two distinct
+    # ToolCallBlocks that share the same `.id` (a malformed/adversarial
+    # model turn -- nothing validates id uniqueness before this point):
+    # the confirmation-tracking dict used to be keyed by `call.id`
+    # alone, so the second call's confirmation answer silently
+    # overwrote the first's, and BOTH calls read back whichever answer
+    # was decided last -- confirmed live: an explicitly DECLINED
+    # destructive call still executed because a different call sharing
+    # its id happened to get approved. Worse than a crash: it silently
+    # defeats the whole confirm-gate the AWAITING_CONFIRMATION state
+    # exists to enforce.
+    class _DeleteThingB:
+        spec = ToolSpec(
+            name="delete_thing_b",
+            description="pretend to delete a second thing",
+            input_schema={"type": "object", "properties": {}},
+            destructive=True,
+        )
+
+        async def run(self, args, ctx: ToolContext) -> ToolResultBlock:
+            return ToolResultBlock(tool_call_id="", content=[TextBlock(text="deleted b")])
+
+    denied_call = ToolCallBlock(id="dup", name="delete_thing", arguments={})
+    approved_call = ToolCallBlock(id="dup", name="delete_thing_b", arguments={})
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(tool_calls=[denied_call, approved_call]),
+            ScriptedTurn(text="done"),
+        ]
+    )
+
+    async def approve_b_deny_others(call: ToolCallBlock) -> bool:
+        return call.name == "delete_thing_b"
+
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_DestructiveTool(), _DeleteThingB()],
+        confirm=approve_b_deny_others,
+        run_root=run_root,
+    )
+    events = [e async for e in loop.run("delete both")]
+
+    denied_result = next(
+        f.result
+        for f in events
+        if f.type == "tool_finished" and "declined" in f.result.content[0].text
+    )
+    approved_result = next(
+        f.result
+        for f in events
+        if f.type == "tool_finished" and "deleted b" in f.result.content[0].text
+    )
+    assert denied_result.is_error is True
+    assert approved_result.is_error is False
+
+
+@pytest.mark.asyncio
 async def test_non_destructive_tool_never_asks_confirmation(run_root):
     call = ToolCallBlock(id="e", name="echo", arguments={"text": "hi"})
     provider = MockProvider(script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="ok")])

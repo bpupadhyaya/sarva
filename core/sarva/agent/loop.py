@@ -334,18 +334,34 @@ class AgentLoop:
                 for c in calls
                 if self._tools.get(c.name) is not None and self._tools[c.name].spec.destructive
             ]
-            approvals: dict[str, bool] = {}
+            # Keyed by the ToolCallBlock's own Python object identity, not
+            # its `.id` string. A real bug found by actually constructing
+            # two distinct ToolCallBlocks that share the same `.id` (a
+            # malformed/adversarial model turn -- nothing validates id
+            # uniqueness before this point): keying by `call.id` meant
+            # the second confirmation silently overwrote the first
+            # entry, so `run_one`'s `approvals.get(call.id, False)` read
+            # back the SAME (last-decided) answer for both calls --
+            # confirmed live, an explicitly-declined destructive call ran
+            # anyway because a different call sharing its id happened to
+            # be approved. Every `ToolCallBlock` in `calls`/
+            # `destructive_calls` is the same Python object referenced in
+            # both this loop and `run_one` below (list comprehensions
+            # preserve identity), so `id(call)` is a real per-call key
+            # that can never collide the way the model-supplied string
+            # can.
+            approvals: dict[int, bool] = {}
             if destructive_calls:
                 transition(AgentState.AWAITING_CONFIRMATION)
                 yield await emit(StateChangedEvent(state=state))
                 for call in destructive_calls:
                     yield await emit(NeedsConfirmationEvent(call=call))
-                    approvals[call.id] = await self._confirm(call)
+                    approvals[id(call)] = await self._confirm(call)
                 transition(AgentState.RUNNING_TOOLS)
                 yield await emit(StateChangedEvent(state=state))
 
             async def run_one(
-                call: ToolCallBlock, approvals: dict[str, bool] = approvals
+                call: ToolCallBlock, approvals: dict[int, bool] = approvals
             ) -> tuple[ToolResultBlock, float]:
                 tool = self._tools.get(call.name)
                 t0 = time.monotonic()
@@ -355,7 +371,7 @@ class AgentLoop:
                         content=[TextBlock(text=f"unknown tool: {call.name}")],
                         is_error=True,
                     )
-                elif tool.spec.destructive and not approvals.get(call.id, False):
+                elif tool.spec.destructive and not approvals.get(id(call), False):
                     result = ToolResultBlock(
                         tool_call_id=call.id,
                         content=[TextBlock(text="declined by user")],
