@@ -6822,3 +6822,52 @@ name -- research-tool misuse, not a live request path, but genuinely
 unswept. Batching (§3.6f), F1's distributed training infrastructure,
 Gemini's Files API for long video, and desktop code-signing/notarization
 remain deferred for the reasons already logged above.
+
+## AblationResult.get() raised a bare StopIteration on an unknown arm name -- the last real candidate from the GRPO-milestone sweep
+
+The lower-severity candidate from the same sweep that found the GRPO
+NaN-corruption bug, picked up directly to close it out. Confirmed
+live: `AblationResult.get("baslein")` -- a plausible one-character
+typo of a real arm name, the exact kind of mistake a researcher
+calling `is_difference_trustworthy` from a notebook or example script
+would make -- raised a bare `StopIteration` with no message at all,
+not even the name that failed to match, let alone which arms actually
+exist. `next(a for a in self.arms if a.name == name)` had no fallback
+at all. `is_difference_trustworthy` (the method most real callers,
+including this module's own example, actually use) calls `get()`
+twice per comparison, so the same gap reached its own callers too.
+
+Lower severity than every other fix in this journal, named honestly:
+this is a research-tool call, not a live agent/server request path,
+so no production surface was ever at risk -- but it's the same
+"give the caller one clean, documented failure instead of a leaky
+implementation detail" reasoning already applied to `ImageToTextDegrader`'s
+`DecompressionBombError` fix and `VectorMemoryStore`'s
+`MemoryStoreError` fix.
+
+**Fixed with a clean `KeyError`, matching the sibling pattern already
+established in this codebase** (`FoundryProvider._resolve`'s own
+`ModelNotFoundError`, which names both the requested id and every real
+option): `AblationResult.get()` now raises `KeyError(f"no ablation arm
+named {name!r} (have: {available})")` -- the actual typo AND the real
+list of arms that do exist, in one message.
+
+**Verified the new tests are real:** reverted the fix and watched both
+new tests fail with the raw, uncaught `StopIteration` (confirmed via a
+real traceback pointing at the exact `next(...)` call, not just an
+assertion) before re-applying -- same discipline as every fix in this
+journal since the MCP tool-name escaping milestone. All 7 pre-existing
+ablation tests pass unchanged.
+
+2 new tests, 562 -> 564 Python tests. `ruff check`/`format --check`
+clean. `docs/foundry/ablation.md` updated. **This closes out every
+real candidate from the GRPO-milestone Explore-agent sweep.**
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred). No open candidates remain from
+recent sweeps -- worth a fresh one next time.

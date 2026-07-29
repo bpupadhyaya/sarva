@@ -50,6 +50,20 @@ flagged trustworthy; a deliberately marginal change (a purely cosmetic
 head-count difference at the same total dimension) is correctly flagged
 *not* trustworthy.
 
+**A real bug found by actually calling `result.get("baslein")`** — a
+plausible one-character typo of a real arm name, the exact kind of
+mistake a researcher calling `is_difference_trustworthy` from a
+notebook or example script would make: `AblationResult.get()`'s
+`next(a for a in self.arms if a.name == name)` on no match raised a
+bare `StopIteration`, with no message at all — not even the name that
+failed to match, let alone which arms actually exist to compare
+against. `is_difference_trustworthy` calls `get()` twice per
+comparison, so the same gap reached its own callers too. Fixed with a
+clean `KeyError` naming both the requested name and every real arm
+that's actually available, the same "tell the caller what went wrong
+and what their real options were" discipline `FoundryProvider._resolve`'s
+own `ModelNotFoundError` already applies.
+
 ## Two real comparisons, run end to end
 
 `examples/18_ablation_harness.py` runs both kinds of result on purpose,

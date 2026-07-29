@@ -80,7 +80,20 @@ class AblationResult:
         return sorted(self.arms, key=lambda a: a.mean_final_loss)
 
     def get(self, name: str) -> ArmResult:
-        return next(a for a in self.arms if a.name == name)
+        # A real bug found by actually calling `result.get("baslein")`
+        # (a plausible one-character typo of a real arm name, the exact
+        # kind of mistake a researcher calling `is_difference_trustworthy`
+        # from a notebook or example script would make): `next(...)` on
+        # a generator with no match raises a bare `StopIteration`, with
+        # no message at all -- not even the name that failed to match,
+        # let alone what arms actually exist. `is_difference_trustworthy`
+        # calls this twice per comparison, so the same gap reached every
+        # caller of that method too.
+        for arm in self.arms:
+            if arm.name == name:
+                return arm
+        available = ", ".join(sorted(a.name for a in self.arms))
+        raise KeyError(f"no ablation arm named {name!r} (have: {available})")
 
     def is_difference_trustworthy(self, arm_a: str, arm_b: str) -> bool:
         """True iff the two arms' mean final losses differ by more than

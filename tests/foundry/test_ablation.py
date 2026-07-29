@@ -8,6 +8,7 @@ trustworthy -- not just that the code runs without crashing."""
 
 from __future__ import annotations
 
+import pytest
 from sarva_foundry.ablation import AblationArm, AblationResult, ArmResult, run_ablation
 from sarva_foundry.data.dataset import DOCUMENT_SEPARATOR, tokenize_corpus
 from sarva_foundry.model import TransformerConfig
@@ -46,6 +47,39 @@ def test_ablation_result_ranked_orders_by_mean_final_loss_ascending():
     bad = ArmResult(name="bad", final_losses=[9.0], loss_curves=[[]], param_count=1)
     result = AblationResult(arms=[bad, good])
     assert [a.name for a in result.ranked()] == ["good", "bad"]
+
+
+def test_get_raises_a_clear_keyerror_on_an_unknown_arm_name_not_a_bare_stopiteration():
+    # A real bug found by actually calling `result.get("baslein")` (a
+    # plausible one-character typo of a real arm name, the exact kind
+    # of mistake a researcher calling is_difference_trustworthy from a
+    # notebook or example script would make): `next(a for a in
+    # self.arms if a.name == name)` on no match raised a bare
+    # StopIteration with no message at all -- not even the name that
+    # failed to match, let alone what arms actually exist.
+    good = ArmResult(name="baseline", final_losses=[0.1], loss_curves=[[]], param_count=1)
+    bad = ArmResult(name="moe", final_losses=[9.0], loss_curves=[[]], param_count=1)
+    result = AblationResult(arms=[good, bad])
+
+    with pytest.raises(KeyError, match="baslein") as excinfo:
+        result.get("baslein")
+
+    # The available arm names must reach the message too, not just the
+    # one that failed to match.
+    assert "baseline" in str(excinfo.value)
+    assert "moe" in str(excinfo.value)
+
+
+def test_is_difference_trustworthy_raises_the_same_clear_keyerror_on_a_bad_arm_name():
+    # is_difference_trustworthy calls get() twice per comparison, so
+    # the same gap reached this method's own callers too -- pinned
+    # separately since it's the actual public entry point most callers
+    # (including this module's own examples) use, not get() directly.
+    good = ArmResult(name="baseline", final_losses=[0.1], loss_curves=[[]], param_count=1)
+    result = AblationResult(arms=[good])
+
+    with pytest.raises(KeyError, match="baslein"):
+        result.is_difference_trustworthy("baslein", "baseline")
 
 
 def test_identical_configs_produce_bit_identical_losses_given_the_same_seed():
