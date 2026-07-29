@@ -34,6 +34,47 @@ trained (earliest-learned merge wins when multiple pairs in a word are
 mergeable). Decoding is the exact inverse: token ids → symbols →
 concatenate → map back to raw bytes → UTF-8 decode.
 
+## Decoding has to survive more than valid input
+
+Encoding a real string always produces ids that decode perfectly by
+construction. `decode()` has a harder job: it has to handle *any* token
+id sequence a model might actually generate, including ones no
+`encode()` call would ever produce — an undertrained checkpoint, an RL
+rollout sampling adversarially, or a genuinely corrupted checkpoint
+bundle. Two real gaps in that discipline, both found by actually
+constructing the exact input that breaks it, not assumed:
+
+- **An out-of-vocabulary id crashed `decode()` with a raw `KeyError`.**
+  A foundry checkpoint's `config.json` sets `vocab_size`, which sizes
+  the model's own output layer — sampling can legitimately produce
+  *any* id in `[0, vocab_size)` — but nothing cross-checks that value
+  against what `tokenizer.json` actually serializes. A bundle where the
+  two disagree (a corrupted or mismatched checkpoint) made every single
+  generation from that model crash with an unhelpful numeric error,
+  discarding all the valid text already generated in the same turn
+  along with it. Fixed the same way an invalid UTF-8 byte sequence
+  already is: emit the standard replacement character (`�`) for that
+  one id and keep going, rather than raising and aborting the whole
+  generation.
+- **A `special_tokens` id colliding with a real vocabulary id silently
+  misdecoded, with no error at all.** `decode()` checks special tokens
+  first, so a colliding id always produced the special token's text
+  instead of the real character — confirmed live: a real vocabulary id
+  whose correct decoding was `"2"` decoded as `"<|endoftext|>"`
+  instead. A legitimately-trained tokenizer can never produce this
+  (`train()` always assigns special-token ids strictly after every real
+  vocabulary id), so it's only reachable via a hand-edited or corrupted
+  `tokenizer.json` — the same threat model as the gap above. Fixed by
+  rejecting it at `load()` time with a clear error, rather than leaving
+  every future `decode()` call to silently produce wrong text; already
+  safely caught by `FoundryProvider.__init__`'s existing broad
+  exception handling around loading a checkpoint bundle, which records
+  a broken bundle and skips it rather than crashing.
+
+Verified both the same way: reverted each fix and watched its new test
+fail for the exact right reason (the raw `KeyError`; a clean pass where
+a rejection should have fired) before re-applying.
+
 ## Try it
 
 ```bash

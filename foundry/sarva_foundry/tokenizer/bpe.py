@@ -215,8 +215,34 @@ class ByteLevelBPETokenizer:
                     parts.append(_symbols_to_text(buffer))
                     buffer = ""
                 parts.append(id_to_special[token_id])
-            else:
+            elif token_id in id_to_symbol:
                 buffer += id_to_symbol[token_id]
+            else:
+                # A real bug found by actually calling decode() with an
+                # id outside [0, vocab_size) -- `id_to_symbol[token_id]`
+                # raised an uncaught KeyError, propagating all the way up
+                # through FoundryProvider.generate() into AgentLoop's own
+                # except Exception, silently failing the ENTIRE
+                # generation (already-sampled valid text included, since
+                # decode only runs after the full token sequence is
+                # complete) with an unhelpful numeric `detail` like
+                # "310". Reachable whenever a bundle's config.json
+                # vocab_size (which sizes the model's own lm_head, so
+                # sampling can legitimately produce any id in that range)
+                # disagrees with what tokenizer.json actually serializes
+                # -- the same "corrupted/mismatched checkpoint" threat
+                # model this project has repeatedly hardened against
+                # elsewhere. `_symbols_to_text`'s own docstring already
+                # names the underlying discipline this extends: "a
+                # genuinely undertrained or adversarial model can emit
+                # ANY token id sequence... must decode gracefully, not
+                # raise and abort" -- previously true only for ids whose
+                # bytes don't form valid UTF-8, not for ids missing from
+                # the vocabulary entirely.
+                if buffer:
+                    parts.append(_symbols_to_text(buffer))
+                    buffer = ""
+                parts.append("\ufffd")
         if buffer:
             parts.append(_symbols_to_text(buffer))
         return "".join(parts)
@@ -241,4 +267,29 @@ class ByteLevelBPETokenizer:
         for pair in tok.merges:
             tok.vocab[pair[0] + pair[1]] = len(tok.vocab)
         tok.special_tokens = dict(data["special_tokens"])
+        # A real bug found by actually corrupting special_tokens to
+        # collide with a real vocab id (a byte or a learned merge): a
+        # legitimately-trained tokenizer can never produce this --
+        # train() always assigns special-token ids starting after
+        # len(vocab), strictly increasing -- so this is only reachable
+        # via a corrupted or hand-edited tokenizer.json, the same
+        # "corrupted checkpoint" threat model already hardened against
+        # elsewhere in this project. decode() checks id_to_special
+        # before id_to_symbol, so a colliding id silently decoded as
+        # the special token's text instead of the real character --
+        # confirmed live: a real vocab id whose correct decoding was
+        # "2" decoded as "<|endoftext|>" instead, with no error at all.
+        # Rejected here, at load time, rather than left to silently
+        # misdecode every future call -- the same "reject, don't guess"
+        # discipline this project applies to other malformed on-disk
+        # state, and already safely caught by
+        # FoundryProvider.__init__'s existing broad except Exception
+        # around load_checkpoint_bundle(), which records a broken
+        # bundle and skips it rather than crashing.
+        colliding = set(tok.vocab.values()) & set(tok.special_tokens.values())
+        if colliding:
+            raise ValueError(
+                f"tokenizer.json is corrupted: special_tokens id(s) {sorted(colliding)} "
+                "collide with real vocabulary ids"
+            )
         return tok

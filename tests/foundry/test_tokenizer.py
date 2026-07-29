@@ -124,6 +124,70 @@ def test_decode_still_roundtrips_valid_text_around_invalid_bytes():
     assert "�" in result
 
 
+def test_decode_replaces_an_out_of_vocabulary_id_instead_of_raising():
+    # A real bug found by actually calling decode() with an id outside
+    # [0, vocab_size): id_to_symbol[token_id] raised an uncaught
+    # KeyError, propagating all the way up through
+    # FoundryProvider.generate() into AgentLoop's own except Exception,
+    # silently failing the ENTIRE generation (already-sampled valid text
+    # included) with an unhelpful numeric detail. Reachable whenever a
+    # bundle's config.json vocab_size (which sizes the model's own
+    # lm_head, so sampling can legitimately produce any id in that
+    # range) disagrees with what tokenizer.json actually serializes --
+    # the same "corrupted/mismatched checkpoint" threat model already
+    # hardened against elsewhere. Extends the exact "decode gracefully"
+    # discipline the invalid-UTF-8 tests above already establish, just
+    # for an id missing from the vocabulary entirely rather than one
+    # whose bytes don't form valid UTF-8.
+    tok = _trained()
+    out_of_vocab_id = tok.vocab_size + 50
+
+    result = tok.decode([out_of_vocab_id])  # must not raise KeyError
+
+    assert "�" in result
+
+
+def test_decode_still_roundtrips_valid_text_around_an_out_of_vocabulary_id():
+    tok = _trained()
+    valid_prefix = tok.encode("hello ")
+    out_of_vocab_id = tok.vocab_size + 50
+    valid_suffix = tok.encode(" world")
+
+    result = tok.decode(valid_prefix + [out_of_vocab_id] + valid_suffix)
+
+    assert result.startswith("hello ")
+    assert result.endswith(" world")
+    assert "�" in result
+
+
+def test_load_rejects_a_tokenizer_json_where_a_special_token_id_collides_with_vocab(
+    tmp_path,
+):
+    # A real bug found by actually corrupting special_tokens to collide
+    # with a real vocab id: a legitimately-trained tokenizer can never
+    # produce this (train() always assigns special-token ids starting
+    # after len(vocab), strictly increasing), so this needs the same
+    # corrupted/hand-edited tokenizer.json precondition as the
+    # out-of-vocabulary decode bug above. decode() checks id_to_special
+    # before id_to_symbol, so a colliding id used to silently decode as
+    # the special token's text instead of the real character, with no
+    # error at all -- confirmed live: a real vocab id whose correct
+    # decoding was "2" decoded as the special token instead.
+    import json
+
+    tok = _trained(special_tokens=("<|endoftext|>",))
+    path = tmp_path / "tokenizer.json"
+    tok.save(path)
+
+    data = json.loads(path.read_text())
+    real_vocab_id = tok.vocab["t"]  # a real, ordinary byte-alphabet id
+    data["special_tokens"]["<|endoftext|>"] = real_vocab_id
+    path.write_text(json.dumps(data))
+
+    with pytest.raises(ValueError, match="collide"):
+        ByteLevelBPETokenizer.load(path)
+
+
 def test_save_and_load_roundtrip(tmp_path):
     tok = _trained(vocab_size=300, special_tokens=("<|endoftext|>",))
     path = tmp_path / "tokenizer.json"

@@ -8246,3 +8246,82 @@ input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have -- likely stays
 deferred).
+
+## The from-scratch tokenizer's decode() crashed on an out-of-vocabulary id, and silently misdecoded on a special-token/vocab id collision -- two real gaps in "decode gracefully," found by extending a discipline already established for a sibling case
+
+A fresh Explore-agent sweep at twenty-seven rounds deep, pointed at
+genuinely obscure corners after twenty-seven prior rounds: server
+schemas.py's Pydantic field permissiveness (clean), degrader-recursion
+infinite-loop risk (clean, a real depth guard exists), Router.pick's
+fallback-priority logic (clean, no starvation possible), budget.py's
+comparison operators (clean, all `>=` as expected), and a repo-wide
+broad-except-leaks-to-a-caller grep (clean, no new cross-boundary
+leak). One angle -- the from-scratch BPE tokenizer's `decode()` path
+-- produced two real, live-reproduced bugs in the same function.
+
+**Bug 1, confirmed live:** `decode()`'s per-token loop did
+`buffer += id_to_symbol[token_id]` with no fallback if `token_id`
+isn't a key. Nothing cross-validates that a checkpoint bundle's
+`config.json` `vocab_size` (which sizes the model's own output layer,
+so sampling can legitimately produce any id in `[0, vocab_size)`)
+actually matches what `tokenizer.json` serializes. A bundle where the
+two disagree -- the same "corrupted/mismatched checkpoint" threat model
+this journal's prior checkpoint-corruption fixes already target --
+made every single generation from that model raise an uncaught
+`KeyError`, propagating up through `FoundryProvider.generate()` into
+`AgentLoop`'s own `except Exception`, silently failing the *entire*
+generation (already-sampled valid text included, since decoding only
+happens after the full sequence completes) with an unhelpful numeric
+`detail`. `_symbols_to_text`'s own docstring, a few lines above this
+bug, already names the exact discipline this violates: "a genuinely
+undertrained or adversarial model can emit ANY token id sequence...
+must decode gracefully, not raise and abort" -- previously true only
+for ids whose bytes don't form valid UTF-8, never extended to cover an
+id missing from the vocabulary entirely.
+
+**Bug 2, found while verifying bug 1's own threat model, confirmed
+live separately:** `decode()` checks `id_to_special` before
+`id_to_symbol`. If a corrupted `tokenizer.json` has a `special_tokens`
+id that collides with a real vocab id, `decode()` silently emits the
+special-token's text instead of the real character, with no error at
+all -- confirmed live: a real vocabulary id whose correct decoding was
+`"2"` decoded as `"<|endoftext|>"` instead. A legitimately-trained
+tokenizer can never produce this (`train()` always assigns
+special-token ids strictly after every real vocabulary id, in
+increasing order), so it needs the identical corrupted/hand-edited
+`tokenizer.json` precondition as bug 1 -- lower severity (wrong output,
+not a crash), but the same root exposure.
+
+**Fixed both, matching two different established disciplines already
+in this codebase:**
+
+- Bug 1: extend the exact "decode gracefully" pattern
+  `_symbols_to_text` already uses for invalid UTF-8 -- an
+  out-of-vocabulary id now flushes any pending buffer and emits the
+  standard Unicode replacement character (`�`) instead of raising,
+  keeping the rest of the sequence intact.
+- Bug 2: reject it at `load()` time with a clear `ValueError` naming
+  the colliding id(s), the same "reject, don't guess" discipline this
+  project applies to other malformed on-disk state -- and, confirmed by
+  reading the call chain, already safely caught by
+  `FoundryProvider.__init__`'s existing broad `except Exception` around
+  `load_checkpoint_bundle()`, which records a broken bundle and skips
+  it rather than crashing construction. No new exception-handling
+  plumbing was needed at all.
+
+**Verified both the same way:** reverted each fix independently and
+watched its new tests fail for the exact right reason (bug 1: the raw
+`KeyError`; bug 2: `Failed: DID NOT RAISE ValueError`) before
+re-applying. All 12 pre-existing tokenizer tests pass unchanged. 3 new
+tests, 595 -> 598 Python tests. `docs/foundry/tokenizer.md` updated.
+
+**Next:** the Tauri `csp: null` gap (still deferred, needs a GUI/
+Windows machine this environment lacks); the no-retry-cap gap on
+`AgentLoop` (still deferred, a real feature decision); batching
+multiple concurrent inference requests (§3.6f, still a deliberate
+deferral -- real correctness risk); F1's real distributed training
+infrastructure (needs real multi-node compute this environment doesn't
+have); Gemini's Files API for long-video input (no API key here to
+verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this
+environment doesn't have -- likely stays deferred).
