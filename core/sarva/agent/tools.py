@@ -18,7 +18,7 @@ import httpx
 
 from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
 from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
-from sarva.multimodal.fetch import FetchError, ensure_public_host
+from sarva.multimodal.fetch import FetchError, ensure_public_host, ssrf_safe_transport
 from sarva.providers.base import ToolSpec
 
 _MAX_FETCH_CHARS = 50_000
@@ -201,7 +201,26 @@ class WebFetchTool:
             # URL can be a legitimate public site whose server issues a
             # redirect straight to an internal address, which a
             # validate-once-up-front check would never catch.
-            async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as client:
+            #
+            # A real bug found by actually running ensure_public_host
+            # against a fake DNS resolver: the check alone is
+            # TOCTOU-vulnerable to DNS rebinding -- it resolves once
+            # here, then httpx's own default connection logic
+            # independently re-resolves the SAME hostname a moment
+            # later, so a resolver answering the first query publicly
+            # and every later one with a private address slips straight
+            # through, landing the real connection on an internal
+            # server anyway. transport=ssrf_safe_transport() is the
+            # actual enforcement layer that closes this -- it resolves
+            # and validates a hostname exactly once per real TCP
+            # connection, so the validated answer and the connected-to
+            # address can never diverge. Especially important here: this
+            # tool is destructive=False, reachable with zero user
+            # confirmation, the exact metadata-exfiltration threat model
+            # WebFetchTool's own original SSRF fix targeted.
+            async with httpx.AsyncClient(
+                follow_redirects=False, timeout=15.0, transport=ssrf_safe_transport()
+            ) as client:
                 for _ in range(_MAX_REDIRECTS + 1):
                     await ensure_public_host(url)
                     resp = await client.get(url)

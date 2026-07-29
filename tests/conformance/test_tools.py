@@ -157,6 +157,64 @@ async def test_ensure_public_host_rejects_a_redirect_to_an_internal_address(ctx,
     assert "non-public address" in result.content[0].text
 
 
+@pytest.mark.asyncio
+async def test_web_fetch_is_not_bypassable_via_dns_rebinding(ctx, monkeypatch):
+    # A real bug found by actually running ensure_public_host against a
+    # fake DNS resolver, not a hypothetical: the guard alone is
+    # TOCTUO-vulnerable to DNS rebinding. It resolves a hostname once to
+    # check it's public, then discards that answer -- the real
+    # connection made a moment later re-resolves the SAME hostname
+    # independently. Simulated here with a real local HTTP server (a
+    # stand-in for something an SSRF guard must never let a request
+    # reach) and a fake resolver that answers the FIRST getaddrinfo call
+    # (ensure_public_host's own check) with a real public IP and every
+    # SUBSEQUENT call (httpx's own internal connection-time resolution)
+    # with 127.0.0.1 -- confirmed live before this fix: the check passed
+    # and the real request still landed on the local server, leaking its
+    # response with zero user confirmation (WebFetchTool is
+    # destructive=False). No redirect involved at all.
+    import http.server
+    import socket
+    import threading
+
+    class _InternalHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"internal secret")
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _InternalHandler)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        call_count = {"n": 0}
+
+        async def rebinding_getaddrinfo(host, port_arg, *a, **kw):
+            call_count["n"] += 1
+            # First call (ensure_public_host's own check) resolves
+            # publicly; every later call (the real connection) resolves
+            # to the internal server instead.
+            target_ip = "93.184.216.34" if call_count["n"] == 1 else "127.0.0.1"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (target_ip, port_arg or 0))]
+
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", rebinding_getaddrinfo)
+
+        tool = WebFetchTool()
+        result = await tool.run({"url": f"http://rebind.test:{port}/"}, ctx)
+
+        assert b"internal secret" not in result.content[0].text.encode()
+        # Either a clean SSRF rejection or a connection failure to the
+        # (now-unreachable, since the pinned IP resolution itself
+        # blocks) target is acceptable -- what must never happen is the
+        # internal server's real response reaching the model.
+    finally:
+        server.shutdown()
+
+
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_web_fetch_live(ctx):

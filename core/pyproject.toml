@@ -17,6 +17,12 @@ dependencies = [
     "pyyaml>=6.0",
     "anthropic>=0.68",
     "httpx>=0.27",
+    # httpx's own transitive dependency -- declared explicitly now that
+    # sarva.multimodal.fetch imports it directly (a custom network
+    # backend closing a DNS-rebinding SSRF gap httpx alone can't), not
+    # left to resolve implicitly through httpx's own requirement, which
+    # could drift or break under a different resolver.
+    "httpcore>=1.0",
     "typer>=0.15",
     "rich>=13.9",
     "fastapi>=0.115",

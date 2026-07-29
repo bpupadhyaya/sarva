@@ -205,6 +205,53 @@ still work exactly as before.
 codebase, and it shares the identical function so the SSRF guard can
 never drift out of sync between the two.
 
+### The SSRF guard above was itself TOCTOU-vulnerable to DNS rebinding — a real bypass, no redirect needed
+
+**`ensure_public_host` alone was never actually the security boundary
+it looked like.** It resolves a URL's hostname once, checks every
+returned address is public, then discards that answer — but the real
+`httpx` connection made a moment later re-resolves the *same* hostname
+completely independently, by default. A DNS server an attacker
+controls can answer the check's query with a genuine public address
+and every later query with `127.0.0.1` (or any internal address): the
+check passes, and the real request lands somewhere else entirely — the
+classic DNS-rebinding bypass, and it needs no cooperating redirect at
+all, unlike the gap the per-hop revalidation above already closes.
+
+**Confirmed live, not reasoned about in the abstract:** a real local
+HTTP server standing in for an internal target, and a fake resolver
+answering the first `getaddrinfo` call publicly and every later one
+with `127.0.0.1` — `web_fetch`'s own SSRF check passed, and the real
+request still reached the local server and returned its response, with
+zero user confirmation (`WebFetchTool` is `destructive=False`). The
+identical gap exists in `resolve_media_bytes`'s own `fetch_bytes` path.
+
+**Fixed by moving the actual enforcement down to where httpx opens a
+real socket, not where a caller happens to think to check first:** a
+custom `httpcore` network backend (`_PinnedResolutionBackend`,
+`sarva.multimodal.fetch`) resolves and validates a hostname exactly
+once *per real TCP connection*, then hands the underlying connector the
+literal validated IP address instead of the hostname — so the DNS
+answer that was checked and the address that gets connected to are
+always, structurally, the same lookup, never two separate ones an
+attacker's resolver can answer differently. `ensure_public_host` stays
+in place too, as a fast, clearly-worded early rejection for the
+ordinary (non-adversarial) case and every redirect hop — but it's no
+longer the thing actually standing between a request and an internal
+service; `ssrf_safe_transport()`'s pinned-resolution backend is. TLS
+SNI and certificate-hostname verification are completely untouched by
+this change, since only the raw socket target changes — the request
+URL itself, and therefore what the TLS layer verifies against, is
+unmodified.
+
+Verified the new test is real: reverted the fix and watched it fail
+with the internal server's own response body (`b"internal secret"`)
+showing up in the tool's result — exactly the leak this closes — before
+re-applying. `httpcore` (already an `httpx` transitive dependency)
+became an explicit `core` dependency, since production code now imports
+it directly rather than relying on it resolving implicitly through
+`httpx`'s own requirement.
+
 ## Budgets: exceeding one is a clean stop, not an exception
 
 ```python

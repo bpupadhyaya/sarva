@@ -8000,3 +8000,93 @@ Gemini's Files API for long-video input (no API key here to verify
 live); a first pass at code-signing/notarization for the desktop
 release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## The SSRF guard itself was TOCTOU-vulnerable to DNS rebinding -- a second severe security finding in the same milestone series as the CSWSH fix, no redirect needed at all
+
+A fresh Explore-agent sweep at twenty-five rounds deep, pointed at
+genuinely fresh security-relevant angles after the CSWSH fix: the REST
+endpoints' own CORS exposure (clean -- POST /config's JSON content type
+forces a CORS preflight with no CORSMiddleware configured, so a
+cross-site browser can't deliver it, unlike the pre-fix WS case),
+POST /config value validation (a garbage API key reaches the real SDK
+clients unvalidated, but both already-audited adapters' exception
+handling catches the resulting connection error), mcp_client's
+connect_http_mcp_server URL (not a trust-boundary crossing -- the URL
+is user-typed via --mcp-server, not model- or webpage-controlled),
+symlink escapes in _within_workdir (clean, Path.resolve() already
+handles it), IPv4-mapped IPv6 SSRF bypass addresses like
+::ffff:127.0.0.1 (clean, ipaddress.is_global already rejects them). One
+angle produced a second severe, live-reproducible finding in the same
+series as the CSWSH fix a few milestones back.
+
+**The mechanism:** `ensure_public_host` (the SSRF guard both
+`WebFetchTool` and `resolve_media_bytes`'s `fetch_bytes` share) resolves
+a URL's hostname once, validates every returned address is public, then
+discards that answer -- the real `httpx` connection made a moment later
+re-resolves the SAME hostname completely independently, by default. A
+DNS server under attacker control can answer the check's query with a
+genuine public address and every later query with an internal one: the
+check passes cleanly, and the real request lands somewhere else
+entirely. This needs no cooperating redirect at all -- a fundamentally
+different, and in some ways simpler, bypass than the gap the existing
+per-redirect-hop revalidation already closes.
+
+**Confirmed live, not reasoned about in the abstract:** a real local
+`http.server` standing in for an internal target the guard exists to
+protect, and a fake resolver answering the first `getaddrinfo` call
+(the check itself) with a real public IP and every subsequent call
+(httpx's own internal connection-time resolution) with `127.0.0.1` --
+`WebFetchTool`'s SSRF check passed cleanly, and the real request still
+reached the local server and returned its response, with zero user
+confirmation (`WebFetchTool` is `destructive=False`, directly reachable
+from model-driven tool calls -- the exact metadata-exfiltration threat
+model the original SSRF fix targeted). Reverting the fix and re-running
+the same reproduction against `fetch_bytes` confirmed the identical
+gap there too.
+
+**Fixed by moving the actual enforcement down to the one place a real
+TCP socket gets opened, instead of trusting a separate, earlier check
+whose answer the real connection logic could silently diverge from:** a
+custom `httpcore.AnyIOBackend` subclass (`_PinnedResolutionBackend`,
+`sarva.multimodal.fetch`) resolves and validates a hostname exactly
+once *per real TCP connection attempt*, inside `connect_tcp` itself,
+then hands the underlying connector the literal validated IP address
+instead of the hostname -- so the DNS answer that got checked and the
+address actually connected to are always, structurally, the exact same
+lookup, never two separate ones a DNS-rebinding attacker's resolver can
+answer differently. `httpx.AsyncHTTPTransport` has no constructor
+parameter for a custom network backend, but the `httpcore` connection
+pool it wraps internally does, swapped in via `ssrf_safe_transport()`
+-- the standard, documented pattern real-world DNS-rebinding-hardened
+`httpx` clients use. TLS SNI and certificate-hostname verification are
+completely untouched by this change: only the raw socket target
+changes; the request URL itself (and therefore what the TLS layer
+verifies the presented certificate against) is unmodified.
+`ensure_public_host` stays in place too, now honestly reframed as a
+fast, early, clearly-worded rejection for the ordinary case and every
+redirect hop -- not the actual enforced boundary, which is now the
+pinned-resolution transport both `WebFetchTool` and `fetch_bytes` were
+updated to use.
+
+**Verified the new test is real:** reverted the fix and watched it fail
+with the internal server's own real response body (`b"internal
+secret"`) showing up in the tool's result -- exactly the leak this
+closes -- before re-applying. All 29 pre-existing fetch/tools tests
+pass unchanged. 1 new test, 590 -> 591 Python tests. `httpcore`
+(already an `httpx` transitive dependency) was added as an explicit
+`core` dependency, since production code now imports it directly
+rather than relying on it resolving implicitly through `httpx`'s own
+requirement; `uv.lock` regenerated accordingly. `docs/agent-loop.md`
+updated.
+
+**Next:** the Tauri `csp: null` gap (real, but a bigger, riskier change
+to make blind without a GUI/Windows machine to verify against); the
+config.json concurrent-process-write race; the no-retry-cap gap on
+`AgentLoop`; batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral -- real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have -- likely stays
+deferred).
