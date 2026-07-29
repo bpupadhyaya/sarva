@@ -202,9 +202,39 @@ still got a raw PIL exception instead of the documented
 - A provider crash (any exception escaping `provider.generate()`, not
   just a well-formed `StreamErrorEvent`) is caught at the loop level
   and turned into `FAILED` — it never propagates up into a skin.
-- A `StreamErrorEvent` marked `retryable` gets exactly one retry after
-  a fixed backoff before the loop gives up; a non-retryable one is an
-  immediate `FAILED`.
+- A `StreamErrorEvent` marked `retryable` gets a fixed 1-second backoff
+  and retries — repeatedly, for as long as the provider keeps returning
+  `retryable=True`, not capped at one attempt as an earlier version of
+  this chapter claimed; a non-retryable one is an immediate `FAILED`.
+  **No maximum retry count exists** — a provider that never stops
+  returning a retryable error would retry forever rather than
+  eventually giving up as `FAILED`. Real, named, not yet built, the same
+  "don't imply more coverage than actually exists" discipline this
+  chapter already applies elsewhere.
+
+**A real bug found by actually running a retryable stream error, not
+just reading the retry code:** the retry path above loops back to the
+top of the loop's own `while True:` without the state machine ever
+leaving `CALLING_MODEL` — and then immediately re-asserts the exact
+same transition, `CALLING_MODEL -> CALLING_MODEL`, which `LEGAL`
+(`sarva.agent.events`) didn't allow. The very first retryable error on
+a real run raised an uncaught `AssertionError: illegal transition
+calling_model -> calling_model`, confirmed live with a scripted
+`MockProvider` — not a hypothetical: every real adapter sets
+`retryable=True` for exactly the cases this mechanism exists to handle
+(`RateLimitError`, any 5xx `APIStatusError`), so a single transient rate
+limit or server error crashed the entire run instead of being retried,
+completely defeating the retry mechanism for every real provider.
+Nothing above `AgentLoop.run()` catches a bare `AssertionError` either
+— it reached a CLI user as a raw Python traceback, and a `/ws/chat`
+client as the same bare `ClosedResourceError` this file's three prior
+raw-JSON fixes exist to prevent, just via a trigger none of them cover.
+Fixed by adding `CALLING_MODEL` to its own legal-transition set: a
+retry genuinely is a legitimate self-transition here, unlike every
+other state in that table, which never legitimately re-enters itself.
+**Verified the new test is real:** reverted the fix and watched it fail
+with the exact same `AssertionError` before re-applying. All 26
+pre-existing agent-loop tests pass unchanged.
 - `MAX_TOKENS` and `REFUSAL` stop reasons are both `FAILED`, with the
   specific reason recorded in the terminal event's `detail` field —
   distinguishable after the fact, not collapsed into one generic

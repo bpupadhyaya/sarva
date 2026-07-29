@@ -373,6 +373,35 @@ async def test_transcript_out_populated_even_on_failure(run_root):
 
 
 @pytest.mark.asyncio
+async def test_a_retryable_stream_error_actually_retries_instead_of_crashing(run_root):
+    # A real bug found by actually running a retryable stream error (the
+    # exact case every real adapter's RateLimitError/5xx APIStatusError
+    # sets retryable=True for): the retry path loops back to the top of
+    # the while-loop without ever leaving CALLING_MODEL, then immediately
+    # re-asserts CALLING_MODEL -> CALLING_MODEL -- an AssertionError on
+    # the very first retry, confirmed live before this fix, defeating the
+    # whole retry mechanism for every real provider. Nothing catches
+    # AssertionError anywhere above this loop (cli.py, server/app.py), so
+    # this reached a user as a raw traceback or a bare disconnect.
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(error="rate limited", error_retryable=True),
+            ScriptedTurn(text="ok now"),
+        ]
+    )
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+
+    events = [e async for e in loop.run("hello")]
+
+    assert events[-1].state == AgentState.DONE
+    # Two real model calls actually happened (the retry, then the real
+    # success) -- not just that the run didn't crash.
+    stream_events = [e for e in events if e.type == "model_stream"]
+    assert any(getattr(e.event, "code", None) == "mock_error" for e in stream_events)
+    assert events[-1].spend.model_calls == 1  # the retry itself isn't counted as a new call
+
+
+@pytest.mark.asyncio
 async def test_transcript_out_defaults_to_none_and_is_optional(run_root):
     """Purely additive: every existing call site that doesn't pass
     transcript_out must be completely unaffected."""

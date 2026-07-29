@@ -39,6 +39,17 @@ TERMINAL = {
 LEGAL: dict[AgentState, set[AgentState]] = {
     AgentState.INIT: {AgentState.CALLING_MODEL},
     AgentState.CALLING_MODEL: {
+        # A real bug found by actually running a retryable stream error
+        # (the exact case every real adapter's RateLimitError/5xx
+        # APIStatusError sets retryable=True for): AgentLoop.run()'s
+        # retry path loops back to the top of its while-loop without
+        # ever leaving CALLING_MODEL, then immediately re-asserts
+        # CALLING_MODEL -> CALLING_MODEL, which this set didn't allow --
+        # an AssertionError on the very first retry, defeating the whole
+        # retry mechanism for every real provider. A retry genuinely is
+        # a legitimate self-transition here, unlike every other state in
+        # this table, which never legitimately re-enters itself.
+        AgentState.CALLING_MODEL,
         AgentState.RUNNING_TOOLS,
         AgentState.DONE,
         AgentState.FAILED,

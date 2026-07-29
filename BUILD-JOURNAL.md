@@ -7270,3 +7270,92 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## AgentLoop.run() crashed with an uncaught AssertionError on the very first retryable provider error -- defeating the retry mechanism for every real adapter, the most severe finding since the GRPO NaN bug
+
+A fresh Explore-agent sweep at twenty-one rounds deep, pointed at
+genuinely fresh angles (agent/loop.py read top to bottom rather than
+just its already-covered degradation fallback; multimodal/fetch.py;
+foundry SFT/DPO batch-building; provider adapter translation logic
+beyond exception handling; vector memory's search logic; a repo-wide
+unchecked-list-indexing grep). The top-ranked finding is the most
+severe correctness bug found since the GRPO NaN-corruption milestone --
+not a crash on some rare edge case, but on the *ordinary, expected*
+path every real provider adapter is specifically designed to trigger.
+
+**The bug, confirmed live before any fix:** a scripted `MockProvider`
+returning one retryable `StreamErrorEvent` followed by a normal
+successful turn crashed with `AssertionError: illegal transition
+calling_model -> calling_model` on the very first retry -- not after
+repeated retries, the first one. `AgentLoop.run()`'s retry path
+(`core/sarva/agent/loop.py`) handles a retryable stream error by
+decrementing `spend.model_calls`, sleeping 1 second, and breaking out
+of the inner event loop, then falls through to `if done is None:
+continue` -- looping back to the top of the outer `while True:`
+*without the state machine ever having left `CALLING_MODEL`*. The very
+next line unconditionally calls `transition(AgentState.CALLING_MODEL)`
+again, and `LEGAL[AgentState.CALLING_MODEL]`
+(`core/sarva/agent/events.py`) never included `CALLING_MODEL` itself --
+only the states a *successful* model call can lead to. The `assert`
+inside `transition()` fired every time.
+
+**Why this is worse than almost every other fix in this journal:**
+every real provider adapter (Anthropic, OpenAI, Google) sets
+`retryable=True` for exactly the cases this mechanism exists to handle
+-- a `RateLimitError`, or any 5xx `APIStatusError` -- meaning any single
+transient rate limit or server hiccup during ordinary real usage
+crashed the entire run instead of being retried. This isn't a rare
+malformed-input edge case; it's the retry mechanism's own primary,
+designed-for trigger, and it had apparently never actually fired in
+this project's own test suite before now (every existing scripted
+`MockProvider` test either never scripted a retryable error, or none
+happened to chain a successful turn after one in a way that exercised
+this exact path). Nothing above this loop catches a bare
+`AssertionError` either: `cli.py`'s `_chat`/`_run` have no try/except
+around the `async for event in loop.run(...)` iteration, so it reached
+a CLI user as a raw Python traceback; `server/app.py`'s `/chat`/
+`/ws/chat` handlers only wrap payload parsing and `ConfigError`, so a
+WS client saw the same bare `ClosedResourceError` this file's three
+prior raw-JSON fixes exist to prevent -- just via a trigger none of
+those fixes could have caught, since they all guard *input* validation,
+not a state-machine bug inside the loop's own retry path.
+
+**Fixed with the smallest possible change:** added `CALLING_MODEL` to
+its own legal-transition set in `LEGAL`. A retry genuinely is a
+legitimate self-transition here -- unlike every other state in that
+table, which never legitimately re-enters itself -- so this isn't
+loosening the state machine's real invariants, just naming one that was
+missing.
+
+**A second, related, lower-severity gap found and named while fixing
+this:** `docs/agent-loop.md`'s own existing prose claimed a retryable
+error "gets exactly one retry... before the loop gives up" -- reading
+the actual retry path shows no retry counter exists anywhere at all; a
+provider that kept returning `retryable=True` forever would retry
+forever, never reaching a terminal `FAILED` state. Not fixed here (a
+real retry-cap feature, not a one-line correctness fix, and out of
+scope for the crash this milestone targets) -- named honestly in the
+docs instead of left as a silent inaccuracy, the same "don't imply more
+coverage than actually exists" discipline this chapter already applies
+to the subagent-fan-out gap.
+
+**Verified the new test is real:** reverted the fix and watched it fail
+with the exact same `AssertionError: illegal transition calling_model
+-> calling_model` before re-applying. All 26 pre-existing agent-loop
+tests pass unchanged. 1 new test, 573 -> 574 Python tests.
+`docs/agent-loop.md` updated.
+
+**Next:** the no-retry-cap gap named above (a real feature, not a bug
+fix); `ToolResultBlock` non-text content (e.g. an `ImageBlock`) being
+silently dropped by all three provider adapters' translation logic
+(latent today -- no built-in tool returns an image result yet, but will
+silently corrupt output the moment one does); `build_sft_batch`/
+`build_dpo_batch` crashing with an unhelpful raw `ValueError` on an
+empty example list (low severity, library-only, no CLI wires it to
+external input yet); batching multiple concurrent inference requests
+(§3.6f, still a deliberate deferral -- real correctness risk); F1's
+real distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video input
+(no API key here to verify live); a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have -- likely stays deferred).
