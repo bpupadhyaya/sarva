@@ -260,6 +260,40 @@ modes now get the identical clean treatment: a real
 tests are real: reverted the fix and watched both fail with the raw
 `binascii.Error` before re-applying.
 
+**Three more ways to crash `/ws/chat` before it even reached the code
+that validates `session`/`image_base64`, found by a fresh sweep of the
+raw-JSON parsing `/ws/chat` alone does.** `/chat` never sees these,
+because Pydantic validates `ChatRequest`'s field types before the
+handler runs at all — `/ws/chat` parses a schema-less raw frame, so
+nothing validated any of this until now. All three confirmed live with
+a real `TestClient` WebSocket session before fixing, all three crashed
+the whole ASGI call with the client seeing a bare `ClosedResourceError`
+(the same failure mode already fixed for an invalid session name and a
+malformed `image_base64`), and all three are now reported as the same
+clean `state_changed` + `run_done` frame pair: **(1)** a non-JSON first
+frame — Starlette's `receive_json()` does a bare `json.loads()` with no
+error handling of its own, so a malformed frame raised an uncaught
+`json.JSONDecodeError`. **(2)** valid JSON that isn't an object (a bare
+list or string) — every `payload.get(...)` call downstream assumes a
+dict, so this raised an uncaught `AttributeError`. **(3)** a non-string
+`session` or `model` field (e.g. `{"session": 123}`, `{"model": ["a",
+"b"]}`) — `SessionStore._sanitize()`'s regex match and
+`AgentLoop.run()`'s `router.pick(override=model_override)` (a dict
+lookup, several frames deep in the async generator) both raise a plain
+`TypeError`, a sibling the existing `except ValueError` blocks never
+covered. Fixed by wrapping the initial `receive_json()` call and
+validating the payload shape before any field is read, explicitly
+type-checking `model`, and widening the existing session/image_base64
+`except ValueError` to `except (ValueError, TypeError)` — plus a small
+shared `_send_failure()` helper (the four failure paths in this handler
+had grown identical enough to be worth naming once). **Verified the new
+tests are real:** reverted the fix and watched all four fail — three
+with the raw, uncaught exception each case names above, and the fourth
+(`model`) with the real `TypeError: unhashable type: 'list'` raised
+several frames deep inside `AgentLoop.run()` itself — before
+re-applying. All 29 pre-existing server tests pass unchanged. 4 new
+tests, 566 → 570 Python tests.
+
 **Both endpoints also gained an optional `model` field**, the REST/WS
 counterpart to the CLI's own `--model` (see the agent-loop/providers
 chapters for the `UnknownModelError` safety fix that motivated

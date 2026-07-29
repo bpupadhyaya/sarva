@@ -5,6 +5,7 @@ running server process."""
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -428,6 +429,95 @@ def test_websocket_with_malformed_image_base64_fails_cleanly_not_a_bare_disconne
             if data["type"] == "run_done":
                 break
 
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_a_malformed_non_json_frame_fails_cleanly_not_a_bare_disconnect(monkeypatch):
+    # A real bug found by actually sending a non-JSON first frame:
+    # Starlette's receive_json() does a bare json.loads() with no error
+    # handling of its own -- a malformed frame raised an uncaught
+    # json.JSONDecodeError here, crashing the whole ASGI call with no
+    # frame ever sent at all, confirmed directly with a real WebSocket
+    # session before this fix (a bare ClosedResourceError on the next
+    # receive, worse than even a REST 500).
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_text("not valid json{{{")
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert "malformed request" in state_changed["detail"]
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_a_non_object_json_frame_fails_cleanly_not_a_bare_disconnect(monkeypatch):
+    # A sibling of the malformed-JSON case: this frame IS valid JSON, but
+    # not an object (a bare list) -- payload.get(...) would otherwise
+    # raise an uncaught AttributeError, confirmed directly before this
+    # fix.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_text(json.dumps([1, 2, 3]))
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert "expected a JSON object" in state_changed["detail"]
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_a_non_string_session_fails_cleanly_not_a_bare_disconnect(monkeypatch):
+    # A real bug found by actually sending {"session": 123}:
+    # SessionStore._sanitize()'s regex match raises a plain TypeError
+    # (not ValueError) on a non-string session, which the existing
+    # invalid-session-name handling didn't catch -- confirmed directly
+    # before this fix.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "session": 123})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_a_non_string_model_fails_cleanly_not_a_bare_disconnect(monkeypatch):
+    # A real bug found by actually sending {"model": ["a", "b"]}:
+    # AgentLoop.run()'s router.pick(override=model) call, several frames
+    # deep in the async generator, does a dict lookup keyed on this
+    # value -- a non-string JSON type raised an uncaught TypeError
+    # ("unhashable type: 'list'") well after streaming had already
+    # started, confirmed directly before this fix. /chat never sees this
+    # because Pydantic validates ChatRequest.model's type first.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "model": ["a", "b"]})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert "model must be a string" in state_changed["detail"]
     assert events[-1]["state"] == "failed"
 
 

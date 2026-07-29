@@ -232,9 +232,53 @@ def create_app() -> FastAPI:
         for it — there's nothing waiting to consume one, and doing so risks
         a stray reply being read as the answer to a later, real prompt.
         """
+
+        async def _send_failure(detail: str) -> None:
+            # Shared by every clean-failure path below (a malformed
+            # frame, an invalid session name, a non-string field, a
+            # corrupted config) -- the exact same state_changed + run_done
+            # pair an unknown --model already produces, so App.tsx's
+            # existing failure-detail handling shows it with no
+            # client-side changes needed.
+            await websocket.send_text(
+                StateChangedEvent(state=AgentState.FAILED, detail=detail).model_dump_json()
+            )
+            await websocket.send_text(
+                RunDoneEvent(
+                    state=AgentState.FAILED, final_message=None, spend=Spend()
+                ).model_dump_json()
+            )
+
         await websocket.accept()
         try:
-            payload = await websocket.receive_json()
+            try:
+                payload = await websocket.receive_json()
+                if not isinstance(payload, dict):
+                    # Valid JSON, but not an object -- e.g. a bare list or
+                    # string -- makes every payload.get(...) call below
+                    # raise AttributeError. Folded into the same ValueError
+                    # handling as a malformed-JSON frame rather than left
+                    # to surface as a different, uncaught exception type.
+                    raise TypeError(f"expected a JSON object, got {type(payload).__name__}")
+            except ValueError as e:
+                # A real bug found by actually sending a non-JSON first
+                # frame: Starlette's receive_json() does a bare
+                # json.loads() with no error handling of its own --
+                # confirmed directly with a real TestClient WebSocket
+                # session, a malformed frame raised an uncaught
+                # json.JSONDecodeError (a ValueError subclass) here,
+                # crashing the whole ASGI call with no frame ever sent at
+                # all -- the client just saw a bare ClosedResourceError,
+                # the identical "the client gets nothing explaining why"
+                # failure mode already fixed below for an invalid session
+                # name, a malformed image_base64, and a corrupted
+                # config.json.
+                await _send_failure(f"malformed request: {e}")
+                return
+            except TypeError as e:
+                await _send_failure(str(e))
+                return
+
             message = payload.get("message", "")
             session = payload.get("session")
             auto = bool(payload.get("auto", False))
@@ -246,6 +290,19 @@ def create_app() -> FastAPI:
 
             store = SessionStore()
             try:
+                if model is not None and not isinstance(model, str):
+                    # A real bug found by actually sending {"model":
+                    # ["a", "b"]}: AgentLoop.run()'s
+                    # router.pick(override=model) call, several frames
+                    # deep in the async generator below, does a dict
+                    # lookup keyed on this value -- a non-string JSON
+                    # type raised an uncaught TypeError ("unhashable
+                    # type: 'list'") well after streaming had already
+                    # started. /chat never sees this because Pydantic
+                    # validates ChatRequest.model's type before the
+                    # handler runs; /ws/chat parses raw, schema-less
+                    # JSON, so nothing validated this until now.
+                    raise TypeError(f"model must be a string, got {type(model).__name__}")
                 history = store.load(session) if session else []
                 # The WS counterpart to the same real bug just fixed for
                 # /chat: a malformed "image_base64" made
@@ -256,11 +313,15 @@ def create_app() -> FastAPI:
                 # a real TestClient WebSocket session before this fix.
                 # Sharing this try block gives it the identical clean
                 # failure treatment the invalid-session-name case below
-                # already has.
+                # already has. Also catches TypeError now: session=123 or
+                # image_base64=["a"] raise TypeError from _sanitize()'s
+                # regex match / base64.b64decode() respectively, the same
+                # "non-string JSON field" shape as the model check above,
+                # confirmed live before this fix.
                 extra_content = _extra_content_blocks(
                     payload.get("image_base64"), payload.get("image_media_type")
                 )
-            except ValueError as e:
+            except (ValueError, TypeError) as e:
                 # SessionStore._sanitize() raises a plain ValueError for
                 # an invalid session name, and reaching this point
                 # uncaught didn't even give the client the REST
@@ -273,14 +334,7 @@ def create_app() -> FastAPI:
                 # --model already produces -- so App.tsx's existing
                 # failure-detail handling (see BUILD-JOURNAL.md) shows it
                 # with no client-side changes needed.
-                await websocket.send_text(
-                    StateChangedEvent(state=AgentState.FAILED, detail=str(e)).model_dump_json()
-                )
-                await websocket.send_text(
-                    RunDoneEvent(
-                        state=AgentState.FAILED, final_message=None, spend=Spend()
-                    ).model_dump_json()
-                )
+                await _send_failure(str(e))
                 return
 
             try:
@@ -299,14 +353,7 @@ def create_app() -> FastAPI:
                 # the client seeing a bare ClosedResourceError, the exact
                 # same failure mode already fixed here for an invalid
                 # session name and a malformed image_base64 field.
-                await websocket.send_text(
-                    StateChangedEvent(state=AgentState.FAILED, detail=str(e)).model_dump_json()
-                )
-                await websocket.send_text(
-                    RunDoneEvent(
-                        state=AgentState.FAILED, final_message=None, spend=Spend()
-                    ).model_dump_json()
-                )
+                await _send_failure(str(e))
                 return
             state = AgentState.FAILED
             transcript: list[Message] = []

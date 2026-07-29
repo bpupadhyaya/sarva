@@ -7005,3 +7005,77 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## /ws/chat crashed with a bare ClosedResourceError on four different raw-JSON shapes the existing session/image_base64 validation never covered
+
+A fresh Explore-agent sweep, pointed at genuinely fresh angles this
+time: foundry RL task fixtures, eval harness aggregation, `session.py`
+traversal safety, the Tauri Rust side's `.unwrap()`/`.expect()` calls,
+and a repo-wide bare-`except:` grep -- all came back clean. The one
+real finding was in `core/sarva/server/app.py`'s `/ws/chat` handler, a
+file repeatedly hardened already (invalid session name, malformed
+`image_base64`, corrupted `config.json`) but only ever against
+`ValueError`-raising cases. `/chat` never has this problem because
+Pydantic validates `ChatRequest`'s field types before the handler runs;
+`/ws/chat` parses a raw, schema-less JSON frame, so nothing validated
+any of this.
+
+**Four distinct crashes, each confirmed live with a real `TestClient`
+WebSocket session before fixing:**
+
+1. **A non-JSON first frame.** Starlette's `receive_json()` is a bare
+   `json.loads()` with no error handling -- a malformed frame raised an
+   uncaught `json.JSONDecodeError`.
+2. **Valid JSON that isn't an object** (a bare list or string) -- every
+   `payload.get(...)` call downstream assumes a dict, raising an
+   uncaught `AttributeError`.
+3. **A non-string `session`** (e.g. `{"session": 123}`) --
+   `SessionStore._sanitize()`'s regex match raises a plain `TypeError`,
+   not the `ValueError` the existing except clause was written for.
+4. **A non-string `model`** (e.g. `{"model": ["a", "b"]}`) -- the
+   deepest and most interesting one: this doesn't fail where `session`/
+   `image_base64` do at all. It sails through payload parsing and only
+   blows up several frames later, inside `AgentLoop.run()`'s own
+   `router.pick(override=model_override)` call, which does a plain dict
+   lookup (`self._models[model_id]`) keyed on whatever was sent --
+   `TypeError: unhashable type: 'list'`, raised well after streaming
+   had already started and completely outside the try block that
+   guards `session`/`image_base64`.
+
+All four crashed the whole ASGI call with no frame ever sent -- the
+client just saw a bare `ClosedResourceError`, the same "the client gets
+nothing explaining why" failure mode already fixed here three times
+before.
+
+**Fixed with the same clean-failure shape every prior fix in this
+handler already uses** (a `state_changed(failed)` + `run_done(failed)`
+frame pair), applied three ways: wrapped the initial `receive_json()`
+call and validated the payload is actually a dict before any field is
+read; added an explicit `isinstance(model, str)` check before `model`
+ever reaches the router (catching case 4 at the door rather than
+threading a check into `router.pick` itself, which has other, trusted
+callers); and widened the existing `except ValueError` around
+`session`/`image_base64` to `except (ValueError, TypeError)`. The four
+failure paths in this handler had grown identical enough (two
+`send_text` calls each) to be worth naming once -- factored into a
+small `_send_failure()` closure, also adopted by the pre-existing
+`ConfigError` handler in the same function for consistency.
+
+**Verified the new tests are real:** reverted the fix and watched all
+four fail -- three with the raw, uncaught exception each case above
+names, and the fourth with the real `TypeError: unhashable type:
+'list'` raised deep inside `AgentLoop.run()`, not a shallow one at the
+parsing layer -- before re-applying. All 29 pre-existing server tests
+pass unchanged. 4 new tests, 566 -> 570 Python tests, commit pending.
+`docs/packaging.md` updated.
+
+No open candidates remain from this sweep -- worth a fresh one next
+time.
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).
