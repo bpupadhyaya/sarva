@@ -6871,3 +6871,92 @@ to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred). No open candidates remain from
 recent sweeps -- worth a fresh one next time.
+
+
+## The agentic RL coding-task harness rewarded a bare `sys.exit(0)` submission, and its own "hard wall-clock timeout" left forked grandchild processes alive -- two real bugs in a file no prior sweep had actually read in depth
+
+`foundry/sarva_foundry/rl/environment.py` implements spec 3.6e's RL
+environment harness -- sandboxed coding tasks with automatic,
+verifiable rewards, the substrate a future GRPO/PPO training loop would
+consume. Confirmed by a fresh Explore-agent sweep: this file existed
+and had tests, but had never actually been read line-by-line by any
+prior sweep in this project, unlike almost everything else in
+`sarva_foundry` by this point.
+
+**Bug 1 -- reward hacking via early exit, confirmed live before
+fixing.** `evaluate_submission` builds one combined script:
+`submitted_code` followed by `task.test_code`, run in a single
+subprocess, scored purely on exit code. A submission of nothing but
+`sys.exit(0)` never reaches a single assertion in `test_code`, yet the
+process exits 0 -- `evaluate_submission(task, "import sys\nsys.exit(0)")`
+scored `reward=1.0` against every bundled task, confirmed directly
+before writing any fix. This is the same reward-hacking shape a prior
+sweep already found and fixed once in the eval harness's own scoring
+logic, just never checked against this newer, structurally similar
+file. Fixed with a per-call random sentinel (`secrets.token_hex(16)`,
+freshly generated each call so a submission can't hardcode/guess it)
+appended after `test_code` and printed only if execution actually
+reaches that point; a submission is now scored `passed` only if the
+process both exits zero *and* the sentinel reached stdout. Covers
+`os._exit(0)` too, which bypasses Python's own exit machinery.
+
+**Bug 2 -- the timeout only ever killed the immediate child, found by
+actually forking from inside a submission.** The module's own docstring
+promises "a hard wall-clock timeout," but `subprocess.run(...,
+timeout=timeout)` (and a plain `Popen.kill()`) only signals the direct
+`python submission.py` process. A submission that spawns its own
+subprocess (`subprocess.Popen(["sleep", "20"])`) then loops forever
+left that grandchild alive and running unattended -- confirmed directly
+against the real OS process table via `pgrep`, still present seconds
+after `evaluate_submission` had already returned `timed_out=True`. Same
+bug class as the already-fixed `RunShellTool` timeout gap
+(`core/sarva/agent/tools.py`), but investigating that fix directly
+showed it doesn't actually solve this either -- `RunShellTool` only
+ever calls `proc.kill()` on its one child PID too; its own existing
+test only passes because a *sequential shell chain* (`sleep 2 && echo
+...`) dies for free when the shell parent is killed, not because of any
+real process-group mechanism. No genuine process-group kill existed
+anywhere in this codebase to copy. Fixed by spawning the submission in
+its own process group at launch (`start_new_session=True` on POSIX,
+`subprocess.CREATE_NEW_PROCESS_GROUP` on Windows) and killing the whole
+group on timeout (`os.killpg(os.getpgid(proc.pid), signal.SIGKILL)` on
+POSIX, `taskkill /F /T /PID` on Windows) instead of the single PID --
+stronger isolation than `RunShellTool` currently has, named as a real,
+deliberate gap in `RunShellTool` itself rather than silently copied
+into the same file. `evaluate_submission` also switched from
+`subprocess.run(timeout=...)` to `Popen` + `communicate(timeout=...)`
+to get a live `Popen` handle to kill by process group.
+
+**Verified the new tests are real:** stashed the source fix and
+re-ran -- both new tests failed for exactly the right reason
+(`sys.exit(0)` submission scored `reward=1.0`; the grandchild `sleep
+20` process still alive via `pgrep` after the timeout) before
+restoring the fix. The grandchild-kill test is POSIX-only
+(`pytest.mark.skipif` on `win32`, matching the existing
+`_posix_only` pattern already used in `test_config.py`/`test_session.py`/
+`test_vector_memory.py`) since it asserts against `pgrep` directly; the
+`core` CI job that runs foundry tests runs on `macos-latest` only, so
+this isn't a coverage gap in practice.
+
+2 new tests, 564 -> 566 Python tests. `ruff check`/`format --check`
+clean. `docs/foundry/training.md` updated. No open candidates remain
+from this sweep's other checked angles (`apps/desktop/src/` fully
+enumerated -- no unaudited component beyond what's covered;
+`core/sarva/eval/` has no on-disk benchmark loader to malform;
+`multimodal/fetch.py`/`content.py` redirect/size limits hold up live;
+`quantization.py`'s div-by-zero is already guarded with a real example
+entry point; a repo-wide `int()`/`float()` grep found no unvalidated
+external-string-to-number conversions) -- one real candidate was
+deferred: `apps/desktop/src/App.tsx`'s `ws.onmessage` handler has no
+try/catch around `JSON.parse(raw.data)`, which could re-introduce a
+"streaming stuck true forever" hang via a different vector than the one
+the existing `onclose` fix covers. Worth picking up next.
+
+**Next:** the `App.tsx` malformed-WS-frame gap above; batching multiple
+concurrent inference requests (§3.6f, still a deliberate deferral --
+real correctness risk); F1's real distributed training infrastructure
+(needs real multi-node compute this environment doesn't have); Gemini's
+Files API for long-video input (no API key here to verify live); a
+first pass at code-signing/notarization for the desktop release bundles
+(needs a real signing identity this environment doesn't have -- likely
+stays deferred).

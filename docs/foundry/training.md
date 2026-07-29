@@ -337,6 +337,34 @@ real, deferred, infrastructure-heavy work, named directly in
 `environment.py`'s own module docstring rather than implied to already
 be covered.
 
+**A real reward-hacking bug found by actually submitting `sys.exit(0)`
+as a "solution":** the combined subprocess script is `submitted_code`
+followed by `task.test_code`, so code that exits (or `os._exit`s)
+before that point got a clean process exit with zero of `test_code`'s
+assertions ever having run — `reward=1.0` on a policy that learned
+nothing about the task, the same reward-hacking exploit shape a prior
+sweep already found and fixed once in the eval harness's own scoring,
+just never checked against this newer file. Fixed with a per-call
+random sentinel (`secrets.token_hex`, generated fresh each call so a
+submission can't guess and print it) written only *after* `test_code`
+finishes; a submission is now only rewarded if its process both exits
+zero *and* the sentinel actually reached stdout. Confirmed live before
+fixing: `evaluate_submission` scored a bare `sys.exit(0)` submission
+`reward=1.0` against every bundled task.
+
+**A second, related bug in the same file: the "hard wall-clock timeout"
+didn't actually kill everything a submission spawned.** A submission
+that forked its own subprocess (`subprocess.Popen(["sleep", "20"])`)
+kept that grandchild running — confirmed directly against the real
+process table, still alive via `pgrep` seconds after
+`evaluate_submission` had already returned `timed_out=True`. `subprocess.run`'s
+own `timeout=` (and a plain `proc.kill()`) only ever signals the
+immediate child. Fixed by spawning the submission in its own process
+group (`start_new_session=True` on POSIX, `CREATE_NEW_PROCESS_GROUP` on
+Windows) and killing the whole group on timeout (`os.killpg(...,
+SIGKILL)` on POSIX, `taskkill /F /T` on Windows) instead of just the one
+PID.
+
 `CODING_TASKS` bundles three small, real, hand-verified tasks — same
 honesty discipline as `sarva.eval.benchmarks.ARITHMETIC`: real problems
 with real, hand-checked reference solutions, not a claim to

@@ -22,11 +22,19 @@ implied to already be covered.
 
 from __future__ import annotations
 
+import platform
+import secrets
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+_IS_WINDOWS = platform.system() == "Windows"
+
+if not _IS_WINDOWS:
+    import os
+    import signal
 
 
 @dataclass(frozen=True)
@@ -50,40 +58,83 @@ class TaskResult:
     timed_out: bool
 
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kills `proc` AND any descendants it spawned -- not just the
+    immediate child. A real bug found by actually running a submission
+    that does `subprocess.Popen(["sleep", "20"])`: a plain `proc.kill()`
+    (or `subprocess.run`'s own `timeout=`, which only signals the direct
+    child) left that grandchild alive and visible in `ps aux` seconds
+    after `evaluate_submission` had already returned `timed_out=True` --
+    the module's own "hard wall-clock timeout" claim wasn't actually
+    true for code that forks. `start_new_session=True` (POSIX) /
+    `CREATE_NEW_PROCESS_GROUP` (Windows) at spawn time put the submission
+    in its own process group so the whole group can be killed at once."""
+    if _IS_WINDOWS:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already exited between the timeout firing and here
+    proc.wait()
+
+
 def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 10.0) -> TaskResult:
     """Runs `submitted_code` followed by `task.test_code` in a genuinely
     separate subprocess, under a hard wall-clock timeout. Reward is
-    binary and objective: 1.0 if the combined script exits zero (every
-    assertion in `test_code` held), 0.0 otherwise — including a timeout,
-    which is scored as a real failure (an infinite loop is not a passing
-    submission, not an error the caller has to handle specially)."""
-    combined = f"{submitted_code}\n\n{task.test_code}\n"
+    binary and objective: 1.0 if the combined script both exits zero
+    *and* actually ran `test_code` to completion, 0.0 otherwise —
+    including a timeout, which is scored as a real failure (an infinite
+    loop is not a passing submission, not an error the caller has to
+    handle specially).
+
+    The completion check isn't redundant with the exit-code check: a
+    real reward-hacking bug found by actually submitting `sys.exit(0)`
+    as a "solution" — the combined script is `submitted_code` followed
+    by `test_code`, so code that exits (or `os._exit`s) before that point
+    gets a clean process exit with zero assertions ever having run,
+    scoring `reward=1.0` on a policy that learned nothing about the task.
+    A per-call random sentinel printed only *after* `test_code` finishes
+    closes that gap without trusting the submission's own exit code
+    alone; it's generated fresh each call specifically so a submission
+    can't print a guessed/hardcoded sentinel to fake completion."""
+    sentinel = f"__SARVA_TASK_COMPLETED_{secrets.token_hex(16)}__"
+    combined = f"{submitted_code}\n\n{task.test_code}\nprint({sentinel!r})\n"
     with tempfile.TemporaryDirectory() as tmp:
         script_path = Path(tmp) / "submission.py"
         script_path.write_text(combined, encoding="utf-8")
+        popen_kwargs: dict[str, object] = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if _IS_WINDOWS
+            else {"start_new_session": True}
+        )
+        proc = subprocess.Popen(
+            [sys.executable, str(script_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **popen_kwargs,
+        )
         try:
-            proc = subprocess.run(
-                [sys.executable, str(script_path)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as e:
-            # text=True on the Popen call above means e.stdout/e.stderr
-            # are already str (or None, if nothing was captured before
-            # the timeout fired) -- no bytes-decoding needed here.
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            # Safe to call again after a kill: communicate() just drains
+            # whatever the now-dead process already wrote and reaps it.
+            stdout, stderr = proc.communicate()
             return TaskResult(
                 passed=False,
                 reward=0.0,
-                stdout=e.stdout or "",
-                stderr=e.stderr or "",
+                stdout=stdout or "",
+                stderr=stderr or "",
                 timed_out=True,
             )
 
+    passed = proc.returncode == 0 and sentinel in stdout
     return TaskResult(
-        passed=proc.returncode == 0,
-        reward=1.0 if proc.returncode == 0 else 0.0,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
+        passed=passed,
+        reward=1.0 if passed else 0.0,
+        stdout=stdout,
+        stderr=stderr,
         timed_out=False,
     )
