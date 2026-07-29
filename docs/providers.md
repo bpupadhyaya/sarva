@@ -183,6 +183,35 @@ exact-tag-match gate the text model already goes through. 6 new/changed
 tests (the file's existing tests all needed `await` once the
 translator went async), 458 → 460 Python tests.
 
+### A malformed streaming line crashed `generate()` — closed after zero conformance coverage of the streaming loop itself
+
+`generate()`'s NDJSON parsing (`json.loads(line)` inside `async for
+line in response.aiter_lines()`) had no error handling at all — only
+`httpx.ConnectError`/`httpx.TimeoutException` and a `status_code >= 400`
+response were ever anticipated as failure modes. A genuinely truncated
+line (the real-world trigger: a network glitch or proxy cutting the
+stream mid-line) raised a raw `json.JSONDecodeError` straight out of
+the async generator instead of a clean `StreamErrorEvent` — reproduced
+with `httpx.MockTransport` returning deliberately truncated NDJSON
+bytes, no real server needed. Since `sarva.providers.base.complete()`
+(the non-streaming convenience wrapper `sarva.eval`'s benchmark harness
+and `sarva.distill` both use) turns any `StreamErrorEvent` into a
+`ProviderError` it already catches per-case, fixing this one adapter
+method closes the failure at its source rather than needing separate
+fixes in every consumer: a single malformed line from a local Ollama
+model no longer aborts an entire benchmark run or distillation batch,
+losing every other case's results. Fixed by wrapping the `json.loads`
+call in `except json.JSONDecodeError`, `retryable=True` for the same
+reason the two `httpx` exception handlers right below it already are —
+a transient mid-stream hiccup is worth retrying, not a hard failure.
+**A real, first-of-its-kind gap closed alongside the fix:** `generate()`
+itself had zero conformance test coverage before this — only ever
+exercised live against a real running Ollama server, unlike every other
+adapter's own dedicated unit tests. New `httpx.MockTransport`-based
+tests (the same hermetic-httpx discipline `test_fetch.py` already
+established) cover both the streaming happy path and this regression.
+2 new tests, 543 → 545 Python tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

@@ -6033,3 +6033,56 @@ can't parse a malformed response body. Batching (§3.6f), F1's
 distributed training infra, Gemini's Files API for long video, and
 desktop code-signing/notarization remain deferred for the reasons
 already logged above.
+
+## `OllamaProvider.generate()` crashed on a malformed streaming line -- the first candidate from the last sweep, picked up directly
+
+`generate()`'s NDJSON parsing (`json.loads(line)` inside `async for
+line in response.aiter_lines()`) had no error handling at all -- only
+`httpx.ConnectError`/`httpx.TimeoutException` and a `status_code >= 400`
+response were ever anticipated as failure modes. Confirmed with a real
+`httpx.MockTransport` returning deliberately truncated NDJSON bytes (the
+real-world trigger: a network glitch or proxy cutting the stream
+mid-line, or a buggy Ollama version): a raw `json.JSONDecodeError`
+propagated straight out of the async generator uncaught instead of the
+clean `StreamErrorEvent` the `status_code >= 400` branch two lines above
+already produces for a malformed *response*.
+
+**Fixed at the one real source, not patched in every consumer
+separately:** wrapped the `json.loads` call in `except
+json.JSONDecodeError`, yielding a `StreamErrorEvent(retryable=True)` --
+retryable for the same reason the two `httpx` exception handlers right
+below it already are. Traced the actual downstream impact before
+assuming more fixes were needed: `sarva.providers.base.complete()` (the
+non-streaming convenience wrapper `sarva.eval`'s benchmark harness and
+`sarva.distill` both use) already turns any `StreamErrorEvent` into a
+`ProviderError`, which both already catch per-case -- confirmed live
+with the same mocked transport driven through `complete()` directly, a
+clean `ProviderError` came out the other end. So this one adapter-level
+fix closes the "one bad Ollama line aborts an entire benchmark run or
+distillation batch" gap at its source, with no separate changes needed
+in `eval`/`distill` themselves.
+
+**A real, first-of-its-kind gap closed alongside the fix:**
+`OllamaProvider.generate()` itself had zero conformance test coverage
+before this -- only ever exercised live against a real running Ollama
+server (`tests/live/test_live_providers.py`), unlike every other
+adapter's own dedicated unit tests. New `httpx.MockTransport`-based
+tests (the same hermetic-httpx discipline `test_fetch.py` already
+established for this project) cover both the streaming happy path and
+this regression -- verified via revert-and-verify too: reverting the
+fix reproduced the exact raw `JSONDecodeError` traceback before
+re-applying.
+
+2 new tests, 543 -> 545 Python tests. `ruff check`/`format --check`
+clean. `docs/providers.md` updated.
+
+**Next:** the other candidate from the last sweep, lower-confidence and
+not live-verified since this environment has no Anthropic API key:
+`anthropic_provider.py`'s exception handling catches
+`RateLimitError`/`APIConnectionError`/`APIStatusError` but not the
+SDK's sibling `APIResponseValidationError`, raised when the SDK can't
+parse a malformed response body -- worth reasoning through carefully
+(or verifying with a mocked SDK response) before deciding whether it's
+real. Batching (§3.6f), F1's distributed training infra, Gemini's Files
+API for long video, and desktop code-signing/notarization remain
+deferred for the reasons already logged above.

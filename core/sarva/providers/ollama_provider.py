@@ -139,7 +139,28 @@ class OllamaProvider:
                 async for line in response.aiter_lines():
                     if not line:
                         continue
-                    chunk = json.loads(line)
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        # A real bug found by actually feeding a
+                        # genuinely truncated NDJSON line through a
+                        # mocked transport (the real-world trigger: a
+                        # network glitch or proxy cutting the stream
+                        # mid-line): the raw JSONDecodeError propagated
+                        # uncaught out of this async generator instead
+                        # of the clean StreamErrorEvent the
+                        # status_code >= 400 branch above already
+                        # produces for a malformed *response*. retryable
+                        # for the same reason ConnectError/
+                        # TimeoutException below are: a transient
+                        # network hiccup mid-stream is a reasonable
+                        # thing to retry, not a hard failure.
+                        yield StreamErrorEvent(
+                            code="provider",
+                            detail=f"malformed streaming response from Ollama: {e}",
+                            retryable=True,
+                        )
+                        return
                     msg = chunk.get("message", {})
                     if msg.get("content"):
                         text_acc += msg["content"]

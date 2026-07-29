@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 
+import httpx
 import pytest
 from sarva.multimodal.content import (
     DocumentBlock,
@@ -18,7 +19,8 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from sarva.providers.ollama_provider import _strip_local_prefix, _to_ollama_message
+from sarva.providers.base import GenerateRequest, StreamErrorEvent, TextDeltaEvent
+from sarva.providers.ollama_provider import OllamaProvider, _strip_local_prefix, _to_ollama_message
 
 
 async def test_text_block_translation():
@@ -117,3 +119,62 @@ def test_strip_local_prefix_removes_the_provider_namespace():
 
 def test_strip_local_prefix_is_a_no_op_without_a_slash():
     assert _strip_local_prefix("qwen3:8b") == "qwen3:8b"
+
+
+def _req() -> GenerateRequest:
+    return GenerateRequest(
+        model="qwen3:8b", messages=[Message(role="user", content=[TextBlock(text="hi")])]
+    )
+
+
+def _provider(body: bytes) -> OllamaProvider:
+    # httpx.MockTransport -- the same "no network, no server needed"
+    # discipline test_fetch.py already established for hermetic httpx
+    # testing, and the most direct way to exercise generate()'s own
+    # streaming/parsing logic: unlike the OpenAI/Google adapters (which
+    # go through their SDKs, unit-tested with duck-typed chunk
+    # stand-ins in test_openai_provider_streaming.py), Ollama talks to
+    # httpx directly, so generate() had zero conformance coverage of
+    # its own before this -- only ever exercised live, skipped without
+    # a real running server.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return OllamaProvider(client=client)
+
+
+@pytest.mark.asyncio
+async def test_generate_streams_real_text_deltas_from_ndjson_lines():
+    body = (
+        b'{"message": {"content": "Hel"}, "done": false}\n'
+        b'{"message": {"content": "lo"}, "done": true}\n'
+    )
+    events = [e async for e in _provider(body).generate(_req())]
+
+    deltas = [e.text for e in events if isinstance(e, TextDeltaEvent)]
+    assert deltas == ["Hel", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_generate_yields_a_clean_stream_error_on_a_malformed_ndjson_line():
+    # A real bug found by actually feeding a genuinely truncated NDJSON
+    # line through a mocked transport (the real-world trigger: a
+    # network glitch or proxy cutting the stream mid-line): the raw
+    # json.JSONDecodeError propagated straight out of generate()'s
+    # async generator uncaught instead of the clean StreamErrorEvent
+    # the status_code >= 400 branch already produces for a malformed
+    # *response*. AgentLoop's own `except Exception` around the
+    # provider call happens to catch this too (so a single AgentLoop
+    # turn wouldn't crash), but sarva.eval's benchmark harness and
+    # sarva.distill only catch ProviderError per-case -- an uncaught
+    # JSONDecodeError from one bad line would abort either of those
+    # entirely, losing every remaining case's results.
+    body = b'{"message": {"content": "Hel"}, "done": false}\n' + b'{"message": {"content": "lo'
+
+    events = [e async for e in _provider(body).generate(_req())]
+
+    assert events[0] == TextDeltaEvent(text="Hel")
+    assert isinstance(events[-1], StreamErrorEvent)
+    assert events[-1].retryable is True
+    assert "malformed streaming response" in events[-1].detail
