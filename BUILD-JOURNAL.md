@@ -8572,3 +8572,83 @@ environment doesn't have); Gemini's Files API for long-video input (no
 API key here to verify live); a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have -- likely stays deferred).
+
+## The AgentLoop no-retry-cap gap, reconsidered the same way the config.json race was -- not the bigger feature decision it looked like, a narrow fix that closes a real unbounded-cost bug
+
+Two items had sat named-but-deferred across many rounds as "real
+feature decisions": the Tauri `csp: null` gap (genuinely needs a
+GUI/Windows machine this environment lacks) and `AgentLoop`'s
+no-retry-cap. The config.json concurrent-write race was deferred with
+the identical framing once, then reconsidered and turned out to be a
+narrow, well-scoped fix. Worth checking whether the retry-cap gap was
+actually the same shape rather than taking the old assessment on faith.
+
+**It was.** Investigated what's actually unbounded: not "the model
+retrying a failed tool call" (AgentLoop never auto-re-invokes a tool;
+that path is already bounded by the existing per-run `Budget`) but a
+narrower, structural gap in `AgentLoop.run()`'s provider-level
+retryable-stream-error path. When `provider.generate()` yields
+`StreamErrorEvent(retryable=True)` (rate limit / 5xx), the loop
+un-counts the attempt, sleeps 1s, and jumps back to the top of the main
+`while True` via `if done is None: continue` -- BEFORE the
+`spend.wall_seconds = ...`/`spend.exceeded(self._budget)` check a few
+lines below ever runs. Every other path through this loop is bounded by
+that check; this was the one exception.
+
+**Confirmed live before assuming the analysis was right:** a
+`MockProvider` scripted to always yield a retryable stream error
+(simulating a provider stuck returning rate-limit/5xx responses
+indefinitely), driven through a real `AgentLoop` with a real
+`Budget(max_model_calls=50, max_wall_seconds=3600.0)` -- the run never
+reached a terminal state after 6 real seconds and 12 real provider-call
+attempts, one real API call every second, indefinitely, regardless of
+how tight the caller's own budget was.
+
+**No real design space was actually being deferred here** -- the
+backoff policy itself (a flat 1.0s sleep) was already shipped and
+settled several rounds ago (the CALLING_MODEL self-transition fix);
+what was missing was just a counter. Fixed with a small, independent
+`stream_retries` local, capped at a new `_MAX_STREAM_RETRIES = 5`
+constant, deliberately NOT folded into `spend.model_calls` (a retry
+isn't a new model call -- the surrounding code's own existing comment
+already establishes that), reset to 0 the moment a real `done`
+response arrives so a provider that occasionally hiccups but keeps
+making progress is never penalized for it. Exceeding the cap
+transitions to `FAILED` the same way a non-retryable error already
+does, with a `detail` naming both the retry count and the underlying
+error.
+
+**Verified the new test is real, by an unusually strong margin:**
+reverting just `loop.py` and re-running the new test didn't produce a
+normal assertion failure -- with `asyncio.sleep` mocked to a no-op (so
+the test doesn't burn five real wall-clock seconds per run), the
+reverted code's retry path has no genuine suspension point left at all,
+so it starves the event loop's own cooperative scheduling and the test
+process itself had to be killed externally rather than timing out
+cleanly. Confirmed independently before reaching for the mock, too:
+the very first live repro (real 1s sleeps, no mocking) hung for the
+full 6-second `asyncio.timeout` guard and had to be caught by that
+guard rather than terminating on its own. All 29 pre-existing
+agent-loop tests pass unchanged. 1 new test, 613 -> 614 Python tests.
+`ruff check`/`format --check` clean. `docs/agent-loop.md` updated --
+the chapter had already named this gap honestly as a real limitation;
+now it names the fix instead.
+
+**This closes the second of the two long-standing deferred items.**
+Only the Tauri `csp: null` gap remains genuinely deferred, and for the
+reason it always has been: it needs a real GUI/Windows machine to
+safely verify a CSP change doesn't break the desktop app, which this
+environment doesn't have.
+
+**Next:** the Tauri `csp: null` gap (still deferred, needs a GUI/
+Windows machine this environment lacks -- the last remaining
+long-standing deferred item); batching multiple concurrent inference
+requests (§3.6f, still a deliberate deferral -- real correctness
+risk); F1's real distributed training infrastructure (needs real
+multi-node compute this environment doesn't have); Gemini's Files API
+for long-video input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a real
+signing identity this environment doesn't have -- likely stays
+deferred). Worth a fresh Explore-agent sweep next time, now that both
+long-standing named gaps have been resolved (one fixed, one confirmed
+to genuinely need infrastructure this environment lacks).

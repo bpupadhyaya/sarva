@@ -82,6 +82,29 @@ from sarva.providers.registry import Router, TaskClass, UnknownModelError
 # don't self-protect, not a replacement for RunShellTool's own timeout.
 _TOOL_TIMEOUT_SECONDS = 90
 
+# A real bug found by actually driving a MockProvider that always yields
+# a retryable StreamErrorEvent (simulating a provider stuck returning
+# rate-limit/5xx responses indefinitely): AgentLoop.run()'s retryable-
+# error branch (`if pevent.retryable: ... await asyncio.sleep(1.0);
+# break`) falls through to `if done is None: continue`, jumping straight
+# back to the top of the main `while True` loop -- BEFORE the
+# `spend.wall_seconds = ...` / `spend.exceeded(self._budget)` block a
+# few lines below ever runs. Confirmed live: with a real Budget
+# (max_model_calls=50, max_wall_seconds=3600.0) supplied, the run never
+# reached a terminal state after 6 real seconds and 12 real API-call
+# attempts -- it spins forever, one real provider call per second, with
+# no crash and no distinguishable log signal, regardless of how tight
+# the caller's own budget is. Every OTHER path through this loop is
+# bounded by `spend.exceeded`; this is the one gap where a stuck
+# provider (not a stuck tool -- that's `_TOOL_TIMEOUT_SECONDS`'s own,
+# separate concern) burns real API cost and wall-clock indefinitely.
+# Deliberately a small, separate counter rather than folding into
+# `spend.model_calls` -- a retry isn't a new model call (the existing
+# `spend.model_calls -= 1` comment already establishes that), so
+# capping it needs its own, independent bound rather than repurposing
+# a counter that means something else.
+_MAX_STREAM_RETRIES = 5
+
 
 def _required_modalities(messages: list[Message]) -> set[Modality]:
     """What the routed model must support, computed from what's actually in
@@ -172,6 +195,7 @@ class AgentLoop:
         ]
         spend = Spend()
         started = time.monotonic()
+        stream_retries = 0
         state = AgentState.INIT
         final_message: Message | None = None
 
@@ -282,6 +306,25 @@ class AgentLoop:
                         done = pevent
                     elif isinstance(pevent, StreamErrorEvent):
                         if pevent.retryable:
+                            stream_retries += 1
+                            if stream_retries > _MAX_STREAM_RETRIES:
+                                transition(AgentState.FAILED)
+                                yield await emit(
+                                    StateChangedEvent(
+                                        state=state,
+                                        detail=(
+                                            f"gave up after {_MAX_STREAM_RETRIES} retryable "
+                                            f"stream errors: {pevent.detail}"
+                                        ),
+                                    )
+                                )
+                                spend.wall_seconds = time.monotonic() - started
+                                yield await emit(
+                                    RunDoneEvent(state=state, final_message=None, spend=spend)
+                                )
+                                if transcript_out is not None:
+                                    transcript_out.extend(messages)
+                                return
                             spend.model_calls -= 1  # a retry isn't a new call
                             await asyncio.sleep(1.0)
                             break
@@ -304,6 +347,7 @@ class AgentLoop:
             if done is None:
                 continue  # transient stream error was retried; loop back to CALLING_MODEL
 
+            stream_retries = 0  # a real response arrived; past retries no longer count
             spend.total_tokens += done.usage.input_tokens + done.usage.output_tokens
             spend.cost_usd += done.usage.cost_usd
             spend.wall_seconds = time.monotonic() - started

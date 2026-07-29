@@ -518,6 +518,49 @@ async def test_a_retryable_stream_error_actually_retries_instead_of_crashing(run
 
 
 @pytest.mark.asyncio
+async def test_a_permanently_retryable_stream_error_eventually_gives_up(run_root, monkeypatch):
+    # A real bug found by actually driving a provider that always yields
+    # a retryable StreamErrorEvent (simulating one stuck returning rate-
+    # limit/5xx responses indefinitely): the retry branch loops back to
+    # the top of the while-loop via `if done is None: continue`, jumping
+    # past the `spend.exceeded(self._budget)` check a few lines below --
+    # confirmed live, the run never reached a terminal state after 6 real
+    # seconds and 12 real provider-call attempts, regardless of how tight
+    # the caller's own Budget was (max_model_calls=50, max_wall_seconds=
+    # 3600.0 here). Every OTHER path through this loop is bounded by
+    # spend.exceeded; this was the one gap where a stuck provider burns
+    # real API cost and wall-clock indefinitely. `asyncio.sleep` patched
+    # to a no-op so this test doesn't actually wait out five real 1s
+    # retry delays.
+    import sarva.agent.loop as loop_module
+
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(loop_module.asyncio, "sleep", _no_sleep)
+
+    provider = MockProvider(
+        script=[ScriptedTurn(error="rate limited", error_retryable=True)] * 1000
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        budget=Budget(max_wall_seconds=3600.0, max_model_calls=50),
+        run_root=run_root,
+    )
+
+    events = await asyncio.wait_for(_collect(loop.run("hello")), timeout=5)
+
+    assert events[-1].state == AgentState.FAILED
+    assert events[-1].type == "run_done"
+    # Confirms the budget itself was never what stopped it -- the retry
+    # counter fired first, well under both configured limits.
+    assert events[-1].spend.model_calls < 50
+    state_changed = [e for e in events if e.type == "state_changed"]
+    assert f"{loop_module._MAX_STREAM_RETRIES}" in state_changed[-1].detail
+
+
+@pytest.mark.asyncio
 async def test_transcript_out_defaults_to_none_and_is_optional(run_root):
     """Purely additive: every existing call site that doesn't pass
     transcript_out must be completely unaffected."""

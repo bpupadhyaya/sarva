@@ -345,14 +345,9 @@ still got a raw PIL exception instead of the documented
   just a well-formed `StreamErrorEvent`) is caught at the loop level
   and turned into `FAILED` — it never propagates up into a skin.
 - A `StreamErrorEvent` marked `retryable` gets a fixed 1-second backoff
-  and retries — repeatedly, for as long as the provider keeps returning
-  `retryable=True`, not capped at one attempt as an earlier version of
-  this chapter claimed; a non-retryable one is an immediate `FAILED`.
-  **No maximum retry count exists** — a provider that never stops
-  returning a retryable error would retry forever rather than
-  eventually giving up as `FAILED`. Real, named, not yet built, the same
-  "don't imply more coverage than actually exists" discipline this
-  chapter already applies elsewhere.
+  and retries, up to `_MAX_STREAM_RETRIES` (5) consecutive attempts —
+  a non-retryable one is an immediate `FAILED`, and exceeding the retry
+  cap is too, with a `detail` naming the count and the underlying error.
 
 **A real bug found by actually running a retryable stream error, not
 just reading the retry code:** the retry path above loops back to the
@@ -381,6 +376,37 @@ pre-existing agent-loop tests pass unchanged.
   specific reason recorded in the terminal event's `detail` field —
   distinguishable after the fact, not collapsed into one generic
   failure state.
+
+**A permanently-retryable stream error used to spin forever, ignoring
+the caller's own `Budget` entirely — a real, previously-deferred gap
+closed here.** The retry path (`if pevent.retryable: ...; break`) falls
+through to `if done is None: continue`, jumping back to the top of the
+main loop *before* the `spend.exceeded(self._budget)` check a few lines
+below ever runs — every other path through the loop is bounded by that
+check; this was the one exception. Confirmed live: a `MockProvider`
+scripted to always yield a retryable error, driven through `AgentLoop`
+with a real `Budget(max_model_calls=50, max_wall_seconds=3600.0)`,
+never reached a terminal state after 6 real seconds and 12 real
+provider-call attempts — one real API call every second, indefinitely,
+regardless of how tight the configured budget was. Previously named in
+this chapter as a genuine limitation rather than fixed outright,
+because it read like it might be entangled with a bigger "how should
+retry policy work" design question; on reinspection it wasn't — the
+backoff policy itself (flat 1s) was already settled, all that was
+missing was a cap. Fixed with a small, independent `stream_retries`
+counter (deliberately not reusing `spend.model_calls`, since a retry
+isn't a new model call — the surrounding code already establishes
+that) capped at `_MAX_STREAM_RETRIES = 5`, reset to 0 the moment a real
+`done` response arrives. Exceeding the cap transitions to `FAILED` the
+same way a non-retryable error already does. **Verified the new test is
+real, and by an unusually strong margin:** reverting the fix and
+re-running the new test didn't just fail an assertion — the reverted
+code has no true suspension point in its retry path once `asyncio.sleep`
+is mocked to a no-op for the test, so it starves the event loop's own
+cooperative cancellation and the test process had to be killed
+externally rather than timing out cleanly, about as unambiguous a
+confirmation as this project's revert-and-verify discipline has
+produced. All 29 pre-existing agent-loop tests pass unchanged.
 
 ## What's honestly not built yet
 
