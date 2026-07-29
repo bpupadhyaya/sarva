@@ -64,6 +64,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from sarva.atomic_write import atomic_write_text
 from sarva.multimodal.content import Message, Modality, TextBlock
 from sarva.providers.base import (
     DoneEvent,
@@ -162,7 +163,12 @@ def save_checkpoint_bundle(directory: Path, trainer: Any, tokenizer: Any, config
     config_data = {field: getattr(config, field) for field in _CONFIG_FIELDS}
     config_data["moe"] = _serialize_moe(config.moe)
     config_data["rope_scaling"] = _serialize_rope_scaling(config.rope_scaling)
-    (directory / "config.json").write_text(json.dumps(config_data, indent=2))
+    # Atomic write: this bundle's config.json is what load_checkpoint_bundle
+    # reads back alongside the (already atomically-saved) model.pt/
+    # tokenizer.json -- a crash mid-write here would leave a real trained
+    # checkpoint's model/tokenizer files intact but the config needed to
+    # actually reconstruct the model unreadable. See sarva.atomic_write.
+    atomic_write_text(directory / "config.json", json.dumps(config_data, indent=2))
 
 
 def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:

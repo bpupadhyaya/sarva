@@ -91,6 +91,24 @@ paired tests:
    point regardless of optimizer state. The negative control is what
    makes the positive test meaningful.
 
+**`save_checkpoint` writes atomically, not via a direct `torch.save(obj,
+path)`.** The same interrupted-write bug already found and fixed in
+`core`'s `sarva.config`/`sarva.memory.session` (see the memory chapter
+in the core docs) had an unfixed twin here, with a materially worse
+blast radius: confirmed live by truncating a real, trained checkpoint
+mid-write to simulate a crash, then calling `load_checkpoint` on it —
+`RuntimeError: PytorchStreamReader failed reading zip archive: failed
+finding central directory`. A crash at exactly the wrong moment
+destroys not just the new save but the previously-good checkpoint that
+was there before, i.e. real GPU-hours of training progress, not just a
+config file. Fixed via `sarva_foundry.atomic_write` — a mirrored, not
+shared, copy of `core`'s equivalent helper, since `core` and
+`sarva_foundry` intentionally share no dependency in either direction.
+`ByteLevelBPETokenizer.save` (see the tokenizer chapter) and the
+checkpoint bundle's `config.json` write in `sarva.providers.
+foundry_provider.save_checkpoint_bundle` had the identical unfixed bug
+and got the identical fix.
+
 ## The learning-rate schedule: warmup, then cosine decay
 
 `WarmupCosineSchedule` replaces what was originally a flat learning

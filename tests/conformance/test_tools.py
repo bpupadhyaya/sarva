@@ -44,6 +44,39 @@ async def test_write_creates_parent_directories(ctx):
 
 
 @pytest.mark.asyncio
+async def test_write_does_not_destroy_the_previous_file_if_interrupted_mid_write(ctx, monkeypatch):
+    # A real bug found by actually simulating an interrupted write: this
+    # tool used to open the target file directly with write_text(),
+    # which truncates it to 0 bytes immediately -- before a single byte
+    # of new content is written. A crash (OOM-kill, SIGKILL, power loss)
+    # mid-write destroyed a previously-good, real user file this tool
+    # was writing to -- confirmed live: a real 5000-byte file became 0
+    # bytes. Simulated here by making os.replace() (the atomic commit
+    # step) raise partway through a second write -- the real file must
+    # still hold the first, complete write's content afterward.
+    write = WriteFileTool()
+    await write.run({"path": "note.txt", "content": "first, good content"}, ctx)
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated crash during os.replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    with pytest.raises(OSError):
+        await write.run({"path": "note.txt", "content": "second write, interrupted"}, ctx)
+
+    read = ReadFileTool()
+    result = await read.run({"path": "note.txt"}, ctx)
+    assert result.content[0].text == "first, good content"
+
+
+@pytest.mark.asyncio
 async def test_path_escape_is_rejected(ctx):
     read = ReadFileTool()
     with pytest.raises(ValueError, match="escapes workdir"):

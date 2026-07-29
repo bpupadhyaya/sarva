@@ -1,0 +1,56 @@
+"""Conformance tests for sarva_foundry.atomic_write -- the mirrored copy
+of sarva.atomic_write (core and sarva_foundry have no dependency on each
+other, so the helper itself is duplicated on purpose; these tests are
+duplicated too, rather than assuming the core-side tests cover this
+module)."""
+
+from __future__ import annotations
+
+import os as os_module
+
+import pytest
+from sarva_foundry.atomic_write import atomic_write, atomic_write_text
+
+
+def test_atomic_write_text_writes_the_content(tmp_path):
+    path = tmp_path / "tokenizer.json"
+    atomic_write_text(path, '{"merges": []}')
+    assert path.read_text() == '{"merges": []}'
+
+
+def test_atomic_write_does_not_destroy_the_previous_file_if_interrupted_mid_write(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "tokenizer.json"
+    atomic_write_text(path, "first, good content")
+
+    real_replace = os_module.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated crash during os.replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os_module, "replace", flaky_replace)
+
+    with pytest.raises(OSError):
+        atomic_write_text(path, "second write, interrupted")
+
+    assert path.read_text() == "first, good content"
+
+
+def test_atomic_write_generic_write_fn_receives_the_tmp_path(tmp_path):
+    # Generic over write_fn on purpose: Trainer.save_checkpoint needs
+    # torch.save's own serialization, not a plain bytes/text write.
+    path = tmp_path / "model.pt"
+    seen = {}
+
+    def write_fn(tmp_path_arg):
+        seen["tmp_path"] = tmp_path_arg
+        tmp_path_arg.write_bytes(b"weights")
+
+    atomic_write(path, write_fn)
+    assert seen["tmp_path"] != path
+    assert path.read_bytes() == b"weights"

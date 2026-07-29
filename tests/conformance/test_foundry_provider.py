@@ -8,6 +8,7 @@ actually works, don't assume the shapes line up" discipline throughout."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,42 @@ def test_save_and_load_checkpoint_bundle_round_trips_real_weights(tmp_path: Path
     assert loaded_tokenizer.encode("the sky is blue") == tokenizer.encode("the sky is blue")
     for key, original in model.state_dict().items():
         assert torch.equal(original, loaded_model.state_dict()[key]), f"weights diverged at {key}"
+
+
+def test_save_checkpoint_bundle_config_json_does_not_destroy_the_previous_bundle_if_interrupted(
+    tmp_path: Path, monkeypatch
+):
+    # A real bug found by actually simulating an interrupted write: the
+    # bundle's config.json used to be written with a direct
+    # path.write_text(), which truncates the file to 0 bytes the instant
+    # it's opened -- before a single byte of new content is written. A
+    # crash mid-write left model.pt/tokenizer.json (a real, potentially
+    # expensive trained checkpoint) intact but the config.json needed to
+    # actually reconstruct the model unreadable. Simulated here by
+    # making os.replace() raise partway through re-saving the bundle.
+    bundle_dir = tmp_path / "toy"
+    _make_bundle(bundle_dir)
+    good_config_bytes = (bundle_dir / "config.json").read_bytes()
+
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if str(dst).endswith("config.json"):
+            raise OSError("simulated crash during os.replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    torch.manual_seed(1)
+    tokenizer = _tiny_tokenizer()
+    config = _tiny_config(tokenizer)
+    trainer = Trainer(DecoderOnlyTransformer(config))
+    with pytest.raises(OSError):
+        save_checkpoint_bundle(bundle_dir, trainer, tokenizer, config)
+
+    assert (bundle_dir / "config.json").read_bytes() == good_config_bytes
+    _model, _tokenizer, loaded_config = load_checkpoint_bundle(bundle_dir)  # must not raise
+    assert loaded_config.vocab_size == config.vocab_size
 
 
 def test_save_and_load_checkpoint_bundle_round_trips_a_real_moe_config(tmp_path: Path):

@@ -76,6 +76,16 @@ whole test module fail to even collect (`ImportError: cannot import
 name 'DistillationError'`) before re-applying, the same discipline
 already used for the `VectorMemoryStore` fix.
 
+**`save_jsonl` writes atomically, not via a direct `path.open("w")`.**
+The same interrupted-write bug already found and fixed in `sarva.
+config`/`sarva.memory.session` (see the memory chapter) turned out to
+have an unfixed twin here too: `"w"` mode truncates the output file to
+0 bytes the instant it's opened, before a single record is written — a
+crash mid-write destroys every previously-saved distillation record,
+real generated data that cost real provider API calls to produce.
+Confirmed live before fixing it. Now uses the shared `sarva.atomic_write`
+helper, same as every other real call site this bug class was found at.
+
 ## Try it
 
 ```bash

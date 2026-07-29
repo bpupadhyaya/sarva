@@ -89,6 +89,26 @@ content afterward — reverting the fix and re-running the same test
 confirms it fails because the reverted code never calls `os.replace()`
 at all.
 
+**That fix was never centralized, so it never propagated past the two
+places it started.** A later sweep of this codebase — specifically
+looking for "other duplicated logic that may have drifted the same way"
+after finding an independent, unpatched copy of a different bug
+elsewhere — found three more real call sites writing valuable,
+hard-to-regenerate data with the exact same unfixed pattern:
+`sarva.agent.tools.WriteFileTool` (writing arbitrary real user files on
+essentially every agent file-editing turn), `sarva.distill.save_jsonl`
+(distillation records that cost real provider API calls to generate),
+and the `sarva_foundry` checkpoint/tokenizer save paths (a training
+run's actual GPU-hours of progress). `sarva.atomic_write` now holds the
+one shared implementation `sarva.config`/`sarva.memory.session` and
+these three sites all call, instead of each independently reinventing
+it (or, as had actually happened, forgetting to). See
+`sarva_foundry.atomic_write` (mirrored, not imported — `core` and
+`sarva_foundry` share no dependency in either direction) for the
+training-side equivalent, covering `Trainer.save_checkpoint`,
+`ByteLevelBPETokenizer.save`, and the checkpoint bundle's `config.json`
+write in `sarva.providers.foundry_provider.save_checkpoint_bundle`.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:

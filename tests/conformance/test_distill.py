@@ -8,6 +8,8 @@ split as every other live-only concern in this project.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from sarva.distill import DistillationError, DistillationRecord, distill, load_jsonl, save_jsonl
 from sarva.providers.mock import MockProvider, ScriptedTurn
@@ -103,6 +105,38 @@ def test_jsonl_is_genuinely_line_delimited(tmp_path):
     save_jsonl(records, path)
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3
+
+
+def test_save_jsonl_does_not_destroy_the_previous_file_if_interrupted_mid_write(
+    tmp_path, monkeypatch
+):
+    # A real bug found by actually simulating an interrupted write: this
+    # used to open the real output file directly with "w" mode, which
+    # truncates it to 0 bytes immediately -- before a single record is
+    # written. A crash mid-write destroyed every previously-saved
+    # distillation record, real generated data that cost real provider
+    # API calls to produce -- confirmed live. Simulated here by making
+    # os.replace() raise partway through a second save.
+    path = tmp_path / "out.jsonl"
+    first = [DistillationRecord(prompt="p1", completion="c1", model="m")]
+    save_jsonl(first, path)
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated crash during os.replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    second = [DistillationRecord(prompt="p2", completion="c2", model="m")]
+    with pytest.raises(OSError):
+        save_jsonl(second, path)
+
+    assert load_jsonl(path) == first
 
 
 def test_load_jsonl_skips_blank_lines(tmp_path):

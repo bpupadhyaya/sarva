@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from sarva.atomic_write import atomic_write_text
 from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
 from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.multimodal.fetch import FetchError, ensure_public_host, ssrf_safe_transport
@@ -108,9 +109,18 @@ class WriteFileTool:
     )
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        # Atomic write, not a direct p.write_text(): this tool runs on
+        # essentially every agent file-editing turn, against arbitrary
+        # real user files -- not just this project's own state. A crash
+        # mid-write (OOM-kill, SIGKILL, power loss) between write_text()
+        # truncating the file and the new content landing destroys
+        # whatever was there before, confirmed live by writing a real
+        # 5000-byte file and simulating that exact crash moment: the file
+        # became 0 bytes. See sarva.atomic_write for the shared fix, the
+        # same one sarva.config/sarva.memory.session already use.
         p = _within_workdir(ctx.workdir, args["path"])
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(args["content"])
+        atomic_write_text(p, args["content"])
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=f"wrote {p}")])
 
 

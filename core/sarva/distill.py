@@ -27,6 +27,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from sarva.atomic_write import atomic_write_text
 from sarva.multimodal.content import Message, TextBlock
 from sarva.providers.base import GenerateRequest, Provider, ProviderError, complete
 
@@ -95,9 +96,16 @@ async def distill(
 
 
 def save_jsonl(records: list[DistillationRecord], path: Path) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(asdict(record)) + "\n")
+    """Atomic write, not a direct `path.open("w")`: confirmed live that
+    `"w"` mode truncates the file to 0 bytes the instant it's opened,
+    before a single record is written -- a crash between that open and
+    the write completing destroys every previously-saved distillation
+    record, real generated data that cost real provider API calls to
+    produce (see `DistillationError`'s own docstring on not throwing
+    away expensive completions). Same shared fix as `sarva.config`/
+    `sarva.memory.session`/`WriteFileTool` -- see `sarva.atomic_write`."""
+    content = "".join(json.dumps(asdict(record)) + "\n" for record in records)
+    atomic_write_text(path, content)
 
 
 def load_jsonl(path: Path) -> list[DistillationRecord]:

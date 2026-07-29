@@ -75,6 +75,16 @@ Verified both the same way: reverted each fix and watched its new test
 fail for the exact right reason (the raw `KeyError`; a clean pass where
 a rejection should have fired) before re-applying.
 
+**`save()` writes atomically, not via a direct `path.write_text()`.**
+The same interrupted-write bug already found and fixed in `core`'s
+`sarva.config`/`sarva.memory.session` had an unfixed twin here:
+`write_text()` truncates the file to 0 bytes the instant it's opened,
+before a single byte of new content is written, confirmed live before
+fixing it. A crash mid-write destroys a previously-trained, real
+tokenizer — hours of BPE merge-learning, not regenerable from the saved
+file itself. Fixed via `sarva_foundry.atomic_write` — see the training
+chapter for the fuller history of this bug class across `foundry`.
+
 ## Try it
 
 ```bash

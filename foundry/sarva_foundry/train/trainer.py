@@ -42,6 +42,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from sarva_foundry.atomic_write import atomic_write
 from sarva_foundry.train.dpo import dpo_loss, sequence_logprobs
 from sarva_foundry.train.schedule import WarmupCosineSchedule
 
@@ -205,13 +206,28 @@ class Trainer:
         return loss.item()
 
     def save_checkpoint(self, path: Path) -> None:
-        torch.save(
-            {
-                "model_state": self.model.state_dict(),
-                "optimizer_state": self.optimizer.state_dict(),
-                "step": self.step,
-            },
+        """Atomic write, not a direct `torch.save(obj, path)`: confirmed
+        live that an interrupted `torch.save` (simulated by truncating a
+        real, trained checkpoint mid-write) leaves a file `load_checkpoint`
+        can't read at all (`PytorchStreamReader failed reading zip
+        archive: failed finding central directory`) -- destroying not
+        just this save's new content but, since `torch.save` opens the
+        target path with truncate-on-open semantics same as `open(...,
+        "w")`, whatever checkpoint was already there, i.e. real GPU-hours
+        of prior training progress. See `sarva_foundry.atomic_write` for
+        the shared fix (mirrored from `sarva.atomic_write`, not shared,
+        since `core` and `sarva_foundry` have no dependency on each
+        other)."""
+        atomic_write(
             path,
+            lambda tmp_path: torch.save(
+                {
+                    "model_state": self.model.state_dict(),
+                    "optimizer_state": self.optimizer.state_dict(),
+                    "step": self.step,
+                },
+                tmp_path,
+            ),
         )
 
     def load_checkpoint(self, path: Path) -> None:

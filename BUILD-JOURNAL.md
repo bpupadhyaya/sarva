@@ -8409,3 +8409,97 @@ Gemini's Files API for long-video input (no API key here to verify
 live); a first pass at code-signing/notarization for the desktop
 release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## The atomic-write-on-save fix was never centralized, so it never propagated past the two places it started -- three more real call sites had the identical unfixed bug
+
+Found by a sweep specifically looking for "other duplicated logic that
+may have drifted the same way" the just-fixed `answer_reward`
+sign-blindness bug did -- a pattern that has now paid off twice in a
+row. The already-shipped atomic-write fix (`sarva.config`/`sarva.
+memory.session`, several milestones back: write to a sibling temp file,
+then `os.replace()` into place, so a crash mid-write can never leave
+the real path holding a truncated, destroyed file) was implemented
+twice, independently, in those two modules -- and never factored into a
+shared helper. Nothing carried the fix to the *other* real places in
+this codebase writing equally valuable, hard-to-regenerate data
+directly with the identical unfixed pattern.
+
+**Three more real sites found, and independently live-reproduced
+before fixing, not assumed from the shape of the bug alone:**
+
+- `sarva.agent.tools.WriteFileTool.run()` -- the highest blast radius
+  of the three: this tool runs on essentially every agent
+  file-editing turn, against arbitrary real user files, not just this
+  project's own state. Confirmed live: wrote a real 5000-byte file,
+  simulated the exact truncate-on-open crash moment, and the file
+  became 0 bytes -- a previously-good file destroyed by a crash with
+  zero bytes of the new content ever landing.
+- `sarva_foundry.train.trainer.Trainer.save_checkpoint()` -- the most
+  severe consequence of the three. Confirmed live: saved a real,
+  trained `DecoderOnlyTransformer` checkpoint, truncated it to
+  simulate an interrupted `torch.save`, and `load_checkpoint` raised
+  `RuntimeError: PytorchStreamReader failed reading zip archive: failed
+  finding central directory` -- a crash at exactly the wrong moment
+  destroys not just the new save but the checkpoint that was already
+  there, i.e. real GPU-hours of training progress, not just a config
+  file. The same unfixed pattern was also present in
+  `sarva_foundry.tokenizer.bpe.ByteLevelBPETokenizer.save()` (a
+  trained tokenizer, hours of BPE merge-learning, not regenerable from
+  the saved file itself) and in `sarva.providers.foundry_provider.
+  save_checkpoint_bundle()`'s own `config.json` write (the file needed
+  to actually reconstruct the model before loading the -- already
+  atomically saved -- weights into it). Both confirmed live the same
+  way before fixing.
+- `sarva.distill.save_jsonl()` -- distillation records that cost real
+  provider API calls to generate. Confirmed live: the same
+  truncate-on-open moment destroyed a real, previously-saved JSONL
+  file.
+
+**Fixed by centralizing, not by re-copying the fix a fourth and fifth
+time.** A new `sarva.atomic_write` module holds one generic
+`atomic_write(path, write_fn)` helper (calls `write_fn` against a
+sibling temp path, then `os.replace()`s it into place) plus
+`atomic_write_bytes`/`atomic_write_text` convenience wrappers --
+generic over *how* the content is produced deliberately, since
+`Trainer.save_checkpoint` needs `torch.save`'s own zip-serialization
+logic, not a raw bytes/text write. `sarva.config`/`sarva.memory.
+session` were refactored onto this shared helper too, closing the
+exact "same fix, implemented twice, could silently diverge" risk this
+whole investigation started from. `sarva_foundry` gets a *mirrored*,
+not shared, copy of the same helper (`sarva_foundry.atomic_write`) --
+`core` and `sarva_foundry` intentionally share no dependency in
+either direction, the same boundary `sarva.distill`'s own docstring
+already documents, so the training-side sites use their own copy
+rather than pulling in `core`.
+
+**Verified every fix the same way:** for each of the five call sites,
+reverted just that source file via `git stash`, re-ran its new
+regression test, and confirmed it failed for the exact right reason
+(`Failed: DID NOT RAISE OSError`, since the reverted code never calls
+`os.replace()` at all) before restoring the fix. 8 new regression
+tests (a dedicated `sarva.atomic_write`/`sarva_foundry.atomic_write`
+test module each, plus one at each of the five call sites), all
+following the same "make `os.replace()` raise partway through a
+second write, assert the first write's content survives" shape already
+established for `sarva.config`/`sarva.memory.session`. 612 Python
+tests pass (604 pre-existing + 8 new), all unchanged. `ruff check`/
+`format --check` clean across `core/ tests/ foundry/ examples/`.
+`docs/memory.md`, `docs/agent-loop.md`, `docs/distillation.md`,
+`docs/foundry/training.md`, and `docs/foundry/tokenizer.md` updated.
+
+**Closes this specific bug class at every real call site currently in
+this codebase that writes valuable, hard-to-regenerate data directly**
+-- not a claim that no other "write real data to disk" code exists
+anywhere, but that the sweep that found these three found no others,
+and every site it did find is now fixed.
+
+**Next:** the Tauri `csp: null` gap (still deferred, needs a GUI/
+Windows machine this environment lacks); the no-retry-cap gap on
+`AgentLoop` (still deferred, a real feature decision); batching
+multiple concurrent inference requests (§3.6f, still a deliberate
+deferral -- real correctness risk); F1's real distributed training
+infrastructure (needs real multi-node compute this environment doesn't
+have); Gemini's Files API for long-video input (no API key here to
+verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this
+environment doesn't have -- likely stays deferred).

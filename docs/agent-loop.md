@@ -68,6 +68,19 @@ A tool that raises never crashes the loop — the exception becomes an
 same as any other tool failure it needs to react to. An unrecognized
 tool name gets the identical treatment rather than a hard stop.
 
+**`WriteFileTool` writes atomically, not via a direct `Path.write_text`.**
+A real bug found by actually simulating an interrupted write: this tool
+runs on essentially every agent file-editing turn, against arbitrary
+real user files — not just this project's own state. `write_text`'s
+default mode truncates the target to 0 bytes the instant it's opened,
+before a single byte of new content lands; a crash between that moment
+and the write completing (an OOM-kill, a `SIGKILL`, a real power loss)
+destroys whatever was there before, confirmed live by writing a real
+5000-byte file and simulating that exact crash moment. Fixed via the
+same shared `sarva.atomic_write` helper `sarva.config`/`sarva.memory.
+session` already use — see the memory chapter for the fuller history of
+this bug class and where else it was found and closed.
+
 **A real bug found in `RunShellTool`'s own timeout, not just an
 uncaught exception:** `asyncio.wait_for(proc.communicate(),
 timeout=...)` only cancels the *awaiting* coroutine on expiry — it

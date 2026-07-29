@@ -5,6 +5,8 @@ that actually respects the requested size."""
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from sarva_foundry.tokenizer import ByteLevelBPETokenizer
 
@@ -199,3 +201,36 @@ def test_save_and_load_roundtrip(tmp_path):
     assert reloaded.decode(tok.encode(text)) == text
     assert reloaded.merges == tok.merges
     assert reloaded.special_tokens == tok.special_tokens
+
+
+def test_save_does_not_destroy_the_previous_file_if_interrupted_mid_write(tmp_path, monkeypatch):
+    # A real bug found by actually simulating an interrupted write: this
+    # used to path.write_text() directly, which truncates the file to 0
+    # bytes the instant it's opened, before a single byte of new content
+    # is written. A crash mid-write destroyed a previously-trained, real
+    # tokenizer -- hours of BPE merge-learning, not regenerable from the
+    # saved file itself. Simulated here by making os.replace() raise
+    # partway through a second save.
+    tok = _trained(vocab_size=300)
+    path = tmp_path / "tokenizer.json"
+    tok.save(path)
+    good_bytes = path.read_bytes()
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated crash during os.replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    other = _trained(vocab_size=280)
+    with pytest.raises(OSError):
+        other.save(path)
+
+    assert path.read_bytes() == good_bytes
+    reloaded = ByteLevelBPETokenizer.load(path)  # must not raise
+    assert reloaded.merges == tok.merges

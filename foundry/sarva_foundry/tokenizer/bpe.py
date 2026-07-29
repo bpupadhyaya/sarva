@@ -26,6 +26,8 @@ from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 
+from sarva_foundry.atomic_write import atomic_write_text
+
 # Approximates GPT-2's pretokenizer regex (`'s|'t|'re|... | ?\p{L}+| ?\p{N}+|
 # ...`) using only stdlib `re`, which has no \p{L}/\p{N} Unicode property
 # escapes. `[^\W\d_]` = "word character that isn't a digit or underscore",
@@ -252,11 +254,18 @@ class ByteLevelBPETokenizer:
         return len(self.vocab) + len(self.special_tokens)
 
     def save(self, path: Path) -> None:
+        # Atomic write, not a direct path.write_text(): confirmed live
+        # that write_text()'s "w" mode truncates the file to 0 bytes the
+        # instant it's opened, before a single byte of new content is
+        # written -- a crash between that open and the write completing
+        # destroys a previously-trained, real tokenizer (hours of BPE
+        # merge-learning, not regenerable from the saved file itself).
+        # See sarva_foundry.atomic_write for the shared fix.
         data = {
             "merges": self.merges,
             "special_tokens": self.special_tokens,
         }
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
     @classmethod
     def load(cls, path: Path) -> ByteLevelBPETokenizer:

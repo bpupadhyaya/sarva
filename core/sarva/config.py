@@ -56,6 +56,8 @@ import os
 import sys
 from pathlib import Path
 
+from sarva.atomic_write import atomic_write_text
+
 if sys.platform == "win32":
     import msvcrt
 else:
@@ -171,15 +173,19 @@ def _write_config(path: Path, data: dict[str, str]) -> None:
     the new one, never a partial one. `os.replace()` also means the
     resulting file's permissions are exactly the temp file's (0600),
     with no separate `os.chmod` needed afterward -- a POSIX rename
-    replaces the target inode entirely."""
-    content = json.dumps(data, indent=2)
-    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
+    replaces the target inode entirely.
+
+    Delegates the actual temp-file-then-`os.replace()` mechanics to
+    `sarva.atomic_write` -- this function used to have its own inline
+    copy of that logic, independently reinvented from
+    `sarva.memory.session.SessionStore.save`'s identical fix rather than
+    sharing it, the exact "same fix, implemented twice, could silently
+    diverge" risk a later sweep of this codebase found repeated at
+    several OTHER real call sites too (`WriteFileTool`, foundry
+    checkpoint saving, `distill.save_jsonl`) -- see
+    `sarva.atomic_write`'s own docstring. Centralizing here closes that
+    gap for this module's own two writers, not just the new ones."""
+    atomic_write_text(path, json.dumps(data, indent=2), mode=0o600)
 
 
 def save_config(values: dict[str, str], path: Path | None = None) -> None:

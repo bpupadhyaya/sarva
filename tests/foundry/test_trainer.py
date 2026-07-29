@@ -7,6 +7,9 @@ the round-trip."""
 
 from __future__ import annotations
 
+import os
+
+import pytest
 import torch
 from sarva_foundry.model import DecoderOnlyTransformer, TransformerConfig
 from sarva_foundry.train import Trainer, TrainerConfig, WarmupCosineSchedule
@@ -67,6 +70,49 @@ def test_checkpoint_resume_is_bit_identical_to_uninterrupted_training(tmp_path):
     assert final_a.keys() == final_c.keys()
     for key in final_a:
         assert torch.allclose(final_a[key], final_c[key], atol=1e-6), f"mismatch at {key}"
+
+
+def test_save_checkpoint_does_not_destroy_the_previous_checkpoint_if_interrupted_mid_write(
+    tmp_path, monkeypatch
+):
+    # A real bug found by actually simulating an interrupted write: this
+    # used to torch.save() directly onto the real checkpoint path, which
+    # truncates it immediately on open. A crash mid-save destroyed a
+    # previously-good, real checkpoint -- confirmed live: a genuine
+    # trained checkpoint truncated mid-write became unreadable
+    # (`PytorchStreamReader failed reading zip archive: failed finding
+    # central directory`), a training run's real GPU-hours of progress
+    # gone, not just a config file. Simulated here by making
+    # os.replace() raise partway through a second save -- the real
+    # checkpoint must still hold the first, complete save's content, and
+    # remain genuinely loadable.
+    config = _config()
+    x, y = _fixed_batch(config)
+    trainer = Trainer(_seeded_model(config))
+    trainer.train_step(x, y)
+    ckpt_path = tmp_path / "checkpoint.pt"
+    trainer.save_checkpoint(ckpt_path)
+    good_bytes = ckpt_path.read_bytes()
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated crash during os.replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    trainer.train_step(x, y)
+    with pytest.raises(OSError):
+        trainer.save_checkpoint(ckpt_path)
+
+    assert ckpt_path.read_bytes() == good_bytes
+    reloaded = Trainer(_seeded_model(config))
+    reloaded.load_checkpoint(ckpt_path)  # must not raise
+    assert reloaded.step == 1
 
 
 def test_checkpoint_without_optimizer_state_would_diverge():
