@@ -8156,3 +8156,92 @@ Gemini's Files API for long-video input (no API key here to verify
 live); a first pass at code-signing/notarization for the desktop
 release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## config.json's concurrent-process-write race, reconsidered and closed -- a real, narrow fix, not the "bigger feature" it was first deferred as
+
+Named twice already in this journal (the confirm-gate-bypass sweep,
+the CSWSH sweep) as a real gap deliberately deferred alongside two
+other genuinely bigger design decisions (the AgentLoop no-retry-cap
+feature, the Tauri `csp: null` gap needing a GUI this environment
+doesn't have). On reflection, reconsidered directly rather than left
+deferred indefinitely: file locking around a read-modify-write cycle
+is a real, narrow, well-precedented correctness fix -- the same tier of
+change as the already-shipped atomic-write-on-save fix, not a new
+feature or an architectural decision, and (unlike the Tauri CSP change)
+fully verifiable via the existing automated test suite with no GUI
+needed.
+
+**The mechanism:** `save_config`/`unset_config`'s read-modify-write
+(`existing = load_config(path); existing.update(values);
+_write_config(path, existing)`) was never locked. Two callers racing
+this sequence -- the CLI and the desktop app, or two CLI invocations --
+can both read the same "before" state, each add a different key, and
+each write their own merged dict back; the second write silently
+overwrites the first's key with no error at all. Confirmed live with
+two real threads performing genuinely concurrent `save_config` calls:
+a real `OPENAI_API_KEY` saved by one caller vanished entirely after a
+second, concurrent caller's own unrelated save completed -- a genuine
+lost update, not a hypothetical race.
+
+**A different bug class from the already-fixed atomic-write-on-save
+gap, not a duplicate of it:** that fix (`_write_config`'s own
+docstring) makes each *individual* write crash-safe -- a reader can
+never see a torn file. It does nothing to serialize *two separate*
+read-modify-write cycles against each other; each cycle's own write is
+individually atomic and individually correct, but the two cycles
+together still produce a lost update, since neither caller's "before"
+snapshot accounts for the other's concurrent change.
+
+**Fixed with a real, cross-process exclusive lock** (`fcntl.flock` on
+POSIX, `msvcrt.locking` on Windows) held for the entire read-modify-
+write critical section -- not just the final write -- on a dedicated
+sibling `.lock` file, deliberately never the config file itself, so it
+can never interfere with `_write_config`'s own atomic-rename mechanism.
+A plain reader (`load_config`/`get_env`) never needs to acquire this
+lock at all: the atomic write already guarantees a reader only ever
+sees a complete old or new version, never a partial one -- locking is
+only needed to serialize writers against each other, not readers
+against writers.
+
+**Honestly scoped the same way this module's own permissions fix
+already is:** the Windows branch uses a real, standard Windows locking
+API (`msvcrt.locking`), implemented and reasoned through correctly --
+but unlike this project's TTS Windows branch, which a genuine
+`windows-latest` CI job exercises end to end, no CI job actually runs
+`config.py`'s own tests on real Windows (`windows-audio` only runs
+`test_audio.py` there). Named directly rather than silently assumed
+equivalent to the POSIX path's own live verification.
+
+**Verified the new tests are real, using a technique this project
+hasn't used before -- deterministic thread interleaving via a barrier
+and a monkeypatched sleep, rather than hoping real scheduling races
+cooperate:** one test proves the lock primitive itself genuinely
+serializes two concurrent acquirers (a `threading.Barrier` plus a real
+sleep while the first holds the lock, so the second's attempt
+provably has to wait); a second test proves the real bug is fixed
+end-to-end by widening `_write_config`'s own critical section with a
+monkeypatched sleep, forcing two concurrent `save_config` calls to
+genuinely overlap instead of getting lucky. Reverted the fix and
+watched both fail -- one with `ImportError: cannot import name
+'_exclusive_lock'`, the other with the real lost update (`KeyError:
+'OPENAI_API_KEY'`) -- before re-applying. All 16 pre-existing config
+tests pass unchanged. 2 new tests, 593 -> 595 Python tests. `docs/
+packaging.md` updated.
+
+**This closes out every one of the three previously-deferred, real
+candidates except the Tauri `csp: null` gap** (still genuinely blocked
+on needing a GUI/Windows machine this environment doesn't have to
+verify a CSP change doesn't break real app behavior) and the AgentLoop
+no-retry-cap gap (still genuinely a feature decision -- picking a
+retry-cap policy -- not a narrow correctness fix).
+
+**Next:** the Tauri `csp: null` gap (still deferred, needs a GUI);
+the no-retry-cap gap on `AgentLoop` (still deferred, a real feature
+decision); batching multiple concurrent inference requests (§3.6f,
+still a deliberate deferral -- real correctness risk); F1's real
+distributed training infrastructure (needs real multi-node compute
+this environment doesn't have); Gemini's Files API for long-video
+input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have -- likely stays
+deferred).

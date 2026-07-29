@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import stat
 import sys
+import threading
+import time
 
 import pytest
 from sarva.config import get_env, load_config, save_config, unset_config
@@ -94,6 +96,86 @@ def test_save_config_tightens_permissions_on_a_file_that_already_existed_insecur
     save_config({"ANTHROPIC_API_KEY": "sk-ant-test"}, path=path)
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_exclusive_lock_actually_serializes_two_concurrent_acquirers(tmp_path):
+    # Proves the primitive save_config/unset_config's race fix depends
+    # on genuinely works: a second acquirer must block until the first
+    # releases, not interleave. Widened with a real sleep while A holds
+    # the lock (and a barrier so B's attempt genuinely overlaps with
+    # A's critical section, not just runs after it by luck) so the
+    # ordering below is deterministic, not a race the test itself could
+    # flake on.
+    from sarva.config import _exclusive_lock
+
+    lock_path = tmp_path / "test.lock"
+    order: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def holder():
+        with _exclusive_lock(lock_path):
+            order.append("A-acquired")
+            barrier.wait()
+            time.sleep(0.2)
+            order.append("A-released")
+
+    def waiter():
+        barrier.wait()
+        time.sleep(0.05)  # give A a head start so B's attempt genuinely blocks
+        with _exclusive_lock(lock_path):
+            order.append("B-acquired")
+
+    t1 = threading.Thread(target=holder)
+    t2 = threading.Thread(target=waiter)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert order == ["A-acquired", "A-released", "B-acquired"]
+
+
+def test_save_config_survives_two_concurrent_callers_with_no_lost_update(tmp_path, monkeypatch):
+    # A real bug found by actually simulating two concurrent callers
+    # (e.g. the CLI and the desktop app, or two CLI invocations): the
+    # unlocked read-modify-write in save_config/unset_config let both
+    # read the SAME "before" state and each write their own merged dict
+    # back -- the second write silently discarded the first's key, a
+    # genuine lost update, confirmed live before this fix. A real sleep
+    # injected into _write_config (called while the lock is held)
+    # widens the critical section so a second, concurrent save_config
+    # call genuinely has to wait rather than getting lucky with thread
+    # scheduling -- the same "prove it deterministically, don't hope"
+    # discipline as the lock-serialization test above.
+    import sarva.config as config_module
+
+    path = tmp_path / "config.json"
+    save_config({"ANTHROPIC_API_KEY": "sk-original"}, path=path)
+
+    real_write_config = config_module._write_config
+
+    def slow_write_config(write_path, data):
+        time.sleep(0.1)
+        real_write_config(write_path, data)
+
+    monkeypatch.setattr(config_module, "_write_config", slow_write_config)
+
+    t1 = threading.Thread(
+        target=save_config, args=({"OPENAI_API_KEY": "sk-a"},), kwargs={"path": path}
+    )
+    t2 = threading.Thread(
+        target=save_config, args=({"GEMINI_API_KEY": "sk-b"},), kwargs={"path": path}
+    )
+    t1.start()
+    time.sleep(0.02)  # ensure t1 has entered the critical section first
+    t2.start()
+    t1.join()
+    t2.join()
+
+    result = load_config(path)
+    assert result["ANTHROPIC_API_KEY"] == "sk-original"
+    assert result["OPENAI_API_KEY"] == "sk-a"
+    assert result["GEMINI_API_KEY"] == "sk-b"
 
 
 def test_save_config_creates_the_parent_directory(tmp_path):

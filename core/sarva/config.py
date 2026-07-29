@@ -50,9 +50,16 @@ rejecting rather than silently sanitizing).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import sys
 from pathlib import Path
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 DEFAULT_CONFIG_PATH = Path.home() / ".sarva" / "config.json"
 
@@ -94,6 +101,58 @@ def load_config(path: Path | None = None) -> dict[str, str]:
         raise ConfigError(f"config file at {path} is corrupted (invalid JSON): {e}") from e
 
 
+@contextlib.contextmanager
+def _exclusive_lock(path: Path):
+    """Holds a real, cross-process exclusive lock (`flock` on POSIX,
+    `msvcrt.locking` on Windows) on a dedicated sibling `.lock` file --
+    never the config file itself, so it never interferes with
+    `_write_config`'s own atomic-rename mechanism -- for the entire
+    duration of the caller's read-modify-write critical section.
+
+    A real bug found by actually simulating two concurrent callers:
+    `save_config`/`unset_config` both did a plain, unlocked
+    read-then-write (`existing = load_config(path); ...; _write_config(
+    path, existing)`). Two callers (e.g. the CLI and the desktop app,
+    or two CLI invocations) racing this sequence can both read the SAME
+    "before" state, each add a different key, and each write their own
+    merged dict back -- the second write silently overwrites the
+    first's key with no error, a genuine lost update, confirmed live:
+    a real `OPENAI_API_KEY` saved by one caller vanished entirely after
+    a second, concurrent caller's own unrelated save. The already-fixed
+    atomic-write-on-save bug (`_write_config`'s own docstring) makes
+    each individual write crash-safe; it does nothing to serialize TWO
+    separate read-modify-write cycles against each other -- a different
+    bug class, closed here instead.
+
+    Deliberately a dedicated `.lock` file, never the config file: a
+    reader (`load_config`/`get_env`) never needs to acquire this lock at
+    all, since `_write_config`'s atomic `os.replace()` already
+    guarantees a reader only ever sees a complete old or new version,
+    never a torn one -- locking is only needed to serialize writers
+    against EACH OTHER, not readers against writers."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        # Content is irrelevant -- this file exists purely as a lock
+        # target -- but msvcrt.locking() requires the byte range being
+        # locked to actually exist in the file, so one byte is written
+        # (and the file truncated fresh) on every acquisition.
+        f.write(b"\0")
+        f.flush()
+        f.seek(0)
+        if sys.platform == "win32":
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
 def _write_config(path: Path, data: dict[str, str]) -> None:
     """Writes `data` to `path` atomically, with owner-only permissions.
 
@@ -127,12 +186,16 @@ def save_config(values: dict[str, str], path: Path | None = None) -> None:
     """Merges `values` into whatever's already saved (a caller setting
     only `ANTHROPIC_API_KEY` doesn't wipe out a previously saved
     `OPENAI_API_KEY`), then writes the whole file back with owner-only
-    permissions -- see this module's own docstring for why."""
+    permissions -- see this module's own docstring for why. The whole
+    read-modify-write cycle holds `_exclusive_lock` (see its own
+    docstring for the real concurrent-write race this closes)."""
     path = path or DEFAULT_CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = load_config(path)
-    existing.update(values)
-    _write_config(path, existing)
+    lock_path = path.with_name(f"{path.name}.lock")
+    with _exclusive_lock(lock_path):
+        existing = load_config(path)
+        existing.update(values)
+        _write_config(path, existing)
 
 
 def unset_config(names: list[str], path: Path | None = None) -> list[str]:
@@ -149,12 +212,14 @@ def unset_config(names: list[str], path: Path | None = None) -> list[str]:
     caller (the CLI) can report exactly what changed rather than
     assuming every requested name was present."""
     path = path or DEFAULT_CONFIG_PATH
-    existing = load_config(path)
-    removed = [name for name in names if name in existing]
-    for name in removed:
-        del existing[name]
-    if removed:
-        _write_config(path, existing)
+    lock_path = path.with_name(f"{path.name}.lock")
+    with _exclusive_lock(lock_path):
+        existing = load_config(path)
+        removed = [name for name in names if name in existing]
+        for name in removed:
+            del existing[name]
+        if removed:
+            _write_config(path, existing)
     return removed
 
 

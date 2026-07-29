@@ -516,6 +516,37 @@ save. Real and meaningful on POSIX (macOS/Linux); on Windows,
 ACL isolation — named honestly as a real, separate, deferred gap rather
 than assumed equivalent.
 
+**A real, separate race found and closed later: two concurrent callers
+could silently lose each other's saved key.** `save_config`/
+`unset_config`'s read-modify-write (`existing = load_config(path);
+existing.update(values); _write_config(path, existing)`) was never
+locked — two callers racing this sequence (the CLI and the desktop
+app, or two CLI invocations) can both read the same "before" state,
+each add a different key, and each write their own merged dict back;
+the second write silently overwrites the first's key with no error.
+Confirmed live with two real threads: a genuine `OPENAI_API_KEY` saved
+by one caller vanished entirely after a second, concurrent caller's own
+unrelated save completed. A different bug class from the already-fixed
+atomic-write-on-save gap — that fix makes each *individual* write
+crash-safe; it does nothing to serialize *two separate* read-modify-
+write cycles against each other. Fixed with a real, cross-process
+exclusive lock (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows)
+held for the entire read-modify-write critical section, on a dedicated
+sibling `.lock` file — never the config file itself, so it never
+interferes with `_write_config`'s own atomic-rename mechanism, and a
+plain reader (`load_config`/`get_env`) never needs to acquire it at all
+(the atomic write already guarantees a reader only ever sees a complete
+old or new version). **Honestly scoped the same way the permissions fix
+above is:** the Windows branch uses a real, standard Windows locking
+API, but — unlike this project's TTS Windows branch, which a genuine
+`windows-latest` CI job exercises end to end — no CI job actually runs
+`config.py`'s tests on real Windows (`windows-audio` only runs
+`test_audio.py` there), so it's implemented and reasoned through
+correctly but not live-verified the same way. Verified the new tests
+are real: reverted the fix and watched both fail — one with
+`ImportError: cannot import name '_exclusive_lock'`, the other with the
+real lost-update (`KeyError: 'OPENAI_API_KEY'`) — before re-applying.
+
 `Onboarding.tsx` is the screen this makes possible: on mount it polls
 `GET /doctor`; if any provider (including a reachable Ollama) is already
 configured, it completes immediately and the user never sees it. If
