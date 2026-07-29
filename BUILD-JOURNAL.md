@@ -6631,3 +6631,81 @@ to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred). No open candidates remain from
 recent sweeps -- worth a fresh one next time.
+
+## GRPO silently corrupted every model parameter with NaN on a single-completion reward group -- the most severe finding across every sweep so far, and a genuinely new bug shape
+
+A fresh Explore-agent sweep, pointed at genuinely unswept corners
+(foundry/sarva_foundry/rl/, ablation.py, mcp_client.py's handshake
+itself, apps/desktop/src/ files beyond App.tsx, budget.py/events.py).
+Found something categorically different from every prior fix in this
+journal: not a crash, not an unreachable feature -- a *silent
+correctness bug* in `Trainer.grpo_step` (`foundry/sarva_foundry/
+train/trainer.py`).
+
+The method's own docstring makes an explicit promise: a zero-variance
+reward group (no relative signal to learn from) is "a deliberate no-op
+step... rather than divide by (near-)zero." The guard implementing that
+promise is `if std < 1e-6: skip`. But a group of exactly **one**
+completion -- a realistic input, since neither `build_grpo_batch` nor
+`grpo_step` enforces a minimum group size, and a small/resource-
+constrained rollout or a group filtered down to one after removing
+timed-out/errored completions are both real, not contrived, cases --
+makes `rewards.std()` divide by `n-1=0` under PyTorch's default
+unbiased estimator. That produces `nan`, not a small number. And
+`nan < 1e-6` evaluates to `False` in both PyTorch and plain Python (NaN
+comparisons are always false), so the guard silently let it through.
+Confirmed directly on a real, freshly-initialized tiny transformer,
+not assumed from the math: `grpo_step` on a 1-completion group returned
+`loss: nan`, and `any(torch.isnan(p).any() for p in model.parameters())`
+was `True` immediately after -- every single parameter in the model
+poisoned with NaN in one silent step, with no exception, no warning
+beyond PyTorch's own benign "degrees of freedom is <= 0" notice that
+says nothing about the actual consequence.
+
+**Why this is more severe than every prior fix in this journal, not
+just another instance of an established pattern:** every other
+"corrupted state" or "uncaught exception" bug this project has found
+fails loudly (a crash, a traceback) or fails safely (a clean fallback).
+This one fails *silently* and *destructively* -- a real training run
+hitting this exact group-size-1 case would keep running with a fully
+NaN'd model and no indication anything went wrong until someone
+happened to inspect the weights or notice every subsequent loss was
+also NaN. Silent, undetected model corruption is a materially worse
+failure mode than a crash: a crash stops you immediately; this would
+have kept "training" garbage for however long the run continued.
+
+**Fixed with the smallest possible change, matching the existing
+guard's own documented contract rather than inventing a new one:**
+`if torch.isnan(std) or std < 1e-6:` -- NaN-variance genuinely *is* the
+same "no relative signal to learn from" situation the guard already
+names and handles for the near-zero case; this just closes the one gap
+in how that condition was actually checked.
+
+**Verified the new test is real, the strongest possible form of
+revert-and-verify for a silent-corruption bug:** reverted the fix and
+watched the new test fail not on an exception or a crash but on the
+plain assertion `assert loss == 0.0` actually evaluating `nan == 0.0`
+(false) -- the test doesn't just check "no crash," it explicitly
+asserts `not torch.isnan(after[key]).any()` on every model parameter
+after the step, so a regression here would be caught even if some
+future change made the NaN silently propagate somewhere the loss-value
+check alone wouldn't reveal. All 9 pre-existing RL/reasoning-training
+tests still pass unchanged.
+
+1 new test, 558 -> 559 Python tests. `ruff check`/`format --check`
+clean. `docs/foundry/training.md` updated.
+
+**Next:** the same sweep found two more real candidates, ranked lower:
+`sarva run --mcp-server <bad command>` crashes with a raw, uncaught
+traceback (a simple typo in a real, documented, user-facing flag) --
+`connect_stdio_mcp_server`/`connect_http_mcp_server`/`list_mcp_tools`
+are called with zero try/except anywhere on that path, the same
+"raw exception instead of clean CLI error" class fixed roughly a dozen
+times already, just never applied to the MCP connection handshake
+itself (only `--mcp-env`/`--mcp-header` *parsing* was previously
+fixed); and `AblationResult.get()` raises a bare `StopIteration` with
+no context on an unknown/misspelled arm name (lower severity --
+research-tool misuse, not a live request path). Batching (§3.6f), F1's
+distributed training infrastructure, Gemini's Files API for long
+video, and desktop code-signing/notarization remain deferred for the
+reasons already logged above.

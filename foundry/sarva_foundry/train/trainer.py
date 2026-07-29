@@ -165,7 +165,23 @@ class Trainer:
             )
         rewards_t = torch.tensor(rewards, dtype=torch.float32)
         std = rewards_t.std()
-        if std < 1e-6:
+        # A real bug found by actually running this exact scenario: a
+        # group of exactly ONE completion (a realistic input -- a
+        # small/resource-constrained rollout, or a group reduced to one
+        # after filtering out timed-out/errored completions; neither
+        # build_grpo_batch nor this method enforces a minimum group
+        # size) makes `.std()` divide by n-1=0 under PyTorch's default
+        # unbiased estimator, producing `nan` -- not a small number.
+        # `nan < 1e-6` is `False` in both PyTorch and plain Python (NaN
+        # comparisons are always False), so the zero-variance guard
+        # above was silently bypassed: advantages became NaN, the loss
+        # became NaN, and `loss.backward()` propagated NaN into EVERY
+        # model parameter in one step -- silent, undetected model
+        # poisoning, not a crash, directly contradicting this method's
+        # own documented "deliberate no-op step" contract. `torch.isnan`
+        # explicitly treats this the same as the already-handled
+        # near-zero case.
+        if torch.isnan(std) or std < 1e-6:
             self.step += 1
             return 0.0
 

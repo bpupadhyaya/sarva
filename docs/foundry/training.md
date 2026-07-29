@@ -401,6 +401,25 @@ exactly: measure a target token's sampling rate before training,
 train for real, measure again — 12.5% → 69% in the actual test run
 recorded in BUILD-JOURNAL.md, not an assumed number.
 
+**A real bug found in that "deliberate no-op" guard itself, not just
+verified to exist:** a group of exactly *one* completion — a realistic
+input, since neither `build_grpo_batch` nor `grpo_step` enforces a
+minimum group size, and a small/resource-constrained rollout or a group
+filtered down to one after removing timed-out/errored completions are
+both real cases — makes `rewards.std()` divide by `n-1=0` under
+PyTorch's default unbiased estimator, producing `nan`, not a small
+number. `nan < 1e-6` evaluates to `False` (NaN comparisons are always
+false), so the zero-variance guard silently let a NaN advantage,
+NaN loss, and NaN gradient through — poisoning every model parameter
+with NaN in one step, confirmed directly on a real tiny transformer
+before this fix. Worse than a crash: it's silent, undetected model
+corruption during a real training loop, not an error anyone would
+notice until much later. Fixed by treating `torch.isnan(std)` the same
+as the already-handled near-zero case — one extra condition, no change
+to the documented no-op contract itself, since NaN-variance genuinely
+*is* the same "no relative signal to learn from" situation the
+existing guard already names.
+
 `examples/14_grpo_rl_training.py` runs that exact scenario and prints
 the real before/after rates, then prints — labeled explicitly as
 illustrative, not executed — exactly how `CODING_TASKS`/

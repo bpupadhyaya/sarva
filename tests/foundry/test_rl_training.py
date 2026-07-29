@@ -98,6 +98,36 @@ def test_grpo_step_is_a_deliberate_noop_when_the_group_has_zero_variance():
         assert torch.equal(before[key], after[key]), f"weights changed at {key} on a no-op step"
 
 
+def test_grpo_step_is_a_deliberate_noop_on_a_single_completion_group_not_nan_corruption():
+    # A real bug found by actually running this exact scenario: a group
+    # of exactly ONE completion is a realistic input (a small/resource-
+    # constrained rollout, or a group reduced to one after filtering out
+    # timed-out/errored completions -- neither build_grpo_batch nor
+    # grpo_step enforces a minimum group size). `rewards.std()` on a
+    # single element divides by n-1=0 under PyTorch's default unbiased
+    # estimator, producing `nan` -- not a small number. `nan < 1e-6` is
+    # `False` (NaN comparisons are always False), so the zero-variance
+    # guard the test above already exercises was silently bypassed for
+    # THIS specific case: advantages became NaN, the loss became NaN,
+    # and backprop poisoned every model parameter with NaN in one silent
+    # step -- confirmed directly before this fix, not assumed from the
+    # zero-variance case alone (a genuinely different code path: `std ==
+    # 0.0` for 2+ identical rewards vs. `std is nan` for exactly 1).
+    model = DecoderOnlyTransformer(_tiny_config())
+    trainer = Trainer(model)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    x, y, mask = build_grpo_batch([1, 2, 3], [[4, 5]])
+    loss = trainer.grpo_step(x, y, mask, rewards=[1.0])
+
+    assert loss == 0.0
+    assert trainer.step == 1
+    after = model.state_dict()
+    for key in before:
+        assert not torch.isnan(after[key]).any(), f"NaN leaked into {key}"
+        assert torch.equal(before[key], after[key]), f"weights changed at {key} on a no-op step"
+
+
 def test_grpo_training_increases_the_rewarded_behaviors_probability():
     # The real end-to-end proof, mirroring DPO's preference-margin test:
     # after real GRPO training, the policy's probability of producing a
