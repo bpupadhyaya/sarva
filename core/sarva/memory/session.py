@@ -68,14 +68,28 @@ class SessionStore:
         return _MESSAGES_ADAPTER.validate_json(path.read_text())
 
     def save(self, name: str, messages: list[Message]) -> None:
+        # A real bug found by actually simulating an interrupted write:
+        # the previous version opened the real session file directly
+        # with O_TRUNC, which truncates it to 0 bytes immediately, before
+        # a single byte of the new content is written. A crash (OOM-kill,
+        # SIGKILL, power loss) between that open() and the write
+        # completing destroyed a previously-good, real conversation
+        # history -- confirmed live: a 150-byte valid session file became
+        # 0 bytes, and `load()` then raised a pydantic ValidationError on
+        # data that used to be perfectly fine. Fixed the standard way:
+        # write the new content to a sibling temp file first, then
+        # os.replace() it into place -- atomic on both POSIX and Windows,
+        # so the real path either still holds the last fully-written
+        # version or the brand new one, never a partial one.
         content = _MESSAGES_ADAPTER.dump_json(messages, indent=2)
         path = self._path(name)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(content)
-        # Covers a file that already existed with looser permissions --
-        # os.open's mode only applies when it actually creates the file.
-        os.chmod(path, 0o600)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
 
     def clear(self, name: str) -> None:
         self._path(name).unlink(missing_ok=True)

@@ -39,6 +39,34 @@ def test_save_config_merges_rather_than_overwriting_other_keys(tmp_path):
     }
 
 
+def test_save_config_does_not_destroy_the_previous_file_if_interrupted_mid_write(
+    tmp_path, monkeypatch
+):
+    # A real bug found by actually simulating an interrupted write: the
+    # previous implementation opened the real config file directly with
+    # O_TRUNC, truncating it to 0 bytes immediately -- before a single
+    # byte of new content was written. A crash (OOM-kill, SIGKILL, power
+    # loss) between that open() and the write completing destroyed every
+    # previously-saved key, not just failed to save the new one.
+    # Simulated by making os.replace() (the final, atomic commit step)
+    # raise partway through a second save.
+    import os as os_module
+
+    path = tmp_path / "config.json"
+    save_config({"ANTHROPIC_API_KEY": "sk-real-important-key"}, path=path)
+    assert path.stat().st_size > 0
+
+    def crash_before_replace(*args, **kwargs):
+        raise SystemExit("simulated crash before the atomic rename")
+
+    monkeypatch.setattr(os_module, "replace", crash_before_replace)
+    with pytest.raises(SystemExit):
+        save_config({"OPENAI_API_KEY": "sk-new-key-never-commits"}, path=path)
+    monkeypatch.undo()
+
+    assert load_config(path) == {"ANTHROPIC_API_KEY": "sk-real-important-key"}
+
+
 @_posix_only
 def test_save_config_writes_the_file_with_owner_only_permissions(tmp_path):
     # The real gap this pins: Path.write_text's default open() mode
@@ -112,6 +140,28 @@ def test_unset_config_preserves_owner_only_permissions_after_editing(tmp_path):
     unset_config(["ANTHROPIC_API_KEY"], path=path)
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_unset_config_does_not_destroy_the_previous_file_if_interrupted_mid_write(
+    tmp_path, monkeypatch
+):
+    # unset_config shares _write_config with save_config, so it inherits
+    # the same real bug and the same fix -- pinned separately since it's
+    # a distinct call site (edit-then-write, not merge-then-write).
+    import os as os_module
+
+    path = tmp_path / "config.json"
+    save_config({"ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-b"}, path=path)
+
+    def crash_before_replace(*args, **kwargs):
+        raise SystemExit("simulated crash before the atomic rename")
+
+    monkeypatch.setattr(os_module, "replace", crash_before_replace)
+    with pytest.raises(SystemExit):
+        unset_config(["ANTHROPIC_API_KEY"], path=path)
+    monkeypatch.undo()
+
+    assert load_config(path) == {"ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-b"}
 
 
 def test_get_env_returns_none_when_nothing_is_set(tmp_path, monkeypatch):

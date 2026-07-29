@@ -94,6 +94,35 @@ def load_config(path: Path | None = None) -> dict[str, str]:
         raise ConfigError(f"config file at {path} is corrupted (invalid JSON): {e}") from e
 
 
+def _write_config(path: Path, data: dict[str, str]) -> None:
+    """Writes `data` to `path` atomically, with owner-only permissions.
+
+    A real bug found by actually simulating an interrupted write: both
+    `save_config` and `unset_config` used to open the real config file
+    directly with `O_TRUNC`, which truncates it to 0 bytes immediately
+    -- before a single byte of the new content is written. A crash
+    (OOM-kill, SIGKILL, power loss) between that `open()` and the write
+    completing destroyed every previously-saved key, not just failed to
+    save the new one -- confirmed live: a valid config file with a real
+    saved key became 0 bytes, and the next `load_config()` call raised
+    `ConfigError` on data that used to be perfectly fine. Fixed the
+    standard way: write to a sibling temp file first, then
+    `os.replace()` into place -- atomic on both POSIX and Windows, so
+    the real path always holds either the last fully-written version or
+    the new one, never a partial one. `os.replace()` also means the
+    resulting file's permissions are exactly the temp file's (0600),
+    with no separate `os.chmod` needed afterward -- a POSIX rename
+    replaces the target inode entirely."""
+    content = json.dumps(data, indent=2)
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
 def save_config(values: dict[str, str], path: Path | None = None) -> None:
     """Merges `values` into whatever's already saved (a caller setting
     only `ANTHROPIC_API_KEY` doesn't wipe out a previously saved
@@ -103,15 +132,7 @@ def save_config(values: dict[str, str], path: Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = load_config(path)
     existing.update(values)
-    content = json.dumps(existing, indent=2)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
-    # Covers the case where `path` already existed with looser
-    # permissions (e.g. written by a version of this module predating
-    # this fix) -- os.open's mode argument only applies when it actually
-    # creates a new file, not to a pre-existing one.
-    os.chmod(path, 0o600)
+    _write_config(path, existing)
 
 
 def unset_config(names: list[str], path: Path | None = None) -> list[str]:
@@ -133,11 +154,7 @@ def unset_config(names: list[str], path: Path | None = None) -> list[str]:
     for name in removed:
         del existing[name]
     if removed:
-        content = json.dumps(existing, indent=2)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.chmod(path, 0o600)
+        _write_config(path, existing)
     return removed
 
 

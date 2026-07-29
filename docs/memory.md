@@ -60,6 +60,35 @@ produces, so `/ws/chat` clients (including the desktop app, via the
 `state_changed`-detail fix from a few milestones back) show it with no
 client-side changes needed.
 
+**`save()` itself used to be able to destroy a previously-good session
+on an interrupted write — a real bug found by actually simulating one,
+not a theoretical concern.** The permissions fix above wrote the new
+content via `os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+0o600)` — directly against the real session file. `O_TRUNC` truncates
+the file to 0 bytes the instant it's opened, *before* a single byte of
+the new content is written. A crash between that `open()` and the
+write completing (an OOM-kill, a `SIGKILL`, a real power loss) left the
+file empty — confirmed live: a valid, real 150-byte session file became
+0 bytes, and the next `load()` raised a pydantic `ValidationError` on
+history that used to be perfectly fine. Every prior "corrupted-on-disk-
+state" fix in this project (this file's own config/session/checkpoint/
+vector-memory fixes) made *reading* an already-corrupted file fail
+cleanly — none of them stopped `save()` itself from being the thing
+that turns a good file into a corrupt one. Fixed the standard way:
+write the new content to a sibling temp file first, then `os.replace()`
+into place — atomic on both POSIX and Windows, so the real path always
+holds either the last fully-written version or the brand new one,
+never a partial one. `sarva.config.save_config`/`unset_config` shared
+the identical bug (same `os.open(..., O_TRUNC)` pattern against the
+real credential file) and got the identical fix, factored into one
+shared `_write_config` helper rather than duplicated across both
+functions. Verified the new tests are real: simulating a crash right
+before the atomic rename step (by making `os.replace()` itself raise)
+and confirming the real file still holds its previous, complete
+content afterward — reverting the fix and re-running the same test
+confirms it fails because the reverted code never calls `os.replace()`
+at all.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:

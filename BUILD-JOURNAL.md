@@ -7618,3 +7618,100 @@ Gemini's Files API for long-video input (no API key here to verify
 live); a first pass at code-signing/notarization for the desktop
 release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## save() itself could destroy a previously-good session or config file on an interrupted write -- a new bug class this project's four prior "corrupted-on-disk-state" fixes never actually covered
+
+A fresh Explore-agent sweep at twenty-three rounds deep, pointed at
+genuinely fresh angles: hung-tool/no-timeout risk in AgentLoop's
+concurrent tool dispatch (real, but a bigger design decision than a
+narrow fix -- named below, not picked up this round), a config.json
+concurrent-write race between two processes (real, but a separate,
+harder problem -- named below), near-dup detection and corpus loading
+(both clean, already properly built), redirect-based SSRF (clean, each
+hop re-validated), and TTS subprocess timeouts (real, smaller, not
+picked up this round in favor of the more severe finding). The
+top-ranked finding is a genuinely new bug *class* this project's own
+four prior "corrupted-on-disk-state" fixes (config.json, session
+files, foundry checkpoints, vector memory) never actually covered:
+every one of those fixed what happens when `load()` reads an
+already-corrupted file. None of them asked whether `save()` itself
+could be the thing that creates the corruption.
+
+**The mechanism, confirmed live in both `SessionStore.save()` and
+`sarva.config.save_config`/`unset_config`:** all three wrote their new
+content via `os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+0o600)` -- directly against the real, already-existing file.
+`O_TRUNC` truncates the file to 0 bytes the instant it's opened, before
+a single byte of the new content is written. A crash between that
+`open()` and the write completing -- an OOM-kill, a `SIGKILL`, a real
+power loss, anything that can interrupt a process mid-syscall --
+destroys whatever was there before, unconditionally. Confirmed
+directly, not reasoned about in the abstract: a real, valid 150-byte
+session file (a genuine saved conversation) became 0 bytes the moment
+`save()`'s own `open()` call ran; `load()` then raised a pydantic
+`ValidationError` on history that used to be perfectly good. The
+identical reproduction against `sarva.config.save_config` destroyed a
+real, previously-saved `ANTHROPIC_API_KEY` the same way.
+
+**Fixed the standard way for both:** write the new content to a sibling
+temp file first, then `os.replace()` into place. `os.replace()` is
+atomic on both POSIX and Windows -- the real path always ends up
+holding either the last fully-written version or the brand new one,
+never a partial one, because the rename operation itself is a single
+filesystem-level step with no observable in-between state. A useful
+side effect: since a POSIX rename replaces the target inode entirely,
+the resulting file's permissions are exactly the temp file's (created
+with `0600` from the start), so the separate `os.chmod()` call this
+project's earlier permissions fixes added is no longer needed at all --
+one mechanism now closes both the permissions gap and the
+interrupted-write gap. `sarva.config`'s two call sites
+(`save_config`/`unset_config`) shared the identical bug and got the
+identical fix, factored into one `_write_config` helper rather than
+duplicated.
+
+**Verified the new tests are real, using a technique not used
+elsewhere in this journal:** rather than truncating a file after the
+fact (the technique every prior corrupted-on-disk-state test used),
+these tests monkeypatch `os.replace` itself to raise partway through a
+second save -- simulating a crash at the exact moment between "new
+content fully written to the temp file" and "atomically committed,"
+the precise window the fix is supposed to make safe. Reverted the fix
+and re-ran: all three new tests failed with `Failed: DID NOT RAISE
+SystemExit`, because the reverted code never calls `os.replace()` at
+all -- confirming the tests genuinely exercise the new atomic-commit
+step, not just checking round-trip behavior that would have passed
+either way. All 25 pre-existing config/session tests pass unchanged.
+3 new tests, 581 -> 584 Python tests. `docs/memory.md` updated.
+
+**Two related, real gaps found by the same sweep, deliberately not
+picked up this round (named honestly rather than silently
+implied-covered):**
+
+- `AgentLoop.run()`'s `asyncio.gather` over concurrent tool calls has
+  no per-tool or per-turn timeout. `RunShellTool` self-protects with
+  its own internal 30s timeout, but `McpToolAdapter.run()` (a remote or
+  stdio MCP server's `call_tool`) has none -- a hung MCP server blocks
+  the entire turn forever, silently withholding every other tool's
+  already-completed result too (confirmed live: a fast `echo` tool's
+  result never delivered because `gather` withholds ALL results until
+  every coroutine finishes). Bigger than a narrow bug fix -- picking a
+  timeout duration and deciding per-tool vs. loop-wide scope is closer
+  to a real design decision, the same "named, not silently fixed"
+  treatment this journal already gives the no-retry-cap gap.
+- `synthesize()`'s TTS subprocess calls (`core/sarva/audio.py`) have no
+  `timeout=`, unlike the sibling STT decode path, which explicitly
+  mirrors `RunShellTool`'s own timeout fix. A smaller, well-scoped gap
+  than the two above, just not picked up this specific round.
+
+**Next:** the AgentLoop tool-timeout gap and the TTS subprocess timeout
+gap named above; the config.json concurrent-process-write race (two
+processes both loading, editing, and writing back -- a lost-update
+race, not a corruption risk the atomic-rename fix already closes); the
+no-retry-cap gap named alongside the AgentLoop AssertionError fix;
+batching multiple concurrent inference requests (§3.6f, still a
+deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this
+environment doesn't have); Gemini's Files API for long-video input (no
+API key here to verify live); a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have -- likely stays deferred).

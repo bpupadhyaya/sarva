@@ -78,6 +78,39 @@ def test_save_tightens_permissions_on_a_file_that_already_existed_insecurely(sto
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_save_does_not_destroy_the_previous_file_if_interrupted_mid_write(
+    store, tmp_path, monkeypatch
+):
+    # A real bug found by actually simulating an interrupted write: the
+    # previous implementation opened the real session file directly
+    # with O_TRUNC, truncating it to 0 bytes immediately -- before a
+    # single byte of new content was written. A crash (OOM-kill,
+    # SIGKILL, power loss) between that open() and the write completing
+    # destroyed a previously-good, real conversation history. Simulated
+    # here by making os.replace() (the final, atomic commit step) raise
+    # partway through a second save -- the real session file must still
+    # hold the first, complete save's content afterward, not be left
+    # empty or partially written.
+    import os as os_module
+
+    original = [Message(role="user", content=[TextBlock(text="the real, important history")])]
+    store.save("s1", original)
+    path = tmp_path / "s1.json"
+    assert path.stat().st_size > 0
+
+    def crash_before_replace(*args, **kwargs):
+        raise SystemExit("simulated crash before the atomic rename")
+
+    monkeypatch.setattr(os_module, "replace", crash_before_replace)
+    with pytest.raises(SystemExit):
+        store.save(
+            "s1", [Message(role="user", content=[TextBlock(text="new content, never commits")])]
+        )
+    monkeypatch.undo()
+
+    assert store.load("s1") == original
+
+
 def test_clear_removes_the_session(store):
     store.save("temp", [Message(role="user", content=[TextBlock(text="x")])])
     assert store.load("temp") != []
