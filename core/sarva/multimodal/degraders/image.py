@@ -41,7 +41,14 @@ class ImageToTextDegrader:
             with Image.open(io.BytesIO(raw)) as img:
                 width, height = img.size
                 image_format = img.format or block.media_type
-        except UnidentifiedImageError as e:
+        except (UnidentifiedImageError, OSError) as e:
+            # A real bug found by actually degrading a genuinely
+            # truncated (not just unrecognizable) real JPEG: Pillow
+            # raises a plain OSError ("Truncated File Read") reading
+            # `.size` on a partially-decoded file, not
+            # UnidentifiedImageError -- that case reached this function's
+            # caller as a raw, uncontextualized PIL error instead of this
+            # degrader's own documented ImageDecodeError.
             raise ImageDecodeError(f"could not decode image for degradation: {e}") from e
 
         size_kb = len(raw) / 1024

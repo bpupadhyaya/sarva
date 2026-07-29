@@ -158,6 +158,31 @@ async def test_degrade_raises_a_clear_error_on_corrupt_image_bytes():
         await ImageToTextDegrader().degrade(block)
 
 
+async def test_degrade_raises_a_clear_error_on_a_truncated_real_image():
+    # A real bug found by actually degrading a genuinely truncated (not
+    # fully unrecognizable) real PNG: Pillow raises a plain
+    # OSError("Truncated File Read") reading `.size`, not
+    # UnidentifiedImageError -- the only exception this degrader's own
+    # except clause used to catch. That meant a truncated image reached
+    # AgentLoop's degradation fallback as a raw, uncontextualized PIL
+    # error instead of this degrader's own documented ImageDecodeError.
+    #
+    # The truncation point matters: PNG's fixed structure (8-byte
+    # signature, then a length+"IHDR"-typed chunk header, then 13 bytes
+    # of IHDR data) means cutting at a fixed 20 bytes always lands mid-
+    # IHDR-data-read regardless of image size, reliably reproducing
+    # Pillow's OSError rather than the too-short-to-even-identify
+    # UnidentifiedImageError a size-relative truncation can accidentally
+    # produce instead (confirmed directly: `raw[: len(raw) // 4]` on a
+    # 64x32 image hit UnidentifiedImageError, not this bug, while the
+    # exact same ratio on a 12x8 image hit OSError -- not a reliable
+    # regression pin either way).
+    raw = _png_bytes(64, 32)
+    block = ImageBlock(media_type="image/png", data=raw[:20])
+    with pytest.raises(ImageDecodeError, match="could not decode image for degradation"):
+        await ImageToTextDegrader().degrade(block)
+
+
 async def test_degrade_works_from_a_path_source(tmp_path):
     raw = _png_bytes(50, 50)
     path = tmp_path / "test.png"

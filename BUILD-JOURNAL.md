@@ -5953,3 +5953,83 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have — likely stays deferred).
+
+## A corrupt or truncated attached image crashed the whole agent loop instead of failing cleanly
+
+A fresh Explore-agent sweep (given the full fix history, pointed at
+areas not yet swept hard: multimodal degraders, provider adapters,
+budget/loop edge cases, foundry, desktop UI beyond App.tsx) found the
+most severe candidate yet: `AgentLoop.run()`'s degradation-fallback
+`try` block only ever caught `(LookupError, UnsupportedModalityError)`
+-- the only two failure modes anyone had anticipated when that fallback
+was built -- but a concrete `Degrader` can raise its own decode error
+when it genuinely can't make sense of the content. `ImageToTextDegrader
+.degrade()` does exactly that (`ImageDecodeError`), and reaching this
+path (a text-only default model, an attached image, degraders
+configured -- exactly the wiring `chat --image`/`/chat`/`/ws/chat` all
+already use in production) with a genuinely undecodable or truncated
+image crashed the entire async generator instead of landing in the
+`FAILED` state this fallback exists to produce cleanly. Confirmed live
+with the project's own real components (`Router`, `MockProvider`,
+`default_degraders()`) -- no mocking of the bug itself.
+
+**A second, sibling bug in the same code path, found while fixing the
+first:** a genuinely *truncated* (not fully unrecognizable) real image
+made Pillow raise a plain `OSError("Truncated File Read")` reading
+`.size`, not `UnidentifiedImageError` -- the only exception
+`ImageToTextDegrader`'s own `except` clause caught. A truncated image
+reached the loop as a raw, uncontextualized PIL error instead of this
+degrader's own documented `ImageDecodeError`.
+
+**Fixed with two coordinated, narrowly-scoped changes:**
+`ImageToTextDegrader`'s `except UnidentifiedImageError` widened to
+`except (UnidentifiedImageError, OSError)`; `AgentLoop.run()`'s
+fallback `except (LookupError, UnsupportedModalityError)` widened to
+`except Exception` -- deliberately broad, since this block's own stated
+purpose is "attempt a best-effort recovery, and if it doesn't work for
+*any* reason, fail cleanly," not to enumerate every exception type a
+current or future `Degrader` implementation might raise. **A real,
+separate usability improvement made along the way:** the degradation
+failure's own specific message now reaches `state_changed.detail`
+instead of being silently discarded in favor of the original, less
+useful "no model supports this modality" `LookupError` message --
+matching the "give the real reason" discipline already applied to
+every other clean-failure path in this project.
+
+**A genuinely tricky test-authoring bug found and fixed via this
+project's own revert-and-verify discipline, not just assumed correct:**
+the first version of the truncated-image regression test used a
+size-relative truncation (`raw[: len(raw) // 4]`), which turned out to
+be unreliable -- the exact same ratio hit `OSError` for a 12x8 PNG but
+`UnidentifiedImageError` for a 64x32 one, meaning the test wasn't
+reliably pinning the bug it claimed to. Fixed with a fixed 20-byte
+truncation instead: PNG's structure (an 8-byte signature, then a fixed
+8-byte chunk length+type header, then 13 bytes of IHDR data) means
+cutting at a fixed offset always lands mid-IHDR-read regardless of
+image size, deterministically reproducing Pillow's `OSError`. Caught
+specifically *because* of the revert-and-verify step: reverting the fix
+and re-running the size-relative version of this test would have looked
+like a clean pass/fail signal without ever exposing that the test
+itself wasn't reliable across image sizes -- this was found by actually
+comparing results across multiple image dimensions while debugging.
+
+3 new tests (one library-level in `test_degraders.py`, two loop-level
+in `test_agent.py`), 540 -> 543 Python tests. `ruff check`/`format
+--check` clean. `docs/agent-loop.md` updated.
+
+**Next:** the same sweep also surfaced two more candidates worth
+picking up soon: `OllamaProvider.generate()` crashes with a raw
+`json.JSONDecodeError` on a malformed streaming NDJSON line (reproduced
+with a mocked truncated-line transport) instead of yielding a clean
+`StreamErrorEvent` the way the existing `status_code >= 400` branch
+already does -- this also aborts `sarva eval`'s benchmark loop and
+`sarva distill` entirely on a single bad line, losing every remaining
+case's results, since both only catch `ProviderError` per-case; and (a
+lower-confidence, not-live-verified finding, since this environment has
+no Anthropic API key) `anthropic_provider.py`'s exception handling
+catches `RateLimitError`/`APIConnectionError`/`APIStatusError` but not
+the SDK's sibling `APIResponseValidationError`, raised when the SDK
+can't parse a malformed response body. Batching (§3.6f), F1's
+distributed training infra, Gemini's Files API for long video, and
+desktop code-signing/notarization remain deferred for the reasons
+already logged above.

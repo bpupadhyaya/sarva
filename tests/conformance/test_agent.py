@@ -435,6 +435,74 @@ async def test_degradation_fallback_does_not_help_when_no_degrader_covers_the_mo
 
 
 @pytest.mark.asyncio
+async def test_degradation_fallback_reports_cleanly_when_the_image_itself_cannot_be_decoded(
+    run_root,
+):
+    # A real bug found by actually running this exact scenario:
+    # ImageToTextDegrader.degrade() raises its own ImageDecodeError when
+    # the bytes genuinely can't be decoded (not a LookupError or
+    # UnsupportedModalityError, the only two exception types this
+    # fallback used to catch), so it propagated straight out of
+    # AgentLoop.run()'s async generator uncaught instead of the clean
+    # FAILED state this whole fallback exists to produce. Confirmed
+    # live: with a text-only router (forcing the fallback path) and a
+    # real ImageToTextDegrader, a genuinely undecodable image blob
+    # crashed the loop before this fix.
+    provider = MockProvider(script=[ScriptedTurn(text="should never be reached")])
+    loop = AgentLoop(
+        router=_text_only_router(),
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+    undecodable = ImageBlock(media_type="image/png", data=b"not an image at all")
+
+    events = [e async for e in loop.run("what's in this image?", extra_content=[undecodable])]
+
+    assert events[-1].type == "run_done"
+    assert events[-1].state == AgentState.FAILED
+    assert events[-1].final_message is None
+    # The degrader's own specific, actionable reason must reach the
+    # caller -- not a generic "no model supports this modality" message
+    # that no longer describes what actually went wrong.
+    state_changed = next(e for e in events if e.type == "state_changed" and e.detail)
+    assert "could not decode image for degradation" in state_changed.detail
+
+
+@pytest.mark.asyncio
+async def test_degradation_fallback_reports_cleanly_for_a_truncated_real_image(run_root):
+    # A related real bug in ImageToTextDegrader itself: a genuinely
+    # TRUNCATED (not fully unrecognizable) real image made Pillow raise
+    # a plain OSError("Truncated File Read") reading `.size`, which the
+    # degrader's own except clause (UnidentifiedImageError only) didn't
+    # catch at all -- a raw, uncontextualized PIL error instead of this
+    # degrader's own documented ImageDecodeError.
+    provider = MockProvider(script=[ScriptedTurn(text="should never be reached")])
+    loop = AgentLoop(
+        router=_text_only_router(),
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+    # A fixed 20-byte truncation always lands mid-IHDR-chunk-read
+    # regardless of image size (PNG's signature + chunk header are a
+    # fixed 16 bytes), reliably reproducing Pillow's OSError -- a
+    # size-relative truncation like `real_png[: len(real_png) // 4]`
+    # can accidentally land too early and hit UnidentifiedImageError
+    # instead depending on the image's total size, confirmed directly
+    # (see test_degraders.py's equivalent unit-level test).
+    real_png = _real_png_bytes()
+    truncated = ImageBlock(media_type="image/png", data=real_png[:20])
+
+    events = [e async for e in loop.run("what's in this image?", extra_content=[truncated])]
+
+    assert events[-1].type == "run_done"
+    assert events[-1].state == AgentState.FAILED
+    state_changed = next(e for e in events if e.type == "state_changed" and e.detail)
+    assert "could not decode image for degradation" in state_changed.detail
+
+
+@pytest.mark.asyncio
 async def test_degradation_fallback_not_triggered_when_a_supporting_model_exists(run_root):
     """Regression guard: with a vision-capable model actually available
     (the registry's `mock` entry supports image input directly — see

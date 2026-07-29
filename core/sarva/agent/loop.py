@@ -54,7 +54,6 @@ from sarva.multimodal.content import (
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
-    UnsupportedModalityError,
     degrade_message,
     modality_of,
 )
@@ -193,6 +192,7 @@ class AgentLoop:
             # model_override was None, and there's no explicit model
             # choice this fallback could contradict.)
             model = None
+            degrade_error: Exception | None = None
             if self._degraders:
                 try:
                     fallback_model = self._router.pick(self._task_class, needs={Modality.TEXT})
@@ -205,8 +205,24 @@ class AgentLoop:
                         for m in messages
                     ]
                     model = fallback_model
-                except (LookupError, UnsupportedModalityError):
+                except Exception as degrade_exc:
+                    # A real bug found by actually degrading a corrupt/
+                    # truncated image with no vision-capable model
+                    # configured: a concrete Degrader (e.g.
+                    # ImageToTextDegrader) can raise its own decode error
+                    # when it genuinely can't make sense of the content --
+                    # LookupError/UnsupportedModalityError alone (the only
+                    # two this except clause used to catch) don't cover
+                    # that, so it propagated straight out of this async
+                    # generator uncaught instead of the clean FAILED state
+                    # this whole fallback exists to produce. Caught broadly
+                    # and deliberately: this block's own purpose is
+                    # "attempt a best-effort recovery, and if it doesn't
+                    # work for ANY reason, fail cleanly" -- not to
+                    # enumerate every exception type a current or future
+                    # Degrader implementation might raise.
                     model = None  # degradation itself couldn't help either; fall through to FAILED
+                    degrade_error = degrade_exc
 
             if model is None:
                 # This is an INIT-time failure the frozen LEGAL table doesn't
@@ -214,7 +230,14 @@ class AgentLoop:
                 # violate) — handled directly rather than via transition(),
                 # which doesn't exist yet at this point in the function.
                 state = AgentState.FAILED
-                yield await emit(StateChangedEvent(state=state, detail=str(e)))
+                # The degradation attempt's own failure (e.g. "could not
+                # decode image for degradation: ...") is a more specific,
+                # actionable reason than the original "no model supports
+                # this modality" LookupError -- surface it when present,
+                # the same "give the real reason" discipline every other
+                # clean-failure path in this project already applies.
+                detail = str(degrade_error) if degrade_error is not None else str(e)
+                yield await emit(StateChangedEvent(state=state, detail=detail))
                 yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
                 if transcript_out is not None:
                     transcript_out.extend(messages)

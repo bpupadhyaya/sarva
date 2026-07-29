@@ -156,6 +156,34 @@ actually see, rather than refusing outright. Deliberately opt-in, not
 a silent default: nobody gets a lower-fidelity response than they
 explicitly asked for without having asked for exactly that tradeoff.
 
+**A real bug found in the fallback's own exception handling, not just
+an uncaught error somewhere unrelated:** the degradation attempt was
+wrapped in `except (LookupError, UnsupportedModalityError)` — the only
+two failure modes anyone had anticipated — but a concrete `Degrader`
+can raise its own decode error when it genuinely can't make sense of
+the content it was handed. `ImageToTextDegrader.degrade()` does exactly
+that (`ImageDecodeError`, its own documented exception type), and
+neither exception type above covers it, so it propagated straight out
+of `AgentLoop.run()`'s async generator uncaught — a genuinely undecodable
+or truncated image attached with no vision-capable model configured
+crashed the whole run instead of landing in the clean `FAILED` state
+this fallback exists to produce. Fixed by widening that `except` clause
+to catch any `Exception` — deliberately broad, since this block's own
+purpose is "attempt a best-effort recovery, and if it doesn't work for
+*any* reason, fail cleanly," not to enumerate every exception type a
+current or future `Degrader` implementation might raise. The
+degradation failure's own message (e.g. "could not decode image for
+degradation: ...") now reaches the caller's `state_changed.detail` too
+— a more specific, actionable reason than the original "no model
+supports this modality" `LookupError` it used to fall back to silently
+dropping. A second, sibling bug closed in the same pass: a genuinely
+*truncated* (not fully unrecognizable) image made Pillow raise a plain
+`OSError` reading `.size` rather than `UnidentifiedImageError` —
+`ImageToTextDegrader`'s own `except` clause only caught the latter, so
+a truncated image reached this fallback as a raw, uncontextualized PIL
+error instead of `ImageDecodeError`; fixed by widening that degrader's
+own `except` to `(UnidentifiedImageError, OSError)`.
+
 ## Failure handling, named explicitly rather than left implicit
 
 - A provider crash (any exception escaping `provider.generate()`, not
