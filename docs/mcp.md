@@ -117,6 +117,31 @@ re-applying. Verified against a real stdio MCP server too (the
 project's own `echo`/`fail` fixture) to confirm ordinary tool names
 still render exactly as before.
 
+**A real bug found by actually running `sarva run --mcp-server
+"definitely-not-a-real-command"`, and the equivalent for an
+unreachable `https://` URL and a malformed shell string:** the
+`--mcp-server` connection loop had zero error handling anywhere on the
+path — `connect_stdio_mcp_server`'s subprocess spawn
+(`FileNotFoundError`), `connect_http_mcp_server`'s network layer
+(`httpx.ConnectError`, wrapped in an anyio `TaskGroup`'s own
+`ExceptionGroup`), and even the loop's own `shlex.split(server_cmd)`
+(a plain `ValueError` on something like an unterminated quote) all
+crashed the whole `sarva run` command with a raw traceback instead of
+the same clean, actionable failure `--model`/`--session`/`--image`
+already get on bad user input. Caught broadly around the whole
+per-server connection attempt — any exception there means "this MCP
+server couldn't be reached" — matching the "reject, don't guess"
+discipline `--mcp-header`/`--mcp-env` parsing already applies: a
+`--mcp-server` the user explicitly asked for silently failing and the
+run continuing without its tools would be a materially different,
+unexplained result, not something safe to paper over the way a
+corrupted on-disk cache entry is. The HTTP case gets one extra
+refinement: an `ExceptionGroup` with exactly one sub-exception (the
+common single-connection-failure case) is unwrapped so the real reason
+(e.g. `[Errno 8] nodename nor servname provided, or not known`) reaches
+the user instead of anyio's own unhelpful `"unhandled errors in a
+TaskGroup (1 sub-exception)"` summary.
+
 `--mcp-header` (also repeatable, `"Name: Value"`) applies to every
 `http(s)://` `--mcp-server` in the same invocation alike — a real,
 named limit, not silently glossed over: the (rare) case of two HTTP

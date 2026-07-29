@@ -6750,3 +6750,75 @@ one) -- 559 Python tests, unchanged count. `ruff check`/`format
 --check` clean. This is exactly the kind of gap steady CI verification
 is for: caught immediately on the very next push after a real feature
 fix, not discovered later or shipped silently broken.
+
+## sarva run --mcp-server crashed with a raw traceback on a typo, an unreachable host, or a malformed shell string -- three real failure modes on one unguarded connection loop
+
+The lower-ranked, but still real, candidate from the GRPO-milestone
+sweep, picked up directly. `--mcp-server`/`--mcp-env`/`--mcp-header`
+are all real, documented, user-facing flags -- a typo in the command
+one of them names is a genuinely plausible real mistake, not a
+contrived edge case. Confirmed live, three distinct ways:
+
+- `sarva run "hello" --mcp-server "definitely-not-a-real-command-xyz123"
+  --auto` -- a raw `FileNotFoundError` from `connect_stdio_mcp_server`'s
+  subprocess spawn.
+- `sarva run "hello" --mcp-server "https://unreachable-host.invalid/mcp"
+  --auto` -- a real network failure from `connect_http_mcp_server`,
+  wrapped in an anyio `TaskGroup`'s own `ExceptionGroup`.
+- `sarva run "hello" --mcp-server 'unterminated "quote' --auto` -- a
+  plain `ValueError` from the connection loop's own
+  `shlex.split(server_cmd)` call, raised before either connect function
+  is even reached.
+
+All three crashed the whole `sarva run` command with a raw traceback --
+`connect_stdio_mcp_server`/`connect_http_mcp_server`/`list_mcp_tools`
+were called with zero try/except anywhere on this path, the same
+"raw exception instead of clean CLI error" bug class fixed roughly a
+dozen times already in this project, just never applied to the MCP
+*connection handshake* itself (only `--mcp-header`/`--mcp-env`
+*parsing* had been fixed before this).
+
+**Fixed by wrapping the whole per-server connection attempt in one
+`except Exception`, not three separate narrow handlers:** any failure
+connecting to a given `--mcp-server` means the same thing --
+"this server couldn't be reached" -- so one broad catch around
+`shlex.split` + `connect_stdio_mcp_server`/`connect_http_mcp_server` +
+`list_mcp_tools` covers all three confirmed failure modes (and any
+future one) with a single clean message and `typer.Exit(1)`.
+Deliberately **fails the whole run**, not a silent skip-and-continue:
+unlike the "corrupted on-disk state" bug class (a broken foundry
+checkpoint, a corrupted session file) where skipping one bad entry and
+continuing is the right call, a `--mcp-server` the user explicitly
+named for THIS run silently failing and the agent running anyway
+without its tools would be a materially different, unexplained result
+-- the same "reject, don't guess" reasoning `--mcp-header`/`--mcp-env`
+parsing already applies to a malformed entry.
+
+**One extra real refinement found while fixing this, not assumed
+sufficient from `str(e)` alone:** the HTTP failure case's real
+exception arrives wrapped in an anyio `TaskGroup`'s own
+`ExceptionGroup`, whose own `str()` is the unhelpful `"unhandled
+errors in a TaskGroup (1 sub-exception)"` -- confirmed directly against
+a real unreachable host, not assumed. Unwrapping one level when there's
+exactly one sub-exception (the common single-connection-failure case)
+surfaces the actual, actionable reason (`[Errno 8] nodename nor
+servname provided, or not known`) instead.
+
+**Verified the new tests are real:** reverted the fix and watched all
+three new tests fail with their raw, uncaught exceptions (`result.stdout`
+empty in every case) before re-applying -- same discipline as every fix
+in this journal since the MCP tool-name escaping milestone. The HTTP
+test is pinned against the exact wrapped `ExceptionGroup` shape, not
+just any exception, so a regression that stopped unwrapping it would
+also be caught.
+
+3 new tests, 559 -> 562 Python tests. `ruff check`/`format --check`
+clean. `docs/mcp.md` updated.
+
+**Next:** the other, lower-severity candidate from the same sweep:
+`AblationResult.get()` (`foundry/sarva_foundry/ablation.py`) raises a
+bare `StopIteration` with no context on an unknown/misspelled arm
+name -- research-tool misuse, not a live request path, but genuinely
+unswept. Batching (§3.6f), F1's distributed training infrastructure,
+Gemini's Files API for long video, and desktop code-signing/notarization
+remain deferred for the reasons already logged above.

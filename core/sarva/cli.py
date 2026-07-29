@@ -350,16 +350,56 @@ async def _run(
     async with AsyncExitStack() as stack:
         tools: list[Tool] = list(BUILTIN_TOOLS)
         for server_cmd in mcp_servers:
-            if server_cmd.startswith(("http://", "https://")):
-                mcp_session = await stack.enter_async_context(
-                    connect_http_mcp_server(server_cmd, headers=headers or None)
+            try:
+                if server_cmd.startswith(("http://", "https://")):
+                    mcp_session = await stack.enter_async_context(
+                        connect_http_mcp_server(server_cmd, headers=headers or None)
+                    )
+                else:
+                    command, *args = shlex.split(server_cmd)
+                    mcp_session = await stack.enter_async_context(
+                        connect_stdio_mcp_server(command, args=args, env=env or None)
+                    )
+                mcp_tools = await list_mcp_tools(mcp_session)
+            except Exception as e:
+                # A real bug found by actually running `sarva run ...
+                # --mcp-server "definitely-not-a-real-command"` (and the
+                # equivalent for an unreachable https:// URL, and a
+                # malformed shell string like an unterminated quote):
+                # connect_stdio_mcp_server's subprocess spawn
+                # (FileNotFoundError), connect_http_mcp_server's network
+                # layer (httpx.ConnectError), and even this loop's own
+                # shlex.split(server_cmd) (ValueError) all had zero error
+                # handling -- any of the three crashed the whole `sarva
+                # run` command with a raw traceback instead of the same
+                # clean, actionable failure every other bad user-supplied
+                # input (--model, --session, --image) already gets.
+                # Caught broadly (any exception here means "this MCP
+                # server couldn't be reached"), matching the "reject,
+                # don't guess" discipline --mcp-header/--mcp-env parsing
+                # already applies: a --mcp-server the user explicitly
+                # asked for silently failing and continuing without its
+                # tools would be a materially different, unexplained run,
+                # not something safe to paper over the way a corrupted
+                # on-disk cache entry is.
+                # connect_http_mcp_server's real network failure (e.g. an
+                # unreachable host) surfaces wrapped in an anyio
+                # TaskGroup's own ExceptionGroup, whose own str() is the
+                # unhelpful "unhandled errors in a TaskGroup (1
+                # sub-exception)" -- unwrap one level when there's
+                # exactly one sub-exception (the common single-connection
+                # case) so the real, actionable reason (e.g. "[Errno 8]
+                # nodename nor servname provided, or not known") is what
+                # the user actually sees, confirmed directly against a
+                # real unreachable host before writing this.
+                detail = e
+                if isinstance(e, ExceptionGroup) and len(e.exceptions) == 1:
+                    detail = e.exceptions[0]
+                console.print(
+                    f"[red]could not connect to MCP server "
+                    f"{escape(repr(server_cmd))}: {escape(str(detail))}[/red]"
                 )
-            else:
-                command, *args = shlex.split(server_cmd)
-                mcp_session = await stack.enter_async_context(
-                    connect_stdio_mcp_server(command, args=args, env=env or None)
-                )
-            mcp_tools = await list_mcp_tools(mcp_session)
+                raise typer.Exit(1) from e
             # escape(): tool names come from the connected MCP server's own
             # response -- for an http(s):// server that's a remote,
             # untrusted source (a malicious/buggy server could name a tool

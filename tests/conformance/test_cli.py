@@ -377,6 +377,105 @@ def test_run_with_no_mcp_env_passes_none_not_an_empty_dict(monkeypatch, tmp_path
     assert captured["env"] is None
 
 
+def test_run_with_an_unreachable_mcp_stdio_command_fails_cleanly_not_a_traceback(
+    monkeypatch, tmp_path
+):
+    # A real bug found by actually running `sarva run ... --mcp-server
+    # "definitely-not-a-real-command"`: connect_stdio_mcp_server's
+    # subprocess spawn raised a raw FileNotFoundError straight through
+    # Typer -- nothing in the --mcp-server connection loop had any error
+    # handling at all, unlike --model/--session/--image, which all fail
+    # cleanly on bad user input.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "do something",
+            "--workdir",
+            str(tmp_path),
+            "--mcp-server",
+            "definitely-not-a-real-command-xyz123",
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "could not connect to MCP server" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_run_with_an_unreachable_mcp_http_server_fails_cleanly_with_the_real_reason(
+    monkeypatch, tmp_path
+):
+    # The HTTP counterpart to the stdio case above, with an extra real
+    # wrinkle: connect_http_mcp_server's real network failure surfaces
+    # wrapped in an anyio TaskGroup's own ExceptionGroup, whose own
+    # str() is the unhelpful "unhandled errors in a TaskGroup (1
+    # sub-exception)" -- confirmed directly against a real unreachable
+    # host. Pinned here with a fake that raises the same wrapped shape,
+    # not just any exception, so this test would catch a regression
+    # that stopped unwrapping it.
+    _clear_provider_env(monkeypatch)
+
+    @asynccontextmanager
+    async def fake_connect_http_mcp_server(url, headers=None):
+        try:
+            raise ConnectionError("[Errno 8] nodename nor servname provided, or not known")
+        except ConnectionError as e:
+            raise ExceptionGroup("unhandled errors in a TaskGroup", [e]) from None
+        yield  # pragma: no cover -- unreachable, satisfies the generator protocol
+
+    monkeypatch.setattr(cli_module, "connect_http_mcp_server", fake_connect_http_mcp_server)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "do something",
+            "--workdir",
+            str(tmp_path),
+            "--mcp-server",
+            "https://example.invalid/mcp",
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "could not connect to MCP server" in result.stdout
+    assert "nodename nor servname" in result.stdout
+    assert "unhandled errors in a TaskGroup" not in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_run_with_a_malformed_mcp_server_shell_string_fails_cleanly_not_a_traceback(
+    monkeypatch, tmp_path
+):
+    # A third real failure mode on the same connection path: shlex.split
+    # itself raises a plain ValueError on a malformed shell string (e.g.
+    # an unterminated quote) -- confirmed live -- before
+    # connect_stdio_mcp_server is even reached.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "do something",
+            "--workdir",
+            str(tmp_path),
+            "--mcp-server",
+            'unterminated "quote',
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "could not connect to MCP server" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_run_mcp_tool_names_with_markup_characters_are_escaped_not_swallowed(monkeypatch, tmp_path):
     # Tool names come from the connected MCP server's own response -- for
     # an http(s):// server that's a remote, untrusted source. A real bug
