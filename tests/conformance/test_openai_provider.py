@@ -1,4 +1,8 @@
-"""Unit tests for the OpenAI adapter's translation function.
+"""Unit tests for the OpenAI adapter's translation function, plus
+`generate()`'s own streaming-error handling (below, via a duck-typed
+fake client -- the same discipline test_anthropic_provider.py already
+established, since this environment has no real OpenAI API key to test
+the streaming path live).
 
 No network, no API key — every block here carries an in-memory `data`
 source, so `_to_openai_messages`'s only await (`resolve_media_bytes`, for
@@ -10,6 +14,8 @@ from __future__ import annotations
 
 import base64
 
+import httpx
+import openai
 import pytest
 from sarva.multimodal.content import (
     DocumentBlock,
@@ -20,7 +26,8 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from sarva.providers.openai_provider import _to_openai_messages
+from sarva.providers.base import GenerateRequest, StreamErrorEvent
+from sarva.providers.openai_provider import OpenAIProvider, _to_openai_messages
 
 
 async def test_text_block_translation():
@@ -112,3 +119,68 @@ async def test_unsupported_block_type_raises_instead_of_silently_dropping():
     )
     with pytest.raises(ValueError, match="DocumentBlock"):
         await _to_openai_messages(m)
+
+
+class _FakeCompletions:
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def create(self, **kwargs):
+        raise self._exc
+
+
+class _FakeChat:
+    def __init__(self, exc: Exception):
+        self.completions = _FakeCompletions(exc)
+
+
+class _FakeClient:
+    def __init__(self, exc: Exception):
+        self.chat = _FakeChat(exc)
+
+
+def _req() -> GenerateRequest:
+    return GenerateRequest(
+        model="gpt-x", messages=[Message(role="user", content=[TextBlock(text="hi")])]
+    )
+
+
+def _real_response() -> httpx.Response:
+    return httpx.Response(
+        200, request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    )
+
+
+async def test_generate_yields_a_clean_stream_error_on_a_malformed_sdk_response():
+    # A real bug found by reading the SDK's own exception hierarchy, the
+    # same way as the identical gap fixed in anthropic_provider.py:
+    # openai.APIResponseValidationError (raised when the SDK can't parse
+    # a malformed response) is a direct sibling of RateLimitError/
+    # APIConnectionError/APIStatusError under the SDK's own APIError
+    # base, not a subclass of any of them, so it propagated uncaught
+    # before this fix.
+    exc = openai.APIResponseValidationError(
+        response=_real_response(), body=None, message="could not parse response"
+    )
+    provider = OpenAIProvider(client=_FakeClient(exc))
+
+    events = [e async for e in provider.generate(_req())]
+
+    assert len(events) == 1
+    assert isinstance(events[0], StreamErrorEvent)
+    assert events[0].code == "provider"
+    assert "could not parse response" in events[0].detail
+
+
+async def test_generate_still_handles_a_plain_rate_limit_error_as_before():
+    # Regression guard: the new broad `except openai.APIError` catch-all
+    # sits AFTER the three specific handlers, so it must never intercept
+    # what RateLimitError's own more-specific handler already covers.
+    exc = openai.RateLimitError("rate limited", response=_real_response(), body=None)
+    provider = OpenAIProvider(client=_FakeClient(exc))
+
+    events = [e async for e in provider.generate(_req())]
+
+    assert len(events) == 1
+    assert events[0].code == "rate_limit"
+    assert events[0].retryable is True

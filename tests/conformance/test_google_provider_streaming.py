@@ -25,8 +25,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from google.genai import errors
 from sarva.multimodal.content import Message, TextBlock
-from sarva.providers.base import DoneEvent, GenerateRequest, StopReason, ToolCallEvent
+from sarva.providers.base import (
+    DoneEvent,
+    GenerateRequest,
+    StopReason,
+    StreamErrorEvent,
+    ToolCallEvent,
+)
 from sarva.providers.google_provider import GoogleProvider
 
 
@@ -64,10 +71,27 @@ class _FakeStream:
             yield c
 
 
+class _FakeErrorStream:
+    """Raises `exc` on the first `__anext__` -- simulates the SDK's own
+    `_load_json_from_response()` failing to parse a malformed streaming
+    chunk mid-stream."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise self._exc
+
+
 class _FakeClient:
-    def __init__(self, chunks):
+    def __init__(self, chunks=None, error: Exception | None = None):
         async def generate_content_stream(**kwargs):
-            return _FakeStream(chunks)
+            if error is not None:
+                return _FakeErrorStream(error)
+            return _FakeStream(chunks or [])
 
         models = SimpleNamespace(generate_content_stream=generate_content_stream)
         self.aio = SimpleNamespace(models=models)
@@ -134,3 +158,23 @@ async def test_thought_parts_become_thinking_delta_not_text_delta():
     assert thinking_events[0].text == "pondering..."
     done = events[-1]
     assert done.message.content[0].text == "the answer is 4"
+
+
+async def test_generate_yields_a_clean_stream_error_on_a_malformed_sdk_response():
+    # A real bug found by reading google-genai's own source, the same
+    # way as the identical gap fixed in ollama_provider.py: the SDK's
+    # `_load_json_from_response()` wraps a failed `json.loads()` on a
+    # streaming chunk in `errors.UnknownApiResponseError` -- a
+    # `ValueError` subclass, NOT an `errors.APIError` subclass like
+    # ClientError/ServerError, so this adapter's existing two `except`
+    # clauses never touched it and it propagated uncaught.
+    exc = errors.UnknownApiResponseError("Failed to parse response as JSON. Raw response: garbage")
+    provider = GoogleProvider(client=_FakeClient(error=exc))
+
+    events = [e async for e in provider.generate(_simple_request())]
+
+    assert len(events) == 1
+    assert isinstance(events[0], StreamErrorEvent)
+    assert events[0].code == "provider"
+    assert events[0].retryable is True
+    assert "Failed to parse response as JSON" in events[0].detail

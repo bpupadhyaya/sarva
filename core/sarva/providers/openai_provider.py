@@ -222,6 +222,21 @@ class OpenAIProvider:
         except openai.APIStatusError as e:
             yield StreamErrorEvent(code="provider", detail=str(e), retryable=e.status_code >= 500)
             return
+        except openai.APIError as e:
+            # A real bug found by reading the SDK's own exception
+            # hierarchy, the same way as the identical gap fixed in
+            # anthropic_provider.py: openai.APIResponseValidationError
+            # (raised when the SDK can't parse a malformed response) is a
+            # direct sibling of RateLimitError/APIConnectionError/
+            # APIStatusError under the SDK's own APIError base, not a
+            # subclass of any of the three above, so it propagated
+            # uncaught. Catching the SDK's own common base here, after the
+            # three specific/more-informative handlers already had their
+            # chance, closes this for APIResponseValidationError
+            # specifically and for any other still-unnamed APIError
+            # subtype the SDK might add in the future.
+            yield StreamErrorEvent(code="provider", detail=str(e), retryable=True)
+            return
 
         blocks: list[object] = []
         if text_acc:

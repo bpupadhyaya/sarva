@@ -6149,3 +6149,78 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## The same uncaught-SDK-exception gap, found and fixed in both remaining real adapters -- OpenAI and Gemini, in one sweep
+
+A fresh Explore-agent sweep, pointed specifically at repeating the
+Ollama/Anthropic pattern from the last two milestones against the two
+real adapters not yet audited this way. Found the identical shape
+twice more.
+
+**`OpenAIProvider.generate()`:** `openai.APIResponseValidationError` is
+a direct sibling of `RateLimitError`/`APIConnectionError`/
+`APIStatusError` under the SDK's own `APIError` base -- confirmed by
+introspecting the real installed `openai` package's class hierarchy,
+exactly the way the Anthropic fix was verified. Reproduced with a
+duck-typed fake client raising it from `chat.completions.create()`:
+propagated straight out of `generate()`'s async generator uncaught.
+Same eval/distill blast radius as the Ollama/Anthropic bugs (an
+uncaught SDK exception isn't a `StreamErrorEvent`, so `complete()`
+never gets the chance to turn it into the `ProviderError` `run_benchmark`
+and `distill` already catch per-case). Fixed with the identical final
+`except openai.APIError as e:` catch-all pattern already established
+in `anthropic_provider.py`, verified with the same "a plain
+`RateLimitError` still gets its own specific treatment, not swallowed
+by the new generic handler" regression test.
+
+**`GoogleProvider.generate()`:** a related but structurally different
+gap. `google-genai`'s own `_api_client._load_json_from_response()`
+wraps a failed `json.loads()` on a streaming response chunk in
+`errors.UnknownApiResponseError` -- but unlike the Anthropic/OpenAI
+cases, this one is a **`ValueError` subclass, not an `errors.APIError`
+subclass**, so it sits in a genuinely separate exception branch from
+the `errors.ClientError`/`errors.ServerError` this adapter already
+caught (both `errors.APIError` subclasses). Confirmed by reading the
+SDK's actual source: `_load_json_from_response` is called on every
+streamed chunk, so any malformed chunk anywhere in a real stream hits
+this path -- the functional twin of the Ollama NDJSON bug, just one
+layer down inside the SDK instead of this project's own `json.loads`.
+Reproduced with a fake async iterator (extending
+`test_google_provider_streaming.py`'s existing `_FakeStream`/
+`_FakeClient` infra with a `_FakeErrorStream` variant) raising a real
+`errors.UnknownApiResponseError` mid-stream. Fixed with its own
+dedicated `except errors.UnknownApiResponseError as e:` clause -- a
+separate `except`, not folded into the existing two, since it isn't a
+subclass of what they already catch. Deliberately a narrower fix than
+the Anthropic/OpenAI catch-alls: this adapter's own module docstring
+already separately and honestly names a different, still-real
+unhandled gap (network-level connection failures -- no documented
+`google-genai` equivalent to `APIConnectionError` was ever found), and
+a broad `except errors.APIError` wouldn't have touched that gap anyway
+since `UnknownApiResponseError` isn't an `APIError` subclass -- so the
+targeted fix is both correct and doesn't overclaim coverage the
+docstring doesn't back up.
+
+**This closes the "uncaught SDK exception" bug class across all three
+SDK-based real adapters (Anthropic, OpenAI, Google) -- Ollama's own
+equivalent (a malformed NDJSON line, not an SDK exception, since it
+talks to `httpx` directly rather than through a vendor SDK) was already
+closed two milestones ago.**
+
+3 new tests (2 for OpenAI mirroring the Anthropic fake-client tests, 1
+for Gemini reusing `test_google_provider_streaming.py`'s existing fake
+async-stream infra), 547 -> 550 Python tests. `ruff check`/`format
+--check` clean. `docs/providers.md` updated. Verified via
+revert-and-verify too: reverted both fixes together and watched both
+new "malformed SDK response" tests fail with their real, uncaught SDK
+exceptions (while both "still handles a plain error correctly"
+regression guards continued passing) before re-applying.
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred). No open candidates remain from
+the last two Explore-agent sweeps -- worth another fresh one next time.

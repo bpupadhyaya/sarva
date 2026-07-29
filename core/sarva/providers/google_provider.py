@@ -65,6 +65,15 @@ exception type for `google-genai` to catch with confidence -- only
 subclasses, covering HTTP-level failures) are handled below. A real
 connection failure will surface as an uncaught exception rather than a
 `StreamErrorEvent` until verified against a live run.
+
+A real bug found (and fixed) in the same family: `errors.
+UnknownApiResponseError` -- raised by the SDK's own
+`_load_json_from_response()` when a streaming response chunk fails
+`json.loads()` -- is a `ValueError` subclass, NOT an `errors.APIError`
+subclass, so `errors.ClientError`/`errors.ServerError` never touch it.
+Reproduced with a duck-typed fake client (no live API key needed, the
+same discipline the identical Anthropic/OpenAI gaps were found and
+fixed with) and given its own `except` clause below.
 """
 
 from __future__ import annotations
@@ -269,6 +278,18 @@ class GoogleProvider:
             )
             return
         except errors.ServerError as e:
+            yield StreamErrorEvent(code="provider", detail=str(e), retryable=True)
+            return
+        except errors.UnknownApiResponseError as e:
+            # A real bug found by reading google-genai's own source, the
+            # same way as the identical gap fixed in ollama_provider.py
+            # and openai_provider.py: `_api_client._load_json_from_response()`
+            # wraps a failed `json.loads()` on a streaming response chunk
+            # in this exception -- but it's a `ValueError` subclass, NOT
+            # an `errors.APIError` subclass like ClientError/ServerError
+            # above, so it propagated uncaught. Same "server sent
+            # something we can't make sense of" shape as the Ollama
+            # streaming-JSON bug, just one layer down inside the SDK.
             yield StreamErrorEvent(code="provider", detail=str(e), retryable=True)
             return
 

@@ -245,6 +245,52 @@ future is covered too, rather than needing a fourth (fifth, sixth...)
 named `except` clause added reactively each time. 2 new tests, 545 →
 547 Python tests.
 
+### The same gap, found and fixed in both remaining adapters in one pass — OpenAI and Gemini
+
+A fresh sweep, pointed specifically at repeating the Ollama/Anthropic
+pattern against the two adapters not yet audited: same result, twice.
+
+**`OpenAIProvider.generate()`** had the identical shape:
+`openai.APIResponseValidationError` is a direct sibling of
+`RateLimitError`/`APIConnectionError`/`APIStatusError` under the SDK's
+own `APIError` base — confirmed by introspecting the real installed
+`openai` package's class hierarchy, the same way as the Anthropic fix.
+Reproduced with a duck-typed fake client raising it from
+`chat.completions.create()`; fixed with the identical final
+`except openai.APIError as e:` catch-all pattern, verified with the
+same "a plain `RateLimitError` still gets its own specific treatment"
+regression test.
+
+**`GoogleProvider.generate()`** had a related but structurally
+different gap: `google-genai`'s own `_api_client.
+_load_json_from_response()` wraps a failed `json.loads()` on a
+streaming response chunk in `errors.UnknownApiResponseError` — but
+unlike the Anthropic/OpenAI cases, this one is a **`ValueError`
+subclass, not an `errors.APIError` subclass**, so it sits in a
+genuinely separate exception branch from the `errors.ClientError`/
+`errors.ServerError` this adapter already caught (both `errors.APIError`
+subclasses). Confirmed by reading the SDK's actual source, not assumed:
+`_load_json_from_response` is called on every streamed chunk
+(`_api_client.py`), so any malformed chunk anywhere in a real stream
+hits this path. Reproduced with a fake async iterator raising a real
+`errors.UnknownApiResponseError` mid-stream; fixed with its own
+dedicated `except errors.UnknownApiResponseError as e:` clause (a
+separate `except`, not folded into the existing two, since it isn't a
+subclass of what they already catch). This is a distinct, narrower fix
+than the Anthropic/OpenAI catch-alls — it closes the one concrete gap
+found, not a speculative "any future exception" case, since this
+adapter's own module docstring already separately and honestly names a
+different unhandled gap (network-level connection failures — no
+documented `google-genai` equivalent to `APIConnectionError` was found)
+that a broad `except errors.APIError` wouldn't have touched either.
+
+3 new tests (2 for OpenAI mirroring the Anthropic fake-client tests, 1
+for Gemini using `test_google_provider_streaming.py`'s existing fake
+async-stream infra), 547 → 550 Python tests. **This closes the
+"uncaught SDK exception" bug class across all three SDK-based real
+adapters (Anthropic, OpenAI, Google) — Ollama's own equivalent
+(malformed NDJSON, not an SDK exception) was already closed earlier.**
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which
