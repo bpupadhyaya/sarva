@@ -1,4 +1,8 @@
-"""Unit tests for the Anthropic adapter's translation function.
+"""Unit tests for the Anthropic adapter's translation function, plus
+`generate()`'s own streaming-error handling (below, via a duck-typed
+fake client -- the same discipline test_openai_provider_streaming.py
+already established for SDK-based adapters, since this environment has
+no real Anthropic API key to test the streaming path live).
 
 No network, no API key — every block here carries an in-memory `data`
 source, so `_to_anthropic_message`'s only await (`resolve_media_bytes`,
@@ -13,6 +17,8 @@ from __future__ import annotations
 
 import base64
 
+import anthropic
+import httpx
 import pytest
 from sarva.multimodal.content import (
     DocumentBlock,
@@ -23,7 +29,8 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from sarva.providers.anthropic_provider import _to_anthropic_message
+from sarva.providers.anthropic_provider import AnthropicProvider, _to_anthropic_message
+from sarva.providers.base import GenerateRequest, StreamErrorEvent
 
 
 async def test_text_block_translation():
@@ -112,3 +119,83 @@ async def test_unsupported_block_type_raises_instead_of_silently_dropping():
     )
     with pytest.raises(ValueError, match="DocumentBlock"):
         await _to_anthropic_message(m)
+
+
+class _RaisingStreamContext:
+    """A duck-typed stand-in for `client.messages.stream(**kwargs)`'s
+    real async context manager, raising a chosen exception from
+    `__aenter__` -- exactly where the real SDK raises one of its own
+    `APIError` subtypes when a request fails before streaming even
+    starts."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def __aenter__(self):
+        raise self._exc
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakeMessages:
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    def stream(self, **kwargs):
+        return _RaisingStreamContext(self._exc)
+
+
+class _FakeClient:
+    def __init__(self, exc: Exception):
+        self.messages = _FakeMessages(exc)
+
+
+def _req() -> GenerateRequest:
+    return GenerateRequest(
+        model="claude-x", messages=[Message(role="user", content=[TextBlock(text="hi")])]
+    )
+
+
+def _real_response() -> httpx.Response:
+    return httpx.Response(
+        200, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+
+
+async def test_generate_yields_a_clean_stream_error_on_a_malformed_sdk_response():
+    # A real bug found by actually raising anthropic.APIResponseValidationError
+    # through this fake client: it's a direct sibling of
+    # APIStatusError/APIConnectionError under the SDK's own APIError base
+    # (not a subclass of either), raised when the SDK can't parse a
+    # malformed response body -- the same "server sent something we
+    # can't make sense of" shape as the Ollama streaming-JSON bug fixed
+    # elsewhere in this project. None of this adapter's three specific
+    # except clauses (RateLimitError/APIConnectionError/APIStatusError)
+    # covered it, so it propagated straight out of generate()'s async
+    # generator uncaught before this fix.
+    exc = anthropic.APIResponseValidationError(
+        response=_real_response(), body=None, message="could not parse response"
+    )
+    provider = AnthropicProvider(client=_FakeClient(exc))
+
+    events = [e async for e in provider.generate(_req())]
+
+    assert len(events) == 1
+    assert isinstance(events[0], StreamErrorEvent)
+    assert events[0].code == "provider"
+    assert "could not parse response" in events[0].detail
+
+
+async def test_generate_still_handles_a_plain_rate_limit_error_as_before():
+    # Regression guard: the new broad `except anthropic.APIError` catch-all
+    # sits AFTER the three specific handlers, so it must never intercept
+    # what RateLimitError's own more-specific handler already covers.
+    exc = anthropic.RateLimitError("rate limited", response=_real_response(), body=None)
+    provider = AnthropicProvider(client=_FakeClient(exc))
+
+    events = [e async for e in provider.generate(_req())]
+
+    assert len(events) == 1
+    assert events[0].code == "rate_limit"
+    assert events[0].retryable is True

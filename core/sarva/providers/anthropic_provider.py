@@ -180,6 +180,22 @@ class AnthropicProvider:
         except anthropic.APIStatusError as e:
             yield StreamErrorEvent(code="provider", detail=str(e), retryable=e.status_code >= 500)
             return
+        except anthropic.APIError as e:
+            # A real bug found by actually raising APIResponseValidationError
+            # through a duck-typed fake client: it's a direct sibling of
+            # APIStatusError/APIConnectionError under the SDK's own APIError
+            # base (not a subclass of either), raised when the SDK can't
+            # parse a malformed response body -- the same "server sent
+            # something we can't make sense of" shape as the Ollama
+            # streaming-JSON bug fixed elsewhere in this project -- and it
+            # propagated uncaught since none of the three specific handlers
+            # above cover it. Catching the SDK's own common base here, after
+            # the three specific/more-informative handlers already had their
+            # chance, closes this for APIResponseValidationError specifically
+            # and for any other still-unnamed APIError subtype the SDK might
+            # add in the future.
+            yield StreamErrorEvent(code="provider", detail=str(e), retryable=True)
+            return
 
         blocks: list[object] = []
         for b in final.content:

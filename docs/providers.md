@@ -212,6 +212,39 @@ tests (the same hermetic-httpx discipline `test_fetch.py` already
 established) cover both the streaming happy path and this regression.
 2 new tests, 543 → 545 Python tests.
 
+### A malformed Anthropic SDK response had the identical gap — found by reasoning through the SDK's own exception hierarchy, no API key needed
+
+`AnthropicProvider.generate()`'s three `except` clauses
+(`RateLimitError`/`APIConnectionError`/`APIStatusError`) look
+comprehensive but miss one real sibling: `anthropic.
+APIResponseValidationError`, raised when the SDK receives a response it
+can't parse — the exact same "server sent something we can't make sense
+of" shape as the Ollama bug just above, just one layer further down
+(inside the SDK's own response handling rather than this project's own
+`json.loads`). Confirmed by reading the SDK's actual class hierarchy,
+not assumed: `RateLimitError` and every other HTTP-status-based error
+(`AuthenticationError`, `OverloadedError`, ...) already inherit from
+`APIStatusError`, and `APITimeoutError` inherits from
+`APIConnectionError` — genuinely already covered — but
+`APIResponseValidationError` is a direct sibling of all three under the
+SDK's own `APIError` base, not a subclass of any of them. Reproduced
+without a live API key: a duck-typed fake client (the same
+`test_openai_provider_streaming.py`-style discipline this project
+already uses for SDK-based adapters) raising `APIResponseValidationError`
+from `messages.stream()`'s `__aenter__` propagated straight out of
+`generate()`'s async generator uncaught.
+
+Fixed with a final `except anthropic.APIError as e:` catch-all placed
+*after* the three specific handlers — it only ever fires for whatever
+they don't already cover, confirmed with a regression test that a
+`RateLimitError` still gets its own, more specific `code="rate_limit"`
+treatment rather than falling through to the generic one. Deliberately
+broad (the SDK's own common base, not just the one named subtype found)
+so any other still-unnamed `APIError` subtype the SDK adds in the
+future is covered too, rather than needing a fourth (fifth, sixth...)
+named `except` clause added reactively each time. 2 new tests, 545 →
+547 Python tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

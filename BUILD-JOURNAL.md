@@ -6086,3 +6086,66 @@ parse a malformed response body -- worth reasoning through carefully
 real. Batching (§3.6f), F1's distributed training infra, Gemini's Files
 API for long video, and desktop code-signing/notarization remain
 deferred for the reasons already logged above.
+
+## The Anthropic adapter had the same uncaught-SDK-exception gap as Ollama -- found without a live API key, by reading the SDK's own exception hierarchy
+
+The second, lower-confidence candidate from the last sweep, confirmed
+real by actually checking rather than assumed from the name alone.
+`AnthropicProvider.generate()`'s three `except` clauses
+(`RateLimitError`/`APIConnectionError`/`APIStatusError`) look
+comprehensive but miss one real sibling: `anthropic.
+APIResponseValidationError`, raised when the SDK receives a response it
+can't parse -- the identical "server sent something we can't make
+sense of" shape as the Ollama streaming-JSON bug fixed the milestone
+before this one, just one layer further down (inside the SDK's own
+response handling rather than this project's own `json.loads`).
+Verified the claim by reading the SDK's real class hierarchy directly,
+not assumed from documentation: `RateLimitError` and every other
+HTTP-status-based error (`AuthenticationError`, `OverloadedError`,
+`BadRequestError`, ...) already inherit from `APIStatusError`, and
+`APITimeoutError` inherits from `APIConnectionError` -- both genuinely
+already covered -- but `APIResponseValidationError` is a direct sibling
+of all three under the SDK's own `APIError` base, not a subclass of
+any of them, so none of the three existing handlers touch it.
+
+**Reproduced without a live API key, the same way OpenAI's own
+streaming logic is unit-tested in this project:** a duck-typed fake
+client (`_FakeClient`/`_FakeMessages`/`_RaisingStreamContext`, mirroring
+`test_openai_provider_streaming.py`'s established "SimpleNamespace
+stand-ins, not the real SDK" discipline) raising a real
+`anthropic.APIResponseValidationError` from `messages.stream()`'s
+`__aenter__` propagated straight out of `generate()`'s async generator
+uncaught, confirmed with a real traceback before the fix.
+
+**Fixed with a final `except anthropic.APIError as e:` catch-all
+placed *after* the three specific handlers** -- it only ever fires for
+whatever they don't already cover, verified with a dedicated regression
+test proving a plain `RateLimitError` still gets its own, more specific
+`code="rate_limit"` treatment rather than falling through to the new
+generic one. Deliberately broad (the SDK's own common base, not just
+the one named subtype actually found) so any other still-unnamed
+`APIError` subtype the SDK adds in the future is covered too, rather
+than needing a fourth, fifth, sixth named `except` clause added
+reactively each time one is discovered -- the same "catch broadly for
+a block whose whole job is graceful failure" reasoning already applied
+to `AgentLoop`'s degradation fallback two milestones ago.
+
+**Verified the new test is real:** reverted the fix and watched the
+malformed-response test fail with the raw, uncaught
+`APIResponseValidationError` (while the regression-guard test for
+`RateLimitError` continued passing, confirming the fix doesn't disturb
+the existing, more specific handlers) before re-applying.
+
+2 new tests, 545 -> 547 Python tests. `ruff check`/`format --check`
+clean. `docs/providers.md` updated. **This closes out both real
+candidates from the last Explore-agent sweep (Ollama's streaming JSON
+crash, Anthropic's uncaught SDK exception) -- worth another fresh
+sweep next time rather than continued ad-hoc searching.**
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).
