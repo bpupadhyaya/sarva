@@ -327,7 +327,28 @@ async def test_audio_degrade_produces_a_real_transcript_when_sarva_audio_is_inst
     assert "lazy dog" in lowered
 
 
-async def test_audio_wired_into_degrade_message_end_to_end():
+async def test_audio_wired_into_degrade_message_end_to_end(monkeypatch):
+    # A real bug found via a genuine CI failure, not assumed: this test
+    # means to exercise degrade_message's WIRING to the metadata-only
+    # fallback (duration/media-type/size reporting), using pure silence
+    # as a stand-in for "nothing meaningful to transcribe." That
+    # assumption broke in CI (though not in every environment): with
+    # sarva[audio] installed, faster-whisper's real "tiny" model doesn't
+    # reliably return empty text for silence -- it can hallucinate
+    # plausible-sounding phrases (a documented Whisper behavior on
+    # non-speech/silent audio, not a bug in this project's own code),
+    # which took the real-transcript branch instead of the metadata
+    # fallback this test actually means to check. The real-transcription
+    # path already has its own dedicated, honest test above
+    # (test_audio_degrade_produces_a_real_transcript_when_sarva_audio_is_installed,
+    # using real synthesized speech, not silence) -- this test's own job
+    # is the fallback wiring, so it now forces that path deterministically
+    # rather than depending on how a specific Whisper build happens to
+    # handle silence on a specific machine.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module, "stt_extra_installed", lambda: False)
+
     raw = _wav_bytes(duration_s=3.0)
     msg = Message(role="user", content=[AudioBlock(media_type="audio/wav", data=raw)])
 

@@ -6709,3 +6709,44 @@ research-tool misuse, not a live request path). Batching (§3.6f), F1's
 distributed training infrastructure, Gemini's Files API for long
 video, and desktop code-signing/notarization remain deferred for the
 reasons already logged above.
+
+## A genuinely flaky test, caught by CI itself right after the GRPO fix -- Whisper hallucinating on silence, not a real product bug
+
+Immediately after pushing the GRPO fix, its own CI run turned up a
+real, pre-existing test reliability bug, unrelated to that commit's
+content: `test_audio_wired_into_degrade_message_end_to_end` failed on
+the `core` job with `AssertionError: assert '3.0s' in "[Audio
+transcript: Now I'll just do a little bit of a video here. Don't
+forget to click on the subscribe button. ...]"`.
+
+The test feeds `AudioToTextDegrader` a pure-silence WAV (all-zero PCM
+frames), meaning to exercise `degrade_message`'s wiring to the
+metadata-only fallback path (duration/media-type/size reporting) --
+its implicit assumption was that transcribing silence returns empty
+text, which locally it did. In CI, with `sarva[audio]` installed (`uv
+sync --all-packages --all-extras`), faster-whisper's real "tiny" model
+hallucinated a plausible-sounding YouTube-outro-style phrase from the
+silent input instead of returning nothing -- a documented, real
+behavior of small Whisper models on non-speech/silent audio, not a bug
+in this project's own code, and not something under this project's
+control to prevent. That took the real-transcript branch instead of
+the metadata fallback the test actually meant to check.
+
+**Fixed by making the test deterministic rather than hoping a specific
+Whisper build behaves a specific way on silence:** `monkeypatch.setattr
+(audio_module, "stt_extra_installed", lambda: False)` forces the
+metadata-only fallback path directly, regardless of whether the real
+extra happens to be installed or how it happens to handle silence on
+whatever machine runs the suite. The real-transcription path already
+has its own dedicated, honest test
+(`test_audio_degrade_produces_a_real_transcript_when_sarva_audio_is_installed`,
+using real synthesized speech via `sarva.audio.synthesize`, not
+silence) -- this fix just stops the *other* test from accidentally
+depending on the same real transcription behavior it was never meant
+to test.
+
+Not counted as a new test (existing test made deterministic, not a new
+one) -- 559 Python tests, unchanged count. `ruff check`/`format
+--check` clean. This is exactly the kind of gap steady CI verification
+is for: caught immediately on the very next push after a real feature
+fix, not discovered later or shipped silently broken.
