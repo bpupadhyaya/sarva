@@ -8476,13 +8476,13 @@ rather than pulling in `core`.
 reverted just that source file via `git stash`, re-ran its new
 regression test, and confirmed it failed for the exact right reason
 (`Failed: DID NOT RAISE OSError`, since the reverted code never calls
-`os.replace()` at all) before restoring the fix. 8 new regression
-tests (a dedicated `sarva.atomic_write`/`sarva_foundry.atomic_write`
-test module each, plus one at each of the five call sites), all
-following the same "make `os.replace()` raise partway through a
-second write, assert the first write's content survives" shape already
-established for `sarva.config`/`sarva.memory.session`. 612 Python
-tests pass (604 pre-existing + 8 new), all unchanged. `ruff check`/
+`os.replace()` at all) before restoring the fix. 13 new regression
+tests (8 in dedicated `sarva.atomic_write`/`sarva_foundry.atomic_write`
+test modules, 5 at the individual call sites), all following the same
+"make `os.replace()` raise partway through a second write, assert the
+first write's content survives" shape already established for
+`sarva.config`/`sarva.memory.session`. 612 Python tests pass (599
+pre-existing + 13 new), all unchanged. `ruff check`/
 `format --check` clean across `core/ tests/ foundry/ examples/`.
 `docs/memory.md`, `docs/agent-loop.md`, `docs/distillation.md`,
 `docs/foundry/training.md`, and `docs/foundry/tokenizer.md` updated.
