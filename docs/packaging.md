@@ -321,6 +321,26 @@ that `onerror`'s own message isn't overwritten by a later close, and
 that a clean `run_done` never shows a spurious close error), 28 → 31
 TypeScript tests.
 
+**The same hung-UI symptom, reached through a different vector `onclose`
+doesn't cover.** A fresh sweep, checking whether `onmessage` itself
+could still hang the composer even with `onclose` in place, found it
+could: `ws.onmessage`'s `JSON.parse(raw.data)` had no `try`/`catch`. A
+`JSON.parse` throw inside a WebSocket's `onmessage` handler does
+**not** trigger `onerror` or `onclose` in a real browser (or in jsdom)
+— the exception is just logged to the console and the event silently
+dropped, confirmed directly by sending a malformed, non-JSON frame and
+watching `streaming` stay `true` with the composer still disabled, no
+`onerror`/`onclose` handler ever firing. Fixed by wrapping the parse in
+its own `try`/`catch`, treating a malformed frame the same way `onerror`
+treats a real connection error: `settled = true`, a clear message
+("received a malformed message from the server"), `streaming` reset,
+and the socket explicitly closed rather than left open to receive more
+frames after the protocol is already out of sync. **Verified the new
+test is real:** reverted the fix and watched it fail with the raw,
+uncaught `SyntaxError` from `JSON.parse` (not a normal assertion
+failure) before re-applying. All 31 pre-existing tests pass unchanged.
+1 new test, 31 → 32 TypeScript tests.
+
 `GET /doctor` and `POST /config` are the two endpoints the first-run
 onboarding screen (below) depends on — `/doctor` returns exactly what
 `sarva doctor` prints, as JSON (reusing `run_diagnostics()` directly, so

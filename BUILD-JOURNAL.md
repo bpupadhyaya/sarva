@@ -6960,3 +6960,48 @@ Files API for long-video input (no API key here to verify live); a
 first pass at code-signing/notarization for the desktop release bundles
 (needs a real signing identity this environment doesn't have -- likely
 stays deferred).
+
+## App.tsx's WebSocket onmessage handler could still hang the composer forever -- the same symptom the onclose fix targeted, reached through a vector it doesn't cover
+
+The deferred candidate flagged at the end of the last milestone's own
+sweep, picked up directly. `ws.onmessage`'s `JSON.parse(raw.data)` had
+no `try`/`catch`. Confirmed live (a real jsdom test sending a
+malformed, non-JSON frame): a `JSON.parse` throw inside a WebSocket's
+`onmessage` handler does **not** trigger `onerror` or `onclose` in a
+real browser -- the exception is just logged to the console and the
+event silently dropped. `streaming` stayed `true` forever, with every
+composer control (text input, attach-image button, model picker, send
+button) still gated on it and no `onerror`/`onclose` handler ever
+firing to recover -- the exact same "hung UI" symptom the `onclose` fix
+(a few milestones back) exists to prevent, just reached through a
+different code path that fix never touches.
+
+**Fixed by wrapping the parse in its own `try`/`catch`,** treating a
+malformed frame the same way `onerror` already treats a real connection
+error: `settled = true` (so no later handler overwrites the message),
+a clear error string, `streaming`/`pending` reset, and the socket
+explicitly closed -- deliberately closed rather than left open, since a
+protocol desync (one malformed frame) means the connection can't be
+trusted to keep making sense.
+
+**Verified the new test is real:** reverted the fix and watched it fail
+with the raw, uncaught `SyntaxError` thrown straight out of
+`JSON.parse` (not a normal assertion failure) before re-applying, the
+same discipline as every Python-side fix in this journal. All 31
+pre-existing desktop tests pass unchanged. 1 new test, 31 -> 32
+TypeScript tests. `docs/packaging.md` updated;
+`core/sarva/server/static/` rebuilt via `scripts/build-web.sh` and
+committed alongside (CI's `web` job diffs this against a fresh build on
+every push). Combined with the RL-harness milestone just before it,
+566 -> 566 Python tests (unchanged this round) + 32 TypeScript tests.
+
+This closes out the one deferred candidate from the last sweep -- no
+open candidates remain, worth a fresh Explore-agent sweep next time.
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

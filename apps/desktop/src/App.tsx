@@ -148,7 +148,25 @@ export default function App() {
     };
 
     ws.onmessage = (raw: MessageEvent<string>) => {
-      const event = JSON.parse(raw.data) as AgentEvent;
+      let event: AgentEvent;
+      try {
+        event = JSON.parse(raw.data) as AgentEvent;
+      } catch {
+        // A real bug found by actually sending a malformed frame: a
+        // JSON.parse throw inside a WebSocket's onmessage handler does
+        // NOT trigger onerror or onclose in browsers -- it's just logged
+        // to the console and the event silently dropped, which used to
+        // leave `streaming` stuck true forever (every composer control
+        // gated on it) with no recovery short of a page reload -- the
+        // exact "hung UI" symptom the onclose fix above targeted,
+        // reached through a different vector it doesn't cover.
+        settled = true;
+        setError("received a malformed message from the server — is `sarva serve` up to date?");
+        setStreaming(false);
+        setPending(null);
+        ws.close();
+        return;
+      }
 
       if (event.type === "model_stream" && event.event.type === "text_delta" && event.event.text) {
         appendToLastAssistant(event.event.text);

@@ -413,6 +413,28 @@ describe("App", () => {
     expect(screen.queryByText(/connection closed before the run finished/)).not.toBeInTheDocument();
   });
 
+  it("recovers from a malformed (non-JSON) WebSocket frame instead of hanging forever", async () => {
+    // A real bug found by actually sending a malformed frame: JSON.parse
+    // throwing inside onmessage doesn't trigger onerror or onclose in
+    // browsers -- it's just logged to the console and the event silently
+    // dropped, which used to leave `streaming` stuck true forever with
+    // the whole composer disabled, the same hang the onclose fix targets
+    // via a different vector it doesn't cover.
+    await renderApp();
+    submitMessage("this frame will be garbage");
+
+    const ws = latestSocket();
+    open(ws);
+    act(() => {
+      ws.onmessage?.({ data: "not valid json{{{" });
+    });
+
+    const input = screen.getByPlaceholderText("Message Sarva…") as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+    expect(screen.getByText(/malformed message from the server/)).toBeInTheDocument();
+    expect(ws.closed).toBe(true);
+  });
+
   it("does not show a spurious close error after a clean run_done", async () => {
     await renderApp();
     submitMessage("hi");
