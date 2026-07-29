@@ -121,6 +121,49 @@ def _minimal_pdf_bytes(text: str) -> bytes:
     return buf.getvalue()
 
 
+def _pdf_zlib_bomb_bytes() -> bytes:
+    """A real, hand-built, valid single-page PDF whose /Contents stream
+    is a genuine FlateDecode zlib bomb -- a small, highly-compressible
+    payload (100MB of zero bytes) that decompresses far past pypdf's own
+    internal ZLIB_MAX_OUTPUT_LENGTH guard. Built the same
+    write-real-bytes-at-correct-offsets way as `_minimal_pdf_bytes`, not
+    a fixture file, so the test proves a real decompression-bomb trigger
+    rather than a fabricated one."""
+    compressed = zlib.compress(b"0" * (100 * 1024 * 1024), 9)
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R"
+        b"/Resources<</Font<</F1 5 0 R>>>>>>",
+        b"<</Length "
+        + str(len(compressed)).encode()
+        + b"/Filter/FlateDecode>>\nstream\n"
+        + compressed
+        + b"\nendstream",
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    buf = io.BytesIO()
+    buf.write(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(buf.tell())
+        buf.write(f"{i} 0 obj\n".encode())
+        buf.write(obj)
+        buf.write(b"\nendobj\n")
+    xref_offset = buf.tell()
+    n = len(objects) + 1
+    buf.write(f"xref\n0 {n}\n".encode())
+    buf.write(b"0000000000 65535 f \n")
+    for off in offsets:
+        buf.write(f"{off:010d} 00000 n \n".encode())
+    buf.write(b"trailer\n")
+    buf.write(f"<</Size {n}/Root 1 0 R>>\n".encode())
+    buf.write(b"startxref\n")
+    buf.write(f"{xref_offset}\n".encode())
+    buf.write(b"%%EOF")
+    return buf.getvalue()
+
+
 def _synthetic_video_bytes(n_frames: int, fps: int = 10, size: tuple[int, int] = (32, 24)) -> bytes:
     """A real, tiny, genuinely PyAV-decodable mp4 -- encoded with PyAV
     itself, not a fixture file checked into the repo, so the test proves
@@ -590,6 +633,26 @@ async def test_document_degrader_truncates_very_long_extracted_text_honestly():
 
 async def test_document_degrader_falls_back_cleanly_on_a_corrupt_pdf():
     block = DocumentBlock(media_type="application/pdf", data=b"not a real pdf at all")
+
+    out = await DocumentToTextDegrader().degrade(block)
+
+    assert len(out) == 1
+    assert "could not be extracted" in out[0].text
+    assert "application/pdf" in out[0].text
+
+
+async def test_document_degrader_falls_back_cleanly_on_a_decompression_bomb_pdf():
+    # A real bug found by actually building a PDF whose /Contents stream
+    # is a genuine FlateDecode zlib bomb: pypdf's own internal
+    # decompression-bomb guard (ZLIB_MAX_OUTPUT_LENGTH) raises
+    # LimitReachedError, but that's a direct sibling of PdfReadError
+    # under PyPdfError, not a subclass of it, confirmed via the real
+    # class MRO -- the only except clause here used to catch
+    # (PdfReadError, ValueError), so this reached callers as a raw,
+    # uncaught pypdf exception instead of the degrader's own documented
+    # "could not be extracted" fallback. Same DoS shape as
+    # ImageToTextDegrader's DecompressionBombError fix.
+    block = DocumentBlock(media_type="application/pdf", data=_pdf_zlib_bomb_bytes())
 
     out = await DocumentToTextDegrader().degrade(block)
 

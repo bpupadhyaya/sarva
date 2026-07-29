@@ -7079,3 +7079,58 @@ doesn't have); Gemini's Files API for long-video input (no API key here
 to verify live); a first pass at code-signing/notarization for the
 desktop release bundles (needs a real signing identity this environment
 doesn't have -- likely stays deferred).
+
+## DocumentToTextDegrader didn't catch pypdf's own decompression-bomb exception -- a file never individually audited the way image/video/audio were
+
+A fresh Explore-agent sweep, pointed at increasingly fresh angles after
+nineteen prior sweeps: document degrading, MockProvider production
+usage, budget.py float/zero-division edge cases, `sarva eval`'s CLI
+wiring, `Onboarding.tsx`, and `content.py`'s block-validation gaps --
+five came back clean, one produced a real, previously-unaudited bug.
+`core/sarva/multimodal/degraders/document.py` had never been checked
+individually the way image/video/audio degraders had (no dedicated
+`test_document*.py`; its tests live only inside the shared
+`test_degraders.py` and never exercised this path).
+
+**Confirmed live, not assumed from reading the source:** built a real,
+hand-crafted, valid single-page PDF whose `/Contents` stream is a
+genuine `FlateDecode` zlib bomb -- a small, highly-compressible payload
+(100MB of zero bytes, real `zlib.compress`, not a fixture) that
+decompresses far past `pypdf`'s own internal decompression-bomb guard
+(`ZLIB_MAX_OUTPUT_LENGTH`). Calling `DocumentToTextDegrader().degrade()`
+on it raised straight out: `pypdf.errors.LimitReachedError: Limit
+reached while decompressing.` The bug: `_extract_pdf_text`'s only
+`except` clause was `(PdfReadError, ValueError)`, and `LimitReachedError`
+is a direct sibling of `PdfReadError` under `PyPdfError` -- confirmed
+via the real class MRO, not assumed from the name -- so it slipped past
+uncaught. The exact same "tiny file declares/contains something
+implausibly huge" DoS shape already fixed for `ImageToTextDegrader`'s
+`DecompressionBombError` a number of milestones back, just never
+checked against this newer, structurally similar degrader.
+
+**Severity named honestly, matching every other fix in this class:**
+`AgentLoop.run()`'s broad `except Exception` around `degrade_message`
+already catches this one layer up, so it doesn't crash a live `chat`/
+`run`/`/chat`/`/ws/chat` turn today -- but a direct caller of
+`DocumentToTextDegrader` outside that wrapper got a raw, undocumented
+`pypdf` exception instead of the degrader's own documented "could not
+be extracted" fallback text.
+
+**Fixed with the smallest possible change:** widened the except clause
+to `(PdfReadError, ValueError, LimitReachedError)`, importing
+`LimitReachedError` from `pypdf.errors`. **Verified the new test is
+real:** reverted the fix and watched it fail with the raw, uncaught
+`LimitReachedError` (not a normal assertion failure) before re-applying.
+All 7 pre-existing document-degrader tests pass unchanged. 1 new test,
+570 -> 571 Python tests. `docs/multimodal.md` updated.
+
+No open candidates remain from this sweep -- worth a fresh one next
+time.
+
+**Next:** batching multiple concurrent inference requests (§3.6f, still
+a deliberate deferral -- real correctness risk); F1's real distributed
+training infrastructure (needs real multi-node compute this environment
+doesn't have); Gemini's Files API for long-video input (no API key here
+to verify live); a first pass at code-signing/notarization for the
+desktop release bundles (needs a real signing identity this environment
+doesn't have -- likely stays deferred).

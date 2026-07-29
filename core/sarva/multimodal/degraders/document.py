@@ -31,7 +31,7 @@ from __future__ import annotations
 import io
 
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import LimitReachedError, PdfReadError
 
 from sarva.multimodal.content import DocumentBlock, Modality, TextBlock
 from sarva.multimodal.fetch import resolve_media_bytes
@@ -59,7 +59,16 @@ def _extract_pdf_text(raw: bytes) -> str | None:
     try:
         reader = PdfReader(io.BytesIO(raw))
         pages = [page.extract_text() or "" for page in reader.pages]
-    except (PdfReadError, ValueError):
+    except (PdfReadError, ValueError, LimitReachedError):
+        # A real bug found by actually building a PDF whose /Contents
+        # stream is a FlateDecode zlib bomb (a small, highly-compressible
+        # payload that decompresses to 100MB): pypdf's own internal
+        # decompression-bomb guard (ZLIB_MAX_OUTPUT_LENGTH) raises
+        # LimitReachedError, but that's a direct sibling of PdfReadError
+        # under PyPdfError, not a subclass of it -- confirmed via the
+        # real class MRO, not assumed from the name. The same
+        # "tiny-file-declares-something-implausibly-huge" DoS shape
+        # already fixed for ImageToTextDegrader's DecompressionBombError.
         return None
     text = "\n\n".join(p for p in pages if p)
     return text or None

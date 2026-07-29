@@ -191,6 +191,26 @@ ubiquitous, so unsupported formats fall back to the same
 declared-metadata-only report the other degraders use, a real, named,
 deferred gap rather than an implicit one.
 
+**A real bug found by actually building a PDF whose `/Contents` stream
+is a genuine `FlateDecode` zlib bomb** (a small, highly-compressible
+payload that decompresses to 100MB): `pypdf` has its own internal
+decompression-bomb guard (`ZLIB_MAX_OUTPUT_LENGTH`), and the exception
+it raises when a stream exceeds that limit, `LimitReachedError`, is a
+direct sibling of `PdfReadError` under `PyPdfError` — **not** a
+subclass of it, confirmed via the real class MRO, not assumed from the
+name. The only `except` clause this degrader had (`(PdfReadError,
+ValueError)`) never caught it, so a decompression-bomb PDF crashed with
+a raw, uncaught `pypdf` exception instead of the documented "could not
+be extracted" fallback — the exact same "tiny file declares/contains
+something implausibly huge" DoS shape already fixed for
+`ImageToTextDegrader`'s `DecompressionBombError`, just never checked
+for documents, which hadn't been individually audited that way before.
+Fixed by widening the except clause to `(PdfReadError, ValueError,
+LimitReachedError)`. **Verified the new test is real:** reverted the
+fix and watched it fail with the raw, uncaught `LimitReachedError`
+before re-applying. All 7 pre-existing document-degrader tests pass
+unchanged. 1 new test, 570 → 571 Python tests.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's
