@@ -7,6 +7,7 @@ module)."""
 from __future__ import annotations
 
 import os as os_module
+import threading
 
 import pytest
 from sarva_foundry.atomic_write import atomic_write, atomic_write_text
@@ -54,3 +55,30 @@ def test_atomic_write_generic_write_fn_receives_the_tmp_path(tmp_path):
     atomic_write(path, write_fn)
     assert seen["tmp_path"] != path
     assert path.read_bytes() == b"weights"
+
+
+def test_atomic_write_does_not_raise_when_two_real_threads_race_the_same_path(tmp_path):
+    # Mirrors the identical fix in sarva.atomic_write -- a PID-only temp
+    # filename collides across every thread of one process (a PID names
+    # a process, not a thread), so two threads writing the same path
+    # concurrently raced the same temp file. Confirmed live before this
+    # fix: deterministically, 10/10 trials raised an uncaught
+    # FileNotFoundError. Fixed by including threading.get_ident() too.
+    path = tmp_path / "shared.bin"
+    errors = []
+
+    def writer(n):
+        try:
+            atomic_write_text(path, f"content-{n}")
+        except OSError as e:
+            errors.append(e)
+
+    for _ in range(20):
+        errors.clear()
+        threads = [threading.Thread(target=writer, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+    assert path.read_text().startswith("content-")

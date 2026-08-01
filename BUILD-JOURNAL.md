@@ -8876,3 +8876,101 @@ environment doesn't have); Gemini's Files API for long-video input (no
 API key here to verify live); a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have -- likely stays deferred).
+
+## The atomic-write helper itself had a real thread-safety bug -- a PID-only temp filename collides across every thread of one process
+
+A round-33 sweep, deliberately pointed away from re-litigating the
+just-closed RL-harness fd-race finding, and toward genuinely fresh
+angles: threading/concurrency bugs elsewhere in the codebase, now that
+the RL harness sweep had just found a real one. It found a second,
+independent thread-safety defect -- this time in `sarva.atomic_write`
+itself, the shared helper two prior rounds built specifically to close
+a *different* bug class (interrupted-write data loss) across six real
+call sites.
+
+**The mechanism:** `atomic_write`'s sibling temp path was built as
+`path.with_name(f"{path.name}.tmp-{os.getpid()}")` -- unique across
+processes, since two processes never share a PID, but identical across
+every *thread* of the same process, since a PID names a process, not a
+thread. Two real `threading.Thread`s calling `atomic_write` (or its
+`atomic_write_bytes`/`atomic_write_text` wrappers) on the *same* target
+path concurrently therefore race the identical temp file: both
+`write_fn` calls target it, and whichever thread's `os.replace()` runs
+second finds the temp path already renamed away by the winner, raising
+an uncaught `FileNotFoundError`.
+
+**Confirmed live, independently, before touching any fix code:** two
+real `threading.Thread`s calling `atomic_write_bytes` on the same
+target path, 10 trials -- 10/10 raised `FileNotFoundError` in exactly
+one thread, not a rare timing fluke but a deterministic collision given
+this naming scheme.
+
+**Blast radius today is narrower than the mechanism itself, and worth
+stating precisely rather than overclaiming:** every current call site
+was checked (`sarva.config`'s `save_config`/`unset_config`,
+`sarva.memory.session.SessionStore.save`, `WriteFileTool.run`,
+`sarva.distill.save_jsonl`, `speak --out`'s `_write_bytes_or_exit`, the
+`sarva_foundry` checkpoint/tokenizer/config.json sites) and none of
+them currently invoke this helper from two genuinely concurrent OS
+threads on the same path today -- `sarva.config` happens to be
+independently safe because it already wraps its own write in a
+separate, unrelated cross-process `flock`; the others simply aren't
+reached concurrently by anything in the current codebase. But this is
+exactly the kind of latent defect that survives quietly until a future
+caller (a thread-pool-backed deployment, an `asyncio.to_thread`-wrapped
+write) reaches for the helper without re-auditing its internals -- and
+the module's own docstring explicitly invites exactly that ("every
+future writer of real data in `core` should reach for this"). A shared
+safety primitive needs to be correct under concurrency on its own
+terms, not just safe by accident of its current callers.
+
+**Fixed by including the calling thread's id in the temp filename too:**
+`threading.get_ident()`, appended alongside `os.getpid()`. A thread id
+is genuinely unique among the threads alive at any one moment (unlike
+a PID, which is stable but shared by every thread of one process), so
+this removes the collision entirely without changing the atomic-rename
+mechanism itself. Applied identically to both `sarva.atomic_write` and
+its intentionally-mirrored `sarva_foundry.atomic_write` copy (`core`
+and `sarva_foundry` share no dependency in either direction, so the fix
+had to land in both files, not just one).
+
+**Verified the new tests are real:** reverted each file individually
+via `git stash` and re-ran its new regression test -- both failed with
+the exact `FileNotFoundError` (`errors == [FileNotFoundError(...)]`,
+not an empty list) before re-applying. Ran the live repro 20 times per
+test (not just once) given this is a genuine race, not a deterministic
+branch -- 0/20 failures with the fix, matching the standalone repro's
+0/50 result run separately beforehand. All 8 pre-existing atomic_write
+tests pass unchanged. 2 new tests, 617 -> 619 Python tests. `ruff
+check`/`format --check` clean. `docs/memory.md` updated with this as a
+follow-up to the six-site propagation history.
+
+**A brief methodology note, since this is now the second time a fresh
+sweep found a bug in code from the *previous* few milestones rather
+than in long-standing code:** both of the last two rounds' strongest
+findings (the RL harness's raw-fd race, and this thread-safety bug)
+were in code shipped within the last several days, not in code that's
+sat untouched for weeks. This isn't evidence the recent work was
+careless -- both bugs required a specific, non-obvious concurrency
+angle (a background thread racing a pipe read; two threads racing a
+temp filename) that the original live-verification passes didn't
+happen to exercise, since neither original fix was tested under actual
+thread concurrency. It's a useful signal for future sweeps: freshly-
+shipped code, especially anything touching subprocess I/O or shared
+file paths, deserves a concurrency-specific look before being
+considered fully settled, not just a correctness-under-the-obvious-
+inputs check.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- reconsidered this round and
+confirmed to genuinely be a throughput feature, not a hidden
+correctness bug, unlike the two previously-reconsidered deferrals);
+F1's real distributed training infrastructure (needs real multi-node
+compute this environment doesn't have); Gemini's Files API for
+long-video input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have -- likely stays
+deferred).

@@ -113,6 +113,26 @@ write in `sarva.providers.foundry_provider.save_checkpoint_bundle`.
 `sarva.cli._write_bytes_or_exit` (backing `speak --out`'s own write)
 had the identical unfixed pattern — see the packaging chapter.
 
+**The shared helper itself had a real thread-safety bug, found by a
+later sweep specifically re-checking the propagation fix's own
+infrastructure rather than only its call sites.** The sibling temp
+filename was built from `os.getpid()` alone — unique across processes,
+but identical across every *thread* of one process, since a PID names
+a process, not a thread. Two real `threading.Thread`s calling
+`atomic_write`/`atomic_write_bytes`/`atomic_write_text` on the *same*
+path concurrently raced the same temp file: whichever thread's
+`os.replace()` ran second found the temp path already renamed away by
+the winner and raised an uncaught `FileNotFoundError`, confirmed live,
+deterministically, 10/10 trials. Not reachable through any current
+call site today (each one either serializes writes some other way
+already, or isn't invoked from two genuinely concurrent threads yet),
+but this module's own docstring invites every future writer of real
+data to reach for it without re-auditing the file — so the helper
+itself needs to be correct under concurrency, not just its current
+callers. Fixed by including `threading.get_ident()` in the temp
+filename too (unique among the threads alive at any one moment, unlike
+a PID), in both `sarva.atomic_write` and its `sarva_foundry` mirror.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:

@@ -17,6 +17,7 @@ exactly the wrong moment.
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -28,8 +29,16 @@ def atomic_write(path: Path, write_fn: Callable[[Path], None]) -> None:
     either the last fully-written version or the new one, never a
     partial one. Generic over `write_fn` on purpose: `Trainer.
     save_checkpoint` needs `torch.save`'s own zip-serialization logic,
-    not a raw bytes/text write."""
-    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    not a raw bytes/text write.
+
+    Temp filename includes the calling thread's id, not just the
+    process id -- mirrors the identical fix in `sarva.atomic_write`
+    (see that module's own docstring for the live-confirmed race: a
+    PID-only temp name collides across every thread of one process,
+    since they all share one PID, so two threads writing the same
+    `path` concurrently raced the same temp file and one of them raised
+    an uncaught `FileNotFoundError`)."""
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
     write_fn(tmp_path)
     os.replace(tmp_path, path)
 
