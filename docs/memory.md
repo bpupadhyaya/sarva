@@ -147,28 +147,74 @@ plain `asyncio.gather` over two coroutines mirroring `/chat`'s own
 code path — no threads needed at all: two ordinary turns on the *same*
 session name (two browser tabs both chatting into the default session,
 say) produced a session file holding only one turn's new message, the
-other silently discarded, no error to either client. Fixed with a
-per-session `asyncio.Lock` (`_locked_session` in `sarva.server.app`),
-held for the *entire* load-through-save span of a turn, not just the
-final write — locking only the save would still let both turns load
-the same stale history before either saved, reproducing the identical
-race. Turns on different sessions are fully unaffected, since each
-session gets its own lock; two turns on the *same* session now
-serialize, the only sane semantics for what is, after all, one linear
-conversation. **Deliberately in-process only, named honestly rather
-than oversold:** a real agent turn awaits genuine multi-second
-provider calls, and a cross-process file lock (the `config.json`
-approach) held for that whole span would need its own careful async-
-compatible wait implementation to avoid blocking the event loop — a
-CLI process and a running server (or two CLI invocations) writing the
-same session file concurrently is the identical bug shape but a
-structurally different, still-open case, not covered by this fix.
-Verified with a real `httpx.AsyncClient` over the app's own ASGI
+other silently discarded, no error to either client.
+
+**First fixed with a per-session, in-process `asyncio.Lock`, then
+upgraded to a real cross-process one once the narrower fix's own
+honestly-stated gap turned out to matter.** The first version held an
+`asyncio.Lock` for the whole load-through-save span, closing the
+same-process case (two browser tabs, or any two connections to one
+running `sarva serve`) — but explicitly documented, not silently
+assumed away, that a CLI process and a running server (or two CLI
+invocations) writing the same session file was the identical bug shape
+through a structurally different, cross-process channel that fix
+didn't reach. Confirmed live before upgrading: two genuine
+`subprocess.Popen` OS processes (not threads, not asyncio tasks — real
+separate processes) doing load→sleep→save on the same session lost one
+side's turn every time.
+
+`SessionStore` now exposes `locked(name)`, a real cross-process
+exclusive lock (`flock` on POSIX, `msvcrt.locking` on Windows) on a
+dedicated sibling `.lock` file — the identical mechanism `sarva.
+config`'s own `_exclusive_lock` already uses, applied to sessions for
+the first time. Both `/chat` and `/ws/chat`, and now `sarva chat`/
+`sarva run` too, wrap their entire load-through-save turn in `async
+with store.locked(session):` — the CLI and the server (and two CLI
+invocations, and two server connections) all now serialize against
+each other through the *same* lock file, closing the whole bug class
+in one mechanism rather than two separate ones. A single cross-process
+lock replaced the earlier in-process-only `asyncio.Lock` entirely
+(rather than keeping both), since POSIX `flock`/Windows `msvcrt.
+locking` correctly serialize same-process callers against each other
+exactly as well as different-process ones — no meaningful correctness
+gap traded away by simplifying to one mechanism.
+
+The blocking acquire call runs via `asyncio.to_thread`, not directly on
+the event loop: acquiring this lock can genuinely block for as long as
+another process's real agent turn takes, and calling a blocking
+syscall directly from async code for that long would freeze every
+*other* unrelated request this process is serving, not just the one
+waiting on this session — the lock is held afterward simply by keeping
+the file object open for the `async with` block's duration, so the
+thread is only needed for the acquire/release syscalls themselves.
+`locked(None)` is a deliberate no-op: a session-less turn has nothing
+to protect, and locking on a shared "no session" key would needlessly
+serialize every anonymous request against every other one.
+
+**Wiring this into the CLI needed one careful adjustment, not just a
+mechanical wrap:** `store.locked(session)` validates the session name
+as part of entering the `async with` block, which happens *before* any
+code inside that block runs — including the existing `try`/`except
+ValueError` that used to be the only thing catching an invalid
+`--session` name. Wrapping the load-through-save span in the lock
+without also moving that catch outward would have reintroduced the raw
+traceback on a bad session name the original fix (see above) closed.
+Both `sarva chat` and `sarva run` now catch `ValueError` around the
+whole `async with store.locked(...)` statement, not just around the
+old `store.load()` call nested inside it — confirmed by the exact test
+suite regression this mistake produced the first time through: three
+server tests covering invalid/non-string session names failed with a
+raw, uncaught `TypeError`/`ValueError` before this adjustment, caught
+and fixed in the same pass before shipping.
+
+Verified two ways: a real `httpx.AsyncClient` over the app's own ASGI
 transport (not the synchronous `TestClient` used elsewhere, which
 can't genuinely interleave two in-flight requests) firing two truly
-concurrent `POST /chat` calls at the same session — reverting the fix
-reproduced the exact loss (`got 2` messages instead of the expected 4)
-before re-applying.
+concurrent `POST /chat` calls at the same session, and a genuine
+two-`subprocess.Popen` test proving the cross-process case directly —
+reverting `SessionStore.locked` reproduced `AttributeError: 'SessionStore'
+object has no attribute 'locked'` in both new session-store tests and
+every dependent server/CLI test before re-applying.
 
 ## Semantic memory: TF-IDF + cosine similarity
 

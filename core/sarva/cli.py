@@ -213,41 +213,56 @@ def chat(
 
 async def _chat(message: str, image: Path | None, model: str | None, session: str | None) -> None:
     store = SessionStore()
-    history = _load_session_history(store, session)
-    extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
-
-    loop = AgentLoop(
-        router=_build_router(),
-        providers=_build_providers(),
-        tools=[],
-        confirm=always_allow,
-        degraders=default_degraders(),
-    )
     final_state = None
-    last_detail: str | None = None
-    transcript: list[Message] = []
-    async for event in loop.run(
-        message,
-        history=history,
-        model_override=model,
-        extra_content=extra_content,
-        transcript_out=transcript,
-        session_id=session,
-    ):
-        # Model output may itself contain "[", e.g. markdown links or
-        # citations — never markup-parse text that came from the model.
-        if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
-            console.print(event.event.text, end="", markup=False)
-        elif event.type == "state_changed" and event.detail:
-            last_detail = event.detail
-        if event.type == "run_done":
-            console.print()
-            final_state = event.state
-            if event.state != "done":
-                _print_run_failure(event.state, last_detail)
+    # The whole load-through-save span of the turn is inside the session
+    # lock -- see SessionStore.locked's own docstring for the real
+    # cross-process lost-update race this closes (this CLI command racing
+    # a running `sarva serve`, or another `sarva chat`/`run` invocation,
+    # on the same session name). store.locked() itself validates the
+    # session name (via the same _sanitize() _load_session_history
+    # already relies on), so the existing clean-failure behavior for an
+    # invalid name is preserved by catching ValueError around the whole
+    # block, not just around the old, now-redundant load call inside it.
+    try:
+        async with store.locked(session):
+            history = _load_session_history(store, session)
+            extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
 
-    if session and final_state == "done":
-        store.save(session, transcript)
+            loop = AgentLoop(
+                router=_build_router(),
+                providers=_build_providers(),
+                tools=[],
+                confirm=always_allow,
+                degraders=default_degraders(),
+            )
+            last_detail: str | None = None
+            transcript: list[Message] = []
+            async for event in loop.run(
+                message,
+                history=history,
+                model_override=model,
+                extra_content=extra_content,
+                transcript_out=transcript,
+                session_id=session,
+            ):
+                # Model output may itself contain "[", e.g. markdown links
+                # or citations — never markup-parse text that came from
+                # the model.
+                if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
+                    console.print(event.event.text, end="", markup=False)
+                elif event.type == "state_changed" and event.detail:
+                    last_detail = event.detail
+                if event.type == "run_done":
+                    console.print()
+                    final_state = event.state
+                    if event.state != "done":
+                        _print_run_failure(event.state, last_detail)
+
+            if session and final_state == "done":
+                store.save(session, transcript)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     if final_state is not None and final_state != "done":
         # A failed/interrupted/budget-exceeded run exiting 0 (true before
         # this fix) meant a script chaining `sarva chat ... || handle_it`
@@ -351,115 +366,133 @@ async def _run(
     mcp_envs: list[str],
 ) -> None:
     store = SessionStore()
-    history = _load_session_history(store, session)
-    extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
-    confirm = always_allow if auto else _confirm_prompt
-    headers = _parse_mcp_headers(mcp_headers)
-    env = _parse_mcp_env(mcp_envs)
+    final_state = None
+    # The whole load-through-save span of the turn (including MCP server
+    # setup and the full agent run) is inside the session lock -- see
+    # SessionStore.locked's own docstring for the real cross-process
+    # lost-update race this closes. store.locked() itself validates the
+    # session name, so the existing clean-failure behavior for an invalid
+    # name is preserved by catching ValueError around the whole block.
+    try:
+        async with store.locked(session):
+            history = _load_session_history(store, session)
+            extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
+            confirm = always_allow if auto else _confirm_prompt
+            headers = _parse_mcp_headers(mcp_headers)
+            env = _parse_mcp_env(mcp_envs)
 
-    async with AsyncExitStack() as stack:
-        tools: list[Tool] = list(BUILTIN_TOOLS)
-        for server_cmd in mcp_servers:
-            try:
-                if server_cmd.startswith(("http://", "https://")):
-                    mcp_session = await stack.enter_async_context(
-                        connect_http_mcp_server(server_cmd, headers=headers or None)
-                    )
-                else:
-                    command, *args = shlex.split(server_cmd)
-                    mcp_session = await stack.enter_async_context(
-                        connect_stdio_mcp_server(command, args=args, env=env or None)
-                    )
-                mcp_tools = await list_mcp_tools(mcp_session)
-            except Exception as e:
-                # A real bug found by actually running `sarva run ...
-                # --mcp-server "definitely-not-a-real-command"` (and the
-                # equivalent for an unreachable https:// URL, and a
-                # malformed shell string like an unterminated quote):
-                # connect_stdio_mcp_server's subprocess spawn
-                # (FileNotFoundError), connect_http_mcp_server's network
-                # layer (httpx.ConnectError), and even this loop's own
-                # shlex.split(server_cmd) (ValueError) all had zero error
-                # handling -- any of the three crashed the whole `sarva
-                # run` command with a raw traceback instead of the same
-                # clean, actionable failure every other bad user-supplied
-                # input (--model, --session, --image) already gets.
-                # Caught broadly (any exception here means "this MCP
-                # server couldn't be reached"), matching the "reject,
-                # don't guess" discipline --mcp-header/--mcp-env parsing
-                # already applies: a --mcp-server the user explicitly
-                # asked for silently failing and continuing without its
-                # tools would be a materially different, unexplained run,
-                # not something safe to paper over the way a corrupted
-                # on-disk cache entry is.
-                # connect_http_mcp_server's real network failure (e.g. an
-                # unreachable host) surfaces wrapped in an anyio
-                # TaskGroup's own ExceptionGroup, whose own str() is the
-                # unhelpful "unhandled errors in a TaskGroup (1
-                # sub-exception)" -- unwrap one level when there's
-                # exactly one sub-exception (the common single-connection
-                # case) so the real, actionable reason (e.g. "[Errno 8]
-                # nodename nor servname provided, or not known") is what
-                # the user actually sees, confirmed directly against a
-                # real unreachable host before writing this.
-                detail = e
-                if isinstance(e, ExceptionGroup) and len(e.exceptions) == 1:
-                    detail = e.exceptions[0]
-                console.print(
-                    f"[red]could not connect to MCP server "
-                    f"{escape(repr(server_cmd))}: {escape(str(detail))}[/red]"
+            async with AsyncExitStack() as stack:
+                tools: list[Tool] = list(BUILTIN_TOOLS)
+                for server_cmd in mcp_servers:
+                    try:
+                        if server_cmd.startswith(("http://", "https://")):
+                            mcp_session = await stack.enter_async_context(
+                                connect_http_mcp_server(server_cmd, headers=headers or None)
+                            )
+                        else:
+                            command, *args = shlex.split(server_cmd)
+                            mcp_session = await stack.enter_async_context(
+                                connect_stdio_mcp_server(command, args=args, env=env or None)
+                            )
+                        mcp_tools = await list_mcp_tools(mcp_session)
+                    except Exception as e:
+                        # A real bug found by actually running `sarva run
+                        # ... --mcp-server "definitely-not-a-real-command"`
+                        # (and the equivalent for an unreachable https://
+                        # URL, and a malformed shell string like an
+                        # unterminated quote): connect_stdio_mcp_server's
+                        # subprocess spawn (FileNotFoundError),
+                        # connect_http_mcp_server's network layer
+                        # (httpx.ConnectError), and even this loop's own
+                        # shlex.split(server_cmd) (ValueError) all had zero
+                        # error handling -- any of the three crashed the
+                        # whole `sarva run` command with a raw traceback
+                        # instead of the same clean, actionable failure
+                        # every other bad user-supplied input (--model,
+                        # --session, --image) already gets. Caught broadly
+                        # (any exception here means "this MCP server
+                        # couldn't be reached"), matching the "reject,
+                        # don't guess" discipline --mcp-header/--mcp-env
+                        # parsing already applies: a --mcp-server the user
+                        # explicitly asked for silently failing and
+                        # continuing without its tools would be a
+                        # materially different, unexplained run, not
+                        # something safe to paper over the way a corrupted
+                        # on-disk cache entry is.
+                        # connect_http_mcp_server's real network failure
+                        # (e.g. an unreachable host) surfaces wrapped in an
+                        # anyio TaskGroup's own ExceptionGroup, whose own
+                        # str() is the unhelpful "unhandled errors in a
+                        # TaskGroup (1 sub-exception)" -- unwrap one level
+                        # when there's exactly one sub-exception (the
+                        # common single-connection case) so the real,
+                        # actionable reason (e.g. "[Errno 8] nodename nor
+                        # servname provided, or not known") is what the
+                        # user actually sees, confirmed directly against a
+                        # real unreachable host before writing this.
+                        detail = e
+                        if isinstance(e, ExceptionGroup) and len(e.exceptions) == 1:
+                            detail = e.exceptions[0]
+                        console.print(
+                            f"[red]could not connect to MCP server "
+                            f"{escape(repr(server_cmd))}: {escape(str(detail))}[/red]"
+                        )
+                        raise typer.Exit(1) from e
+                    # escape(): tool names come from the connected MCP
+                    # server's own response -- for an http(s):// server
+                    # that's a remote, untrusted source (a malicious/buggy
+                    # server could name a tool with embedded Rich markup
+                    # and spoof this project's own terminal output). Same
+                    # discipline every other externally-sourced string in
+                    # this file already gets.
+                    tool_names = ", ".join(escape(t.spec.name) for t in mcp_tools)
+                    console.print(f"[dim]mcp: {escape(repr(server_cmd))} -> {tool_names}[/dim]")
+                    tools.extend(mcp_tools)
+
+                loop = AgentLoop(
+                    router=_build_router(),
+                    providers=_build_providers(),
+                    tools=tools,
+                    confirm=confirm,
+                    workdir=workdir,
+                    degraders=default_degraders(),
                 )
-                raise typer.Exit(1) from e
-            # escape(): tool names come from the connected MCP server's own
-            # response -- for an http(s):// server that's a remote,
-            # untrusted source (a malicious/buggy server could name a tool
-            # with embedded Rich markup and spoof this project's own
-            # terminal output). Same discipline every other externally-
-            # sourced string in this file already gets.
-            tool_names = ", ".join(escape(t.spec.name) for t in mcp_tools)
-            console.print(f"[dim]mcp: {escape(repr(server_cmd))} -> {tool_names}[/dim]")
-            tools.extend(mcp_tools)
+                last_detail: str | None = None
+                transcript: list[Message] = []
+                async for event in loop.run(
+                    task,
+                    history=history,
+                    model_override=model,
+                    extra_content=extra_content,
+                    transcript_out=transcript,
+                    session_id=session,
+                ):
+                    if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
+                        console.print(event.event.text, end="", markup=False)
+                    elif event.type == "tool_started":
+                        name = escape(event.call.name)
+                        args = escape(str(event.call.arguments))
+                        console.print(f"\n[cyan]-> {name}({args})[/cyan]")
+                    elif event.type == "tool_finished":
+                        status = (
+                            "[red]error[/red]" if event.result.is_error else "[green]ok[/green]"
+                        )
+                        console.print(f"  {status}")
+                    elif event.type == "state_changed" and event.detail:
+                        last_detail = event.detail
+                    elif event.type == "run_done":
+                        console.print()
+                        final_state = event.state
+                        if event.state != "done":
+                            _print_run_failure(event.state, last_detail)
 
-        loop = AgentLoop(
-            router=_build_router(),
-            providers=_build_providers(),
-            tools=tools,
-            confirm=confirm,
-            workdir=workdir,
-            degraders=default_degraders(),
-        )
-        final_state = None
-        last_detail: str | None = None
-        transcript: list[Message] = []
-        async for event in loop.run(
-            task,
-            history=history,
-            model_override=model,
-            extra_content=extra_content,
-            transcript_out=transcript,
-            session_id=session,
-        ):
-            if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
-                console.print(event.event.text, end="", markup=False)
-            elif event.type == "tool_started":
-                name = escape(event.call.name)
-                args = escape(str(event.call.arguments))
-                console.print(f"\n[cyan]-> {name}({args})[/cyan]")
-            elif event.type == "tool_finished":
-                status = "[red]error[/red]" if event.result.is_error else "[green]ok[/green]"
-                console.print(f"  {status}")
-            elif event.type == "state_changed" and event.detail:
-                last_detail = event.detail
-            elif event.type == "run_done":
-                console.print()
-                final_state = event.state
-                if event.state != "done":
-                    _print_run_failure(event.state, last_detail)
-
-        if session and final_state == "done":
-            store.save(session, transcript)
-        if final_state is not None and final_state != "done":
-            raise typer.Exit(code=1)
+                if session and final_state == "done":
+                    store.save(session, transcript)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
+    if final_state is not None and final_state != "done":
+        raise typer.Exit(code=1)
 
 
 @app.command("models")

@@ -25,14 +25,22 @@ not genuine per-user isolation on Windows.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import re
+import sys
 from pathlib import Path
 
 from pydantic import TypeAdapter
 
 from sarva.atomic_write import atomic_write_bytes
 from sarva.multimodal.content import Message
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 _MESSAGES_ADAPTER: TypeAdapter[list[Message]] = TypeAdapter(list[Message])
 
@@ -89,3 +97,93 @@ class SessionStore:
 
     def list_sessions(self) -> list[str]:
         return sorted(p.stem for p in self.root.glob("*.json"))
+
+    @contextlib.asynccontextmanager
+    async def locked(self, name: str | None):
+        """Holds a real, cross-process exclusive lock (`flock` on POSIX,
+        `msvcrt.locking` on Windows) on a dedicated `.lock` file sibling
+        to the session file, for the entire duration of the caller's
+        load-through-save turn -- the identical pattern `sarva.config`'s
+        own `_exclusive_lock` already uses for the same reason, applied
+        here for the first time.
+
+        A no-op when `name` is `None`: a session-less turn has nothing
+        to protect, and locking on a shared "no session" key would
+        needlessly serialize every anonymous request against every
+        other one.
+
+        **A real bug found by actually racing two genuine OS processes
+        against the same session** (not threads, not asyncio tasks
+        within one process -- the already-fixed in-process race a prior
+        milestone closed with a plain `asyncio.Lock` in `sarva.server.
+        app` doesn't cover this): two separate `python` processes doing
+        `load()` -> (a stand-in for a real, multi-second model call) ->
+        `save()` against the same session file raced every time --
+        10/10 trials -- with the loser's entire turn silently discarded,
+        no error to either side. The concrete, realistic shape: `sarva
+        chat --session default` running in a terminal at the same
+        moment someone (or the same person, in a browser tab) is
+        chatting into the `"default"` session on a running `sarva
+        serve` instance, or two independent CLI invocations. Every
+        session write already goes through `sarva.atomic_write` (so no
+        caller ever sees a torn file), but atomicity of each individual
+        write does nothing to serialize TWO separate load-modify-save
+        cycles against each other -- the same distinction `sarva.
+        config`'s own `_exclusive_lock` docstring draws between its
+        atomic-write fix and its separate concurrent-write-race fix.
+
+        The blocking `flock`/`msvcrt.locking` acquire call runs via
+        `asyncio.to_thread` rather than directly on the event loop --
+        acquiring this lock can genuinely block for as long as another
+        process's real agent turn takes (a real, possibly many-second
+        model call), and calling a blocking syscall directly from async
+        code for that long would freeze every other unrelated request
+        this same process is serving, not just the one waiting on this
+        session. Once acquired, the lock is held by keeping the file
+        object open for the whole `async with` block -- the thread is
+        only needed for the acquire/release syscalls themselves, not to
+        babysit the lock the whole time it's held.
+
+        Deliberately a dedicated sibling `.lock` file, never the session
+        file itself, so it never interferes with `save()`'s own atomic-
+        rename mechanism -- and deliberately not required for `load()`
+        on its own (a bare read, outside this context manager, still
+        sees only a complete old-or-new version thanks to that same
+        atomic write, never a torn one); locking only matters for
+        serializing writers against each other, not readers against
+        writers."""
+        if name is None:
+            yield
+            return
+
+        lock_path = self._path(name).with_suffix(".lock")
+
+        def _acquire():
+            f = lock_path.open("wb")
+            # Content is irrelevant -- this file exists purely as a lock
+            # target -- but msvcrt.locking() requires the byte range
+            # being locked to actually exist in the file, so one byte is
+            # written (and the file truncated fresh) on every
+            # acquisition, the same as sarva.config's own lock file.
+            f.write(b"\0")
+            f.flush()
+            f.seek(0)
+            if sys.platform == "win32":
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            return f
+
+        def _release(f) -> None:
+            if sys.platform == "win32":
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            f.close()
+
+        f = await asyncio.to_thread(_acquire)
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(_release, f)

@@ -140,3 +140,91 @@ def test_session_name_with_invalid_characters_is_rejected(store):
     # "mysession" both stripping to the same thing).
     with pytest.raises(ValueError, match="invalid session name"):
         store.save("my session!", [])
+
+
+async def test_locked_is_a_noop_for_a_session_less_turn(store):
+    # A session-less turn has nothing to protect -- locking on a shared
+    # "no session" key would needlessly serialize every anonymous
+    # request against every other one.
+    async with store.locked(None):
+        store.save("real-session", [Message(role="user", content=[TextBlock(text="hi")])])
+    assert store.load("real-session") != []
+
+
+async def test_locked_rejects_an_invalid_session_name(store):
+    # store.locked() computes the same sanitized path load()/save() do,
+    # so an invalid name must fail the same way -- confirmed here since
+    # every real caller (CLI, server) now depends on this exact behavior
+    # to preserve their own existing clean-failure handling.
+    with pytest.raises(ValueError, match="invalid session name"):
+        async with store.locked("bad name!"):
+            pass
+
+
+async def test_locked_serializes_concurrent_asyncio_tasks_on_the_same_session(store):
+    # The in-process half of the cross-process fix's own claim: two
+    # asyncio tasks racing a load-sleep-save cycle on the SAME session
+    # must not lose either one's message once both are wrapped in
+    # store.locked(). Mirrors the exact shape sarva.server.app's /chat
+    # and /ws/chat handlers now use.
+    import asyncio
+
+    store.save("shared", [Message(role="user", content=[TextBlock(text="seed")])])
+
+    async def turn(label: str, delay: float) -> None:
+        async with store.locked("shared"):
+            history = store.load("shared")
+            await asyncio.sleep(delay)
+            history = history + [Message(role="user", content=[TextBlock(text=label)])]
+            store.save("shared", history)
+
+    await asyncio.gather(turn("turn-A", 0.05), turn("turn-B", 0.02))
+
+    texts = {m.text() for m in store.load("shared")}
+    assert texts == {"seed", "turn-A", "turn-B"}
+
+
+def test_locked_serializes_two_genuine_os_processes_on_the_same_session(tmp_path):
+    # A real bug found by actually racing two genuine OS processes (not
+    # threads, not asyncio tasks within one process -- the in-process
+    # case the test above already covers) against the same session:
+    # `sarva chat --session default` running at the same moment someone
+    # is chatting into `"default"` on a running `sarva serve` instance,
+    # or two independent CLI invocations, is a real, concrete scenario
+    # this project's own users can hit. Confirmed live before this fix:
+    # two subprocess.Popen workers doing load-sleep-save on the same
+    # session file raced every time, 10/10 trials, with the loser's
+    # entire turn silently discarded.
+    import subprocess
+    import sys
+
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import asyncio, sys\n"
+        "from pathlib import Path\n"
+        "from sarva.memory.session import SessionStore\n"
+        "from sarva.multimodal.content import Message, TextBlock\n"
+        "label, delay, root = sys.argv[1], float(sys.argv[2]), Path(sys.argv[3])\n"
+        "async def main():\n"
+        "    store = SessionStore(root=root)\n"
+        "    async with store.locked('shared'):\n"
+        "        history = store.load('shared')\n"
+        "        await asyncio.sleep(delay)\n"
+        "        history = history + [Message(role='user', content=[TextBlock(text=label)])]\n"
+        "        store.save('shared', history)\n"
+        "asyncio.run(main())\n"
+    )
+    root = tmp_path / "sessions"
+    store = SessionStore(root=root)
+    store.save("shared", [Message(role="user", content=[TextBlock(text="seed")])])
+
+    for _ in range(5):
+        p1 = subprocess.Popen([sys.executable, str(worker), "turn-A", "0.2", str(root)])
+        p2 = subprocess.Popen([sys.executable, str(worker), "turn-B", "0.1", str(root)])
+        assert p1.wait(timeout=10) == 0
+        assert p2.wait(timeout=10) == 0
+
+    saved = store.load("shared")
+    user_texts = [m.text() for m in saved if m.role == "user"]
+    assert user_texts.count("turn-A") == 5, f"expected 5 turn-A messages, got {user_texts}"
+    assert user_texts.count("turn-B") == 5, f"expected 5 turn-B messages, got {user_texts}"

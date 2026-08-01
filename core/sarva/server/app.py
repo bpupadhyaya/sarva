@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
-from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -69,38 +67,18 @@ _CONFIRM_TIMEOUT_SECONDS = 300
 # (e.g. two browser tabs both chatting into the default session)
 # produced a session file holding only ONE of the two turns' new
 # messages, the other silently discarded with no error to either
-# client. A per-session asyncio.Lock, held for the whole load-through-
-# save span of a turn, serializes concurrent turns on the SAME session
-# (the only sane semantics -- a session is one linear conversation, not
-# something that supports two genuinely concurrent branches) while
-# leaving turns on DIFFERENT sessions fully unaffected, since each gets
-# its own lock. Deliberately in-process only, not the cross-process
-# `flock` config.json uses: a real agent turn awaits genuine, multi-
-# second model-provider calls, and a real cross-process file lock held
-# for that whole span would need its own careful async-compatible wait
-# implementation to avoid blocking the event loop -- a real, separate
-# gap, honestly not covered here. This closes the concretely
-# demonstrated race (two connections to the SAME running `sarva serve`
-# process); a CLI process and a running server (or two CLI invocations)
-# writing the same session file concurrently is the same bug shape but
-# a structurally different, unaddressed case.
-_session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-
-
-@contextlib.asynccontextmanager
-async def _locked_session(session_id: str | None):
-    """A no-op for a session-less turn (nothing to protect); otherwise
-    holds that session's own lock for the duration of the `async with`
-    block. Callers wrap the entire load-through-save span of a turn in
-    this, not just the final `save()` call -- locking only the write
-    would still let two turns both `load()` the same stale history
-    before either saves, reproducing the exact race this exists to
-    close."""
-    if session_id is None:
-        yield
-        return
-    async with _session_locks[session_id]:
-        yield
+# client. Both handlers wrap their whole load-through-save span in
+# `store.locked(session_id)` -- a real, cross-process exclusive lock
+# (see SessionStore.locked's own docstring), not just an in-process one:
+# a prior version of this fix used a plain in-process `asyncio.Lock`
+# here, which closed the same-process case (two connections to the same
+# running `sarva serve`) but left an identically-shaped cross-process
+# race open (the CLI and a running server, or two separate CLI
+# invocations, writing the same session file) -- confirmed live with
+# two genuine OS processes before that gap was closed too. A single
+# cross-process lock now covers both cases at once, since POSIX
+# `flock`/Windows `msvcrt.locking` correctly serialize same-process
+# callers against each other exactly as well as different-process ones.
 
 
 def _is_same_origin(origin: str | None, host: str | None) -> bool:
@@ -207,87 +185,91 @@ def create_app() -> FastAPI:
     @app.post("/chat", response_model=ChatResponse)
     async def chat(req: ChatRequest) -> ChatResponse:
         store = SessionStore()
-        # The whole load-through-save span of the turn is inside the
-        # session lock -- see _locked_session's own docstring for why
-        # locking only the final save() wouldn't actually close the race.
-        async with _locked_session(req.session):
-            try:
+        try:
+            # The whole load-through-save span of the turn is inside the
+            # session lock -- see SessionStore.locked's own docstring for
+            # why locking only the final save() wouldn't actually close
+            # the race. store.locked() itself validates the session name
+            # (the same SessionStore._sanitize() call `store.load` below
+            # already relied on), so this outer except ValueError is what
+            # now catches an invalid name -- entering the `async with`
+            # raises before the inner try block below even starts.
+            async with store.locked(req.session):
                 history = store.load(req.session) if req.session else []
                 # A real bug found by actually sending {"image_base64":
                 # "not-valid-base64!!!", ...}: base64.b64decode() raises
-                # binascii.Error (a ValueError subclass) for malformed input,
-                # and nothing here caught it -- a genuine unhandled 500, the
-                # same "raw traceback instead of a clean message" bug class
-                # already fixed for an invalid --session name a few lines
-                # above. Sharing this try block means both failure modes get
+                # binascii.Error (a ValueError subclass) for malformed
+                # input, and nothing here caught it -- a genuine unhandled
+                # 500, the same "raw traceback instead of a clean message"
+                # bug class already fixed for an invalid --session name.
+                # Sharing this except block means both failure modes get
                 # the identical clean ChatResponse(state=failed, detail=...)
                 # treatment.
                 extra_content = _extra_content_blocks(req.image_base64, req.image_media_type)
-            except ValueError as e:
-                # A real bug found by actually sending {"session": "bad
-                # name!"}: SessionStore._sanitize() raises a plain ValueError
-                # for any name outside [A-Za-z0-9_-], and nothing here caught
-                # it -- a genuine unhandled 500, not a clean failure, the
-                # exact "raw traceback instead of a clean message" bug class
-                # already fixed for eval/distill's --model. Reported the same
-                # way an unknown --model already is: a real ChatResponse with
-                # state=failed and the actual reason in `detail`, not a
-                # differently-shaped HTTP error for what's semantically the
-                # same "this request can't run" case.
+
+                try:
+                    loop = AgentLoop(
+                        router=build_router(),
+                        providers=build_providers(),
+                        tools=[],
+                        confirm=always_allow,
+                        degraders=default_degraders(),
+                    )
+                except ConfigError as e:
+                    # The /chat-specific counterpart to the global
+                    # ConfigError handler above: this endpoint's own
+                    # established shape for "this request can't run" is a
+                    # real ChatResponse with state=failed and the reason
+                    # in `detail`, not the generic {"detail": ...} 500 the
+                    # global handler returns elsewhere -- kept consistent
+                    # with the unknown-model and invalid-session failure
+                    # modes above, which callers already parse the same
+                    # way.
+                    return ChatResponse(
+                        state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e)
+                    )
+
+                state = AgentState.FAILED
+                final_message: Message | None = None
+                spend = Spend()
+                last_detail: str | None = None
+                transcript: list[Message] = []
+                async for event in loop.run(
+                    req.message,
+                    history=history,
+                    model_override=req.model,
+                    extra_content=extra_content,
+                    transcript_out=transcript,
+                    session_id=req.session,
+                ):
+                    if event.type == "state_changed" and event.detail:
+                        last_detail = event.detail
+                    if event.type == "run_done":
+                        state = event.state
+                        final_message = event.final_message
+                        spend = event.spend
+
+                if req.session and state == AgentState.DONE:
+                    store.save(req.session, transcript)
+
                 return ChatResponse(
-                    state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e)
+                    state=state,
+                    message=final_message.text() if final_message else None,
+                    spend=spend,
+                    detail=last_detail if state != AgentState.DONE else None,
                 )
-
-            try:
-                loop = AgentLoop(
-                    router=build_router(),
-                    providers=build_providers(),
-                    tools=[],
-                    confirm=always_allow,
-                    degraders=default_degraders(),
-                )
-            except ConfigError as e:
-                # The /chat-specific counterpart to the global ConfigError
-                # handler above: this endpoint's own established shape for
-                # "this request can't run" is a real ChatResponse with
-                # state=failed and the reason in `detail`, not the generic
-                # {"detail": ...} 500 the global handler returns elsewhere --
-                # kept consistent with the unknown-model and invalid-session
-                # failure modes just above, which callers already parse the
-                # same way.
-                return ChatResponse(
-                    state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e)
-                )
-
-            state = AgentState.FAILED
-            final_message: Message | None = None
-            spend = Spend()
-            last_detail: str | None = None
-            transcript: list[Message] = []
-            async for event in loop.run(
-                req.message,
-                history=history,
-                model_override=req.model,
-                extra_content=extra_content,
-                transcript_out=transcript,
-                session_id=req.session,
-            ):
-                if event.type == "state_changed" and event.detail:
-                    last_detail = event.detail
-                if event.type == "run_done":
-                    state = event.state
-                    final_message = event.final_message
-                    spend = event.spend
-
-            if req.session and state == AgentState.DONE:
-                store.save(req.session, transcript)
-
-            return ChatResponse(
-                state=state,
-                message=final_message.text() if final_message else None,
-                spend=spend,
-                detail=last_detail if state != AgentState.DONE else None,
-            )
+        except ValueError as e:
+            # A real bug found by actually sending {"session": "bad
+            # name!"}: SessionStore._sanitize() raises a plain ValueError
+            # for any name outside [A-Za-z0-9_-], and nothing here caught
+            # it -- a genuine unhandled 500, not a clean failure, the
+            # exact "raw traceback instead of a clean message" bug class
+            # already fixed for eval/distill's --model. Reported the same
+            # way an unknown --model already is: a real ChatResponse with
+            # state=failed and the actual reason in `detail`, not a
+            # differently-shaped HTTP error for what's semantically the
+            # same "this request can't run" case.
+            return ChatResponse(state=AgentState.FAILED, message=None, spend=Spend(), detail=str(e))
 
     @app.websocket("/ws/chat")
     async def ws_chat(websocket: WebSocket) -> None:
@@ -422,92 +404,100 @@ def create_app() -> FastAPI:
                 return bool(reply.get("approved", False))
 
             store = SessionStore()
-            # See _locked_session's own docstring: the whole load-through-
-            # save span of the turn is inside the session lock, the WS
-            # counterpart to the identical wrapping /chat just got.
-            async with _locked_session(session):
-                try:
-                    if model is not None and not isinstance(model, str):
-                        # A real bug found by actually sending {"model":
-                        # ["a", "b"]}: AgentLoop.run()'s
-                        # router.pick(override=model) call, several frames
-                        # deep in the async generator below, does a dict
-                        # lookup keyed on this value -- a non-string JSON
-                        # type raised an uncaught TypeError ("unhashable
-                        # type: 'list'") well after streaming had already
-                        # started. /chat never sees this because Pydantic
-                        # validates ChatRequest.model's type before the
-                        # handler runs; /ws/chat parses raw, schema-less
-                        # JSON, so nothing validated this until now.
-                        raise TypeError(f"model must be a string, got {type(model).__name__}")
-                    history = store.load(session) if session else []
-                    # The WS counterpart to the same real bug just fixed for
-                    # /chat: a malformed "image_base64" made
-                    # base64.b64decode() raise binascii.Error (a ValueError
-                    # subclass) with nothing here to catch it -- the whole
-                    # ASGI call crashed with no frame sent at all, the client
-                    # saw a bare ClosedResourceError, confirmed directly with
-                    # a real TestClient WebSocket session before this fix.
-                    # Sharing this try block gives it the identical clean
-                    # failure treatment the invalid-session-name case below
-                    # already has. Also catches TypeError now: session=123 or
-                    # image_base64=["a"] raise TypeError from _sanitize()'s
-                    # regex match / base64.b64decode() respectively, the same
-                    # "non-string JSON field" shape as the model check above,
-                    # confirmed live before this fix.
-                    extra_content = _extra_content_blocks(
-                        payload.get("image_base64"), payload.get("image_media_type")
-                    )
-                except (ValueError, TypeError) as e:
-                    # SessionStore._sanitize() raises a plain ValueError for
-                    # an invalid session name, and reaching this point
-                    # uncaught didn't even give the client the REST
-                    # endpoint's own clean detail message -- it crashed the
-                    # whole ASGI call with no frame sent at all, and the
-                    # client saw a bare ClosedResourceError, confirmed
-                    # directly with a real TestClient WebSocket session
-                    # before this fix. Reported as a real state_changed +
-                    # run_done pair -- the exact same shape an unknown
-                    # --model already produces -- so App.tsx's existing
-                    # failure-detail handling (see BUILD-JOURNAL.md) shows it
-                    # with no client-side changes needed.
-                    await _send_failure(str(e))
-                    return
+            try:
+                # See SessionStore.locked's own docstring: the whole load-
+                # through-save span of the turn is inside the session lock,
+                # the WS counterpart to the identical wrapping /chat just
+                # got. store.locked() itself validates the session name,
+                # so entering the `async with` below raises before the
+                # inner try block even starts for an invalid name -- this
+                # outer except (ValueError, TypeError) is what now catches
+                # that case (session=123 raises TypeError the same way
+                # SessionStore._sanitize()'s regex match already did).
+                async with store.locked(session):
+                    try:
+                        if model is not None and not isinstance(model, str):
+                            # A real bug found by actually sending {"model":
+                            # ["a", "b"]}: AgentLoop.run()'s
+                            # router.pick(override=model) call, several
+                            # frames deep in the async generator below, does
+                            # a dict lookup keyed on this value -- a
+                            # non-string JSON type raised an uncaught
+                            # TypeError ("unhashable type: 'list'") well
+                            # after streaming had already started. /chat
+                            # never sees this because Pydantic validates
+                            # ChatRequest.model's type before the handler
+                            # runs; /ws/chat parses raw, schema-less JSON,
+                            # so nothing validated this until now.
+                            raise TypeError(f"model must be a string, got {type(model).__name__}")
+                        history = store.load(session) if session else []
+                        # The WS counterpart to the same real bug just fixed
+                        # for /chat: a malformed "image_base64" made
+                        # base64.b64decode() raise binascii.Error (a
+                        # ValueError subclass) with nothing here to catch it
+                        # -- the whole ASGI call crashed with no frame sent
+                        # at all, the client saw a bare ClosedResourceError,
+                        # confirmed directly with a real TestClient
+                        # WebSocket session before this fix. Sharing this
+                        # try block gives it the identical clean failure
+                        # treatment the invalid-session-name case below
+                        # already has.
+                        extra_content = _extra_content_blocks(
+                            payload.get("image_base64"), payload.get("image_media_type")
+                        )
+                    except (ValueError, TypeError) as e:
+                        await _send_failure(str(e))
+                        return
 
-                try:
-                    loop = AgentLoop(
-                        router=build_router(),
-                        providers=build_providers(),
-                        tools=BUILTIN_TOOLS,
-                        confirm=always_allow if auto else ws_confirm,
-                        degraders=default_degraders(),
-                    )
-                except ConfigError as e:
-                    # The WS counterpart to the same real bug just fixed for
-                    # /chat: a corrupted ~/.sarva/config.json raised a raw
-                    # json.JSONDecodeError with nothing here to catch it --
-                    # the whole ASGI call crashed with no frame sent at all,
-                    # the client seeing a bare ClosedResourceError, the exact
-                    # same failure mode already fixed here for an invalid
-                    # session name and a malformed image_base64 field.
-                    await _send_failure(str(e))
-                    return
-                state = AgentState.FAILED
-                transcript: list[Message] = []
-                async for event in loop.run(
-                    message,
-                    history=history,
-                    model_override=model,
-                    extra_content=extra_content,
-                    transcript_out=transcript,
-                    session_id=session,
-                ):
-                    await websocket.send_text(event.model_dump_json())
-                    if event.type == "run_done":
-                        state = event.state
+                    try:
+                        loop = AgentLoop(
+                            router=build_router(),
+                            providers=build_providers(),
+                            tools=BUILTIN_TOOLS,
+                            confirm=always_allow if auto else ws_confirm,
+                            degraders=default_degraders(),
+                        )
+                    except ConfigError as e:
+                        # The WS counterpart to the same real bug just fixed
+                        # for /chat: a corrupted ~/.sarva/config.json raised
+                        # a raw json.JSONDecodeError with nothing here to
+                        # catch it -- the whole ASGI call crashed with no
+                        # frame sent at all, the client seeing a bare
+                        # ClosedResourceError, the exact same failure mode
+                        # already fixed here for an invalid session name and
+                        # a malformed image_base64 field.
+                        await _send_failure(str(e))
+                        return
+                    state = AgentState.FAILED
+                    transcript: list[Message] = []
+                    async for event in loop.run(
+                        message,
+                        history=history,
+                        model_override=model,
+                        extra_content=extra_content,
+                        transcript_out=transcript,
+                        session_id=session,
+                    ):
+                        await websocket.send_text(event.model_dump_json())
+                        if event.type == "run_done":
+                            state = event.state
 
-                if session and state == AgentState.DONE:
-                    store.save(session, transcript)
+                    if session and state == AgentState.DONE:
+                        store.save(session, transcript)
+            except (ValueError, TypeError) as e:
+                # SessionStore._sanitize() raises a plain ValueError for an
+                # invalid session name (or TypeError for a non-string one),
+                # and reaching this point uncaught didn't even give the
+                # client the REST endpoint's own clean detail message -- it
+                # crashed the whole ASGI call with no frame sent at all, and
+                # the client saw a bare ClosedResourceError, confirmed
+                # directly with a real TestClient WebSocket session before
+                # this fix. Reported as a real state_changed + run_done
+                # pair -- the exact same shape an unknown --model already
+                # produces -- so App.tsx's existing failure-detail handling
+                # (see BUILD-JOURNAL.md) shows it with no client-side
+                # changes needed.
+                await _send_failure(str(e))
         except WebSocketDisconnect:
             pass
         finally:

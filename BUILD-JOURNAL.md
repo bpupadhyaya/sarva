@@ -9075,3 +9075,105 @@ for long-video input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have -- likely stays
 deferred).
+
+## The cross-process session-write race, named honestly as still-open at the end of the last milestone, closed in this one -- and a real self-caught regression along the way
+
+A round-35 sweep, told to investigate the just-named cross-process
+session race directly if time allowed, alongside a general fresh sweep.
+The named gap was real: the previous milestone's in-process
+`asyncio.Lock` fix for `/chat`/`/ws/chat`'s own concurrent-turn race
+explicitly documented, rather than silently left implicit, that a CLI
+process and a running server (or two CLI invocations) writing the same
+session file was the identical bug shape through a structurally
+different channel that fix didn't reach.
+
+**Confirmed live, independently, before writing any fix code:** two
+genuine `subprocess.Popen` OS processes -- not threads, not asyncio
+tasks sharing one process, the exact distinction that made the
+in-process fix insufficient here -- each doing `load()` -> a sleep
+standing in for a real multi-second model call -> `save()` against the
+same session file. Result: the loser's entire turn silently discarded,
+every trial.
+
+**Fixed by giving `SessionStore` a real cross-process lock,
+`locked(name)`** -- `flock` on POSIX, `msvcrt.locking` on Windows, on a
+dedicated sibling `.lock` file, the identical mechanism `sarva.config`'s
+own `_exclusive_lock` already uses, applied to sessions for the first
+time. `locked(None)` is a deliberate no-op (nothing to protect for a
+session-less turn). The previous milestone's in-process-only
+`asyncio.Lock` was removed entirely rather than kept alongside the new
+cross-process lock: POSIX `flock`/Windows `msvcrt.locking` correctly
+serialize same-process callers against each other exactly as well as
+different-process ones, so one mechanism now covers both the
+same-process case (two browser tabs) and the cross-process case (CLI
+vs. server, or two CLI invocations) that motivated this milestone,
+rather than maintaining two separate, overlapping locking schemes. The
+blocking acquire runs via `asyncio.to_thread`, not directly on the
+event loop -- acquiring this lock can genuinely block for as long as
+another process's real agent turn takes, and a blocking syscall held
+that long directly in async code would freeze every *other* unrelated
+request the same process is serving, not just the one waiting on this
+session.
+
+Wired into all four real call sites: `/chat` and `/ws/chat` (replacing
+their prior in-process lock with this one), and -- newly reachable by
+this fix -- `sarva chat` and `sarva run`, whose own load-through-save
+spans (including, for `run`, MCP server connection setup, since a
+stale history read before a slow MCP handshake would reproduce the
+exact race just as easily) now wrap in the identical `async with
+store.locked(session):`.
+
+**A real regression, caught by this project's own test suite before it
+ever reached a commit, not by luck:** wrapping the load-through-save
+span in `store.locked(session)` moves session-name validation earlier
+-- `locked()` computes the same sanitized path `load()`/`save()` already
+did, and does so *before* any code inside the `async with` block runs,
+including the pre-existing `try`/`except ValueError` (server) and
+`try`/`except ValueError`-via-`_load_session_history` (CLI) that used
+to be the only thing catching an invalid session name. Wrapping the
+span without also moving those catches outward silently reopened the
+exact "raw traceback instead of a clean failure" bug this project fixed
+for invalid session names several milestones ago -- three existing
+server tests (an invalid session name on `/chat`, an invalid name and a
+non-string `session` field on `/ws/chat`) failed immediately on the
+first full test-suite run after wiring the lock in, with a real,
+uncaught `TypeError`/`ValueError` surfacing exactly where the old fix
+had closed it. Caught and fixed in the same pass, before any commit:
+both server handlers and both CLI commands now catch `ValueError`
+(server also `TypeError`, matching `/ws/chat`'s existing broader catch
+for non-string JSON fields) around the *entire* `async with
+store.locked(...)` statement, not just around the narrower call nested
+inside it. Worth naming as its own small lesson: locking around an
+existing operation can change *where* an existing exception first
+surfaces, not just add new behavior -- a full test-suite run, not just
+the new tests, is what caught this, matching why this project always
+runs the whole suite rather than only the tests it just wrote.
+
+**Verified thoroughly, two different ways matching the two distinct
+concurrency models this fix now covers:** a real `httpx.AsyncClient`
+over the server's own ASGI transport firing two truly concurrent `POST
+/chat` calls at the same session (the same-process case), and a new,
+genuine two-`subprocess.Popen` test proving the cross-process case
+directly, run five times in a loop and asserting all ten turns'
+messages survived, not just that no exception was raised. Reverting
+`SessionStore.locked` reproduced `AttributeError: 'SessionStore' object
+has no attribute 'locked'` in all four new session-store tests and
+every dependent server/CLI test before re-applying. All 620
+pre-existing tests pass unchanged. 4 new tests, 620 -> 624 Python
+tests. `ruff check`/`format --check` clean. `docs/memory.md` rewritten
+to document the upgrade from the in-process fix to this one, including
+the self-caught regression, rather than silently replacing the earlier
+entry as if the first fix had always been complete.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- confirmed genuinely deferred,
+not a hidden bug); F1's real distributed training infrastructure (needs
+real multi-node compute this environment doesn't have); Gemini's Files
+API for long-video input (no API key here to verify live); a first pass
+at code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have -- likely stays
+deferred). No other named-but-not-yet-picked-up gaps remain after this
+milestone -- worth a fresh Explore-agent sweep next time.
