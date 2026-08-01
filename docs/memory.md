@@ -133,6 +133,43 @@ callers. Fixed by including `threading.get_ident()` in the temp
 filename too (unique among the threads alive at any one moment, unlike
 a PID), in both `sarva.atomic_write` and its `sarva_foundry` mirror.
 
+**A different, higher-level race lived one layer up, in the server's
+own turn handling — a real lost-update bug on concurrent turns against
+the same session.** `POST /chat` and `/ws/chat` each do `store.load(
+session)` at the start of a turn, run the full `AgentLoop.run()` (real,
+possibly multi-second model-provider calls in between), then `store.
+save(session, transcript)` with the *whole* new history at the end —
+the same unlocked read-modify-write shape already fixed for `config.
+json`'s own concurrent-write race, just never applied to session
+storage. Confirmed live, both with real `threading.Thread`s and (more
+importantly, since it's the server's actual concurrency model) with
+plain `asyncio.gather` over two coroutines mirroring `/chat`'s own
+code path — no threads needed at all: two ordinary turns on the *same*
+session name (two browser tabs both chatting into the default session,
+say) produced a session file holding only one turn's new message, the
+other silently discarded, no error to either client. Fixed with a
+per-session `asyncio.Lock` (`_locked_session` in `sarva.server.app`),
+held for the *entire* load-through-save span of a turn, not just the
+final write — locking only the save would still let both turns load
+the same stale history before either saved, reproducing the identical
+race. Turns on different sessions are fully unaffected, since each
+session gets its own lock; two turns on the *same* session now
+serialize, the only sane semantics for what is, after all, one linear
+conversation. **Deliberately in-process only, named honestly rather
+than oversold:** a real agent turn awaits genuine multi-second
+provider calls, and a cross-process file lock (the `config.json`
+approach) held for that whole span would need its own careful async-
+compatible wait implementation to avoid blocking the event loop — a
+CLI process and a running server (or two CLI invocations) writing the
+same session file concurrently is the identical bug shape but a
+structurally different, still-open case, not covered by this fix.
+Verified with a real `httpx.AsyncClient` over the app's own ASGI
+transport (not the synchronous `TestClient` used elsewhere, which
+can't genuinely interleave two in-flight requests) firing two truly
+concurrent `POST /chat` calls at the same session — reverting the fix
+reproduced the exact loss (`got 2` messages instead of the expected 4)
+before re-applying.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:

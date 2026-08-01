@@ -8974,3 +8974,104 @@ long-video input (no API key here to verify live); a first pass at
 code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have -- likely stays
 deferred).
+
+## The server's own session handling had an unlocked lost-update race -- concurrent turns on the same session silently drop each other's messages
+
+A round-34 sweep, pointed at genuinely fresh angles after the last two
+rounds both found real thread-safety bugs (the RL harness's raw-fd
+race, `atomic_write`'s own PID-only temp filename) -- systematically
+checking other shared, concurrently-reachable state across the
+codebase for the same class of defect. It found a real one, this time
+one layer up from storage mechanics: the server's own turn-handling
+code around `SessionStore`.
+
+**The mechanism:** both `POST /chat` and `/ws/chat` follow the same
+shape -- `store.load(session)` at the start of a turn, run the full
+`AgentLoop.run()` (real, possibly multi-second model-provider calls
+happen in between), then `store.save(session, transcript)` with the
+*entire* new history at the end. This is structurally identical to the
+`config.json` concurrent-write race fixed several rounds ago
+(`_exclusive_lock` in `sarva.config`) -- a classic unlocked
+read-modify-write pair -- just never applied to session storage,
+because `SessionStore` itself has no locking of any kind.
+
+**Confirmed live, two ways, the second one the more important of the
+two:** real `threading.Thread`s doing load-sleep-save on the same
+session reproduced a silent lost update 10/10. More importantly, a
+plain `asyncio.gather` over two coroutines mirroring `/chat`'s actual
+code path -- `load()`, `await asyncio.sleep(...)` standing in for the
+real awaited model call, `save()` -- reproduced the *identical* lost
+update with **no OS threads at all**. That's the mechanism that
+actually matters: `/chat` and `/ws/chat` run inside a single asyncio
+event loop, which already interleaves two in-flight requests across
+the real `await`s an agent turn makes for model calls, with zero
+threading involved. Two ordinary browser tabs (or the CLI and the
+desktop app) both chatting into the same named session -- the common
+`"default"` session being the obvious case -- silently lose one side's
+turn, with no error surfaced to either client. Not previously named or
+deferred anywhere in this journal; a genuinely new finding, not a
+rediscovery.
+
+**Fixed with a per-session `asyncio.Lock`, held for the entire
+load-through-save span of a turn, not just the final write.** A new
+`_locked_session` async context manager in `sarva.server.app`, backed
+by a module-level `defaultdict(asyncio.Lock)` keyed on session name:
+a no-op for a session-less turn (nothing to protect), otherwise holds
+that session's own lock for the `async with` block's whole duration.
+Locking only the final `save()` call would still let two turns both
+`load()` the same stale history before either saved, reproducing the
+exact race this exists to close -- the same reasoning `config.json`'s
+own fix already established (`_exclusive_lock` wraps the whole
+read-modify-write cycle, not just the write). Turns on *different*
+sessions are completely unaffected, since each gets its own lock; two
+turns on the *same* session now serialize -- the only sane semantics,
+since a session is one linear conversation, not something that
+supports two genuinely concurrent branches merging automatically.
+Applied identically to both `/chat` and `/ws/chat`, since both share
+the exact same load-run-save shape.
+
+**Deliberately scoped to the concretely demonstrated case, named
+honestly rather than oversold:** this is an in-process `asyncio.Lock`,
+not a cross-process file lock like `config.json`'s own fix. A real
+agent turn awaits genuine, multi-second provider calls; holding a real
+cross-process `flock` for that whole span would need its own careful
+async-compatible wait implementation to avoid blocking the event
+loop -- a real, separate piece of work, not attempted this round. This
+closes the concretely demonstrated race: two connections to the *same
+running* `sarva serve` process. A CLI process and a running server (or
+two separate CLI invocations) writing the *same session file*
+concurrently is the identical bug shape but a structurally different,
+cross-process case this fix does not address -- named explicitly in
+both the function's own docstring and here, not left implicit.
+
+**Verified the new test is real, through the actual HTTP layer, not
+just at the `SessionStore` level:** a new test uses a real
+`httpx.AsyncClient` over the app's own ASGI transport (the synchronous
+`TestClient` used everywhere else in this test file can't genuinely
+interleave two in-flight requests, so it wouldn't have exercised this
+race at all) to fire two truly concurrent `POST /chat` calls at the
+same session name. Reverting the fix reproduced the exact failure mode
+live: `got 2` messages saved instead of the expected `4`, with the
+surviving message being whichever turn's `save()` happened to run
+second -- `turn-A`'s entire contribution silently gone, exactly the
+bug described above, not a contrived assertion mismatch. All 37
+pre-existing server tests pass unchanged. 1 new test, 619 -> 620
+Python tests. `ruff check`/`format --check` clean. `docs/memory.md`
+updated as a follow-up to the atomic-write propagation history it sits
+next to (a related but structurally distinct bug class -- storage-
+mechanics data loss vs. application-level lost updates).
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); the newly-named cross-process session-write race (CLI vs.
+server, or two CLI invocations, on the same session file -- real,
+structurally distinct from the fix above, not yet picked up); real
+container/VM sandboxing for the RL coding-task harness (genuinely
+deferred, infrastructure-heavy work); batching multiple concurrent
+inference requests (§3.6f -- confirmed genuinely deferred, not a
+hidden bug); F1's real distributed training infrastructure (needs real
+multi-node compute this environment doesn't have); Gemini's Files API
+for long-video input (no API key here to verify live); a first pass at
+code-signing/notarization for the desktop release bundles (needs a
+real signing identity this environment doesn't have -- likely stays
+deferred).

@@ -4,6 +4,7 @@ running server process."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -166,6 +167,50 @@ def test_chat_with_session_persists_across_requests(tmp_path, monkeypatch):
 
     store = SessionStore()
     assert len(store.load("web-test")) == 4  # 2 turns * (user + assistant)
+
+
+async def test_two_concurrent_chat_turns_on_the_same_session_do_not_lose_a_message(
+    tmp_path, monkeypatch
+):
+    # A real bug found by actually racing two concurrent turns on the
+    # same session with asyncio.gather -- the exact concurrency model
+    # /chat and /ws/chat already run under (a single asyncio event loop
+    # interleaving two in-flight requests across the real `await`s an
+    # agent turn makes, no threads needed to reproduce it). SessionStore.
+    # load() at the start of a turn and .save() at the end are a classic
+    # unlocked read-modify-write pair -- the identical bug class already
+    # fixed for config.json's own concurrent-write race, just never
+    # applied to session storage. Confirmed live before this fix: two
+    # ordinary turns on the SAME session name (e.g. two browser tabs
+    # both chatting into the default session) produced a session file
+    # holding only ONE of the two turns' new messages, the other
+    # silently discarded with no error to either client. Uses a real
+    # httpx.AsyncClient over the app's own ASGI transport (not the
+    # synchronous TestClient used elsewhere in this file, which can't
+    # genuinely interleave two in-flight requests) so both turns are
+    # truly concurrent, not merely sequential.
+    _force_mock_only(monkeypatch)
+    monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)
+
+    import httpx
+
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r1, r2 = await asyncio.gather(
+            client.post("/chat", json={"message": "turn-A", "session": "shared"}),
+            client.post("/chat", json={"message": "turn-B", "session": "shared"}),
+        )
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+
+    store = SessionStore()
+    saved = store.load("shared")
+    # Both turns' user messages must survive -- 2 turns * (user +
+    # assistant) = 4 messages, not 2 (one turn's save silently
+    # overwriting the other's).
+    assert len(saved) == 4, f"expected 4 messages from both turns, got {len(saved)}"
+    user_texts = {m.text() for m in saved if m.role == "user"}
+    assert user_texts == {"turn-A", "turn-B"}
 
 
 def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
