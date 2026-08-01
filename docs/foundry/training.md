@@ -410,16 +410,40 @@ now streamed to the subprocess over its own stdin in two stages — the
 driver (passed via `python -c`, so `-c` mode's `__main__` has no
 `__file__` at all) execs `submitted_code` first and prints its own
 acknowledgment marker, and only *after* the caller sees that marker
-does it write `task.test_code` and the sentinel to the same pipe. A
-submission has no channel to that content early: it isn't on disk, it
-isn't in an env var or `argv`, and trying to read ahead on stdin itself
-just blocks (there's nothing there yet) rather than revealing anything
-— the worst a submission can do by trying is time out and score `0.0`,
-same as any other timeout. Verified against both the file-read exploit
-and the same idea via `os.environ` (confirming the fix is "nothing is
-reachable early," not "just don't use a file").
+does it write `task.test_code` and the sentinel to the same pipe.
+Verified against both the file-read exploit and the same idea via
+`os.environ` (confirming the fix is "nothing is reachable early," not
+"just don't use a file").
 
-**A third, related bug in the same file: the "hard wall-clock timeout"
+**A third, independent bypass proved that fix's own "reading ahead on
+stdin just blocks, revealing nothing" claim wrong for one specific
+channel.** A background thread reading the raw file descriptor
+directly (`os.read(0, ...)`, bypassing Python's buffered `sys.stdin`
+entirely) can win a genuine OS-level race for the phase-2 bytes the
+instant they arrive, before the driver's own single-threaded read gets
+to them — confirmed live, 5/5 runs against a task whose test
+unconditionally raises returned `passed=True, reward=1.0`, with
+`task.test_code` never actually executing at all (its `AssertionError`
+never fired — the driver's own read got EOF instead, exec'ing an empty
+string). **Any two threads of the same OS process have equal access to
+that process's entire file descriptor table** — there's no way for one
+thread to reserve a descriptor against another, malicious thread the
+way a lock or a permission bit guards against a genuinely *different*
+process. Mitigated, not provably closed, and named that way on
+purpose: fd 0 is `dup()`'d away and replaced with `os.devnull` before
+`submitted_code` is ever exec'd, so this exact attack now gets EOF
+immediately (verified live, 0/5 across five runs, `test_code`'s real
+`AssertionError` now genuinely fires every time) — but a sufficiently
+determined submission could still enumerate every open file descriptor
+and race whichever one carries phase-2 content instead. Closing this
+class provably needs genuine process/container isolation between the
+code being rewarded and the code determining the reward — the same
+real, deferred, infrastructure-heavy "container/VM boundary" work this
+module's own docstring already names as needed for production use,
+now spelled out explicitly rather than left implicit in that general
+disclaimer.
+
+**A fourth, related bug in the same file: the "hard wall-clock timeout"
 didn't actually kill everything a submission spawned.** A submission
 that forked its own subprocess (`subprocess.Popen(["sleep", "20"])`)
 kept that grandchild running — confirmed directly against the real

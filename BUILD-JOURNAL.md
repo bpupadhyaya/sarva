@@ -8767,3 +8767,112 @@ environment doesn't have); Gemini's Files API for long-video input (no
 API key here to verify live); a first pass at code-signing/
 notarization for the desktop release bundles (needs a real signing
 identity this environment doesn't have -- likely stays deferred).
+
+## A third bypass of the RL coding-task harness -- a raw file-descriptor read race defeats the two-stage stdin protocol, mitigated but honestly not provably closed
+
+A round-32 sweep, specifically pointed at the two-stage stdin protocol
+shipped last round as exactly the kind of fresh, structurally complex
+code most likely to hide a new bug. It found a third, independent way
+to defeat `evaluate_submission`'s completion-signaling mechanism --
+worth calling out immediately: this is not a criticism of the last
+fix's design being sloppy, it's a genuinely hard problem the fix's own
+safety argument didn't fully anticipate.
+
+**The mechanism:** the July 29 fix's closing claim was "a submission
+that tries to read ahead on stdin just blocks (nothing to read yet)
+rather than revealing anything." That's true for Python's buffered
+`sys.stdin` object -- but a background thread that instead calls
+`os.read(0, ...)` directly, on the raw file descriptor, races the
+driver's own single-threaded `sys.stdin` read for whichever bytes
+arrive on the pipe. Since the thief thread is typically already
+blocked in the syscall by the time the driver's main thread finishes
+executing a few more bytecodes and gets to its own read call, the
+thief consistently wins.
+
+**Confirmed live, deterministically, before touching any fix code:**
+against a task whose test unconditionally raises (`raise
+AssertionError(...)`, so a real pass is categorically impossible), a
+submission that spawns a daemon thread looping on `os.read(0, 65536)`,
+searching each chunk for the sentinel pattern and printing it the
+moment it appears, returned `passed=True, reward=1.0` on 5 out of 5
+runs. The proof this isn't just "sentinel visible somehow" but a
+genuine bypass of test execution itself: `task.test_code`'s
+`AssertionError` never fired at all -- the thief thread drained the
+pipe before the driver's own read got anything, so the driver's
+subsequent `exec()` of `task.test_code` ran against an empty string, a
+silent no-op.
+
+**Why this is structurally harder than the previous two fixes, and why
+the response here is different from "ship a fourth increasingly clever
+IPC trick":** every mechanism considered during investigation --
+routing phase-2 content through a dedicated fd instead of fd 0,
+`flock()`-based mutual exclusion, permission-bit gating -- has the
+identical underlying property: whichever reader (the driver's own
+code, or a submission-spawned thread) wins the race to the relevant
+syscall gets the bytes, because **any two threads of the same OS
+process share that process's entire file descriptor table with no way
+for one to exclude the other.** This is not a fixable implementation
+bug in the traditional sense; it's the direct consequence of running
+"the code being rewarded" and "the code determining the reward" in the
+same OS process, which the module's own docstring has said, since it
+was first written, is not a full security sandbox and would need real
+container/VM isolation (gVisor, Firecracker, ...) to close completely.
+
+**Shipped a real, verified mitigation for the SPECIFIC demonstrated
+channel, deliberately not oversold as closing the general class:** fd 0
+is `dup()`'d away to a fresh descriptor and replaced with
+`os.devnull` *before* `submitted_code` is ever exec'd -- both the
+phase-1 marker read and the phase-2 test-code read now go through the
+duplicated descriptor instead of raw fd 0. Confirmed live: the exact
+submitted exploit above now returns `passed=False, reward=0.0` on 5/5
+runs, with `task.test_code`'s real `AssertionError` genuinely firing
+every time (proof the test actually executed, not just that the
+sentinel stayed hidden). This closes the exact channel demonstrated --
+`os.read(0, ...)` specifically -- not the general class: a submission
+that enumerates every open file descriptor (`/proc/self/fd/` on Linux)
+or simply guesses the duplicated fd's number (POSIX's lowest-available-
+integer allocation strategy makes it often predictable) could still
+find and race the fd that now carries phase-2 content instead. Named
+this explicitly, in the function's own docstring and the module's
+class-level docstring, rather than leaving it implicit in the existing
+general "not a full sandbox" disclaimer -- specifically so a future
+reader doesn't mistake this fix for a provable guarantee against a
+sufficiently sophisticated policy a real RL run might discover.
+
+**A deliberate choice, worth naming: no fourth mitigation attempted
+this round.** Every alternative explored during investigation
+(dedicated fds, file locking, permission gating, exit-code-based
+signaling) reduces to the same race, just relocated -- shipping another
+narrow patch that a plausible fifth exploit could defeat again would
+risk exactly the "looks fixed but isn't really" outcome this project
+has been careful to avoid throughout its whole history. The honest,
+correctly-scoped move here is: close the one concretely demonstrated
+channel, document the remaining structural limitation precisely (not
+vaguely), and defer the actual closing fix (container/VM sandboxing)
+as the same already-named, genuinely out-of-scope infrastructure work.
+
+**Verified the new test is real, and by the same strong margin the last
+two rounds' RL-harness fixes used:** reverted the fix and watched the
+exact submitted exploit return `passed=True, reward=1.0` again across
+all 5 runs before re-applying -- the literal bad outcome the fix exists
+to prevent, not an assertion-shape difference. 1 new test asserts both
+"not rewarded" and "test_code's AssertionError genuinely fired" (the
+stronger, harder-to-fake claim). All 11 pre-existing rl_environment
+tests pass unchanged, `examples/13_rl_coding_environment.py` re-run end
+to end and confirmed still correct. 1 new test, 616 -> 617 Python
+tests. `ruff check`/`format --check` clean. `docs/foundry/training.md`
+updated with this as the module's third documented reward-hacking
+finding.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(now explicitly named, not just implicitly gestured at, as the actual
+fix for the file-descriptor-race class -- genuinely deferred,
+infrastructure-heavy work); batching multiple concurrent inference
+requests (§3.6f, still a deliberate deferral); F1's real distributed
+training infrastructure (needs real multi-node compute this
+environment doesn't have); Gemini's Files API for long-video input (no
+API key here to verify live); a first pass at code-signing/
+notarization for the desktop release bundles (needs a real signing
+identity this environment doesn't have -- likely stays deferred).

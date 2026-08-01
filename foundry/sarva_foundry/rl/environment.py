@@ -18,6 +18,23 @@ permissions the parent process has. A production RL-from-code-execution
 system needs a real container/VM boundary (gVisor, Firecracker, ...) —
 real, deferred, infrastructure-heavy work, named directly rather than
 implied to already be covered.
+
+**Specifically, not overclaimed for `evaluate_submission`'s own
+completion-signaling mechanism either:** three independent reward-
+hacking bypasses have been found and fixed here (see that function's
+own docstring for each) — a `sys.exit(0)` early-exit, a
+plaintext-sentinel-in-a-readable-file read, and a background thread
+racing a raw file-descriptor read against the driver's own stdin
+consumption. The third one is mitigated, not provably closed: any two
+threads of the *same* OS process have equal access to that process's
+entire file descriptor table, so no amount of same-process IPC
+cleverness can give one thread exclusive access against another,
+malicious one. A submission sophisticated enough to enumerate open file
+descriptors rather than assume fd 0 could still find and race whatever
+fd carries phase-2 content. Only genuine process/container isolation
+between the code being rewarded and the code determining the reward
+closes this for good — exactly the "real container/VM boundary"
+already named above as deferred, infrastructure-heavy work.
 """
 
 from __future__ import annotations
@@ -91,17 +108,30 @@ _PHASE1_ACK_MARKER = "__SARVA_PHASE1_ACK__"
 # THEN (and only then) reads task.test_code + the sentinel print from
 # whatever the caller sends next -- content that, by construction,
 # hasn't been written to the pipe yet while submitted_code is running.
+#
+# fd 0 is deliberately dup()'d away to a fresh fd and replaced with
+# os.devnull BEFORE submitted_code is ever exec'd -- see
+# evaluate_submission's own docstring for the raw-fd race this closes
+# (a background thread doing `os.read(0, ...)` directly, bypassing
+# Python's buffered `sys.stdin` entirely, used to win the race for
+# phase 2's content every time). All later reads go through the
+# duplicated fd instead of raw fd 0.
 _DRIVER_SRC = f"""
-import sys
+import os, sys
+_real_stdin_fd = os.dup(0)
+_devnull_fd = os.open(os.devnull, os.O_RDONLY)
+os.dup2(_devnull_fd, 0)
+os.close(_devnull_fd)
+_stream = os.fdopen(_real_stdin_fd, "r")
 _ns = {{}}
 _lines = []
-for _line in sys.stdin:
+for _line in _stream:
     if _line.rstrip(chr(10)) == {_PHASE1_END_MARKER!r}:
         break
     _lines.append(_line)
 exec(compile("".join(_lines), "<submission>", "exec"), _ns)
 print({_PHASE1_ACK_MARKER!r}, flush=True)
-exec(compile(sys.stdin.read(), "<test>", "exec"), _ns)
+exec(compile(_stream.read(), "<test>", "exec"), _ns)
 """
 
 
@@ -144,19 +174,56 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
     code` always runs before `task.test_code` in the same process (it
     has to, so `test_code` can call what it defines), so anything
     present in that process from the start is readable by `submitted_
-    code` before `test_code`'s real check ever runs. The only fix that
-    actually closes the exploit class, not just this one instance, is
-    genuine temporal separation: `task.test_code` and the sentinel are
-    never written anywhere — not to disk, not to an env var, not to
-    `sys.argv` — until *after* the subprocess has independently proven
+    code` before `test_code`'s real check ever runs. The fix that
+    closes this exploit class, not just this one instance, is genuine
+    temporal separation: `task.test_code` and the sentinel are never
+    written anywhere — not to disk, not to an env var, not to `sys.argv`
+    — until *after* the subprocess has independently proven
     (`_PHASE1_ACK_MARKER`, printed by the driver, not by the submission)
-    that `submitted_code` finished running. A submission has no channel
-    to that content early: it isn't on disk (the driver is passed via
-    `-c`, so `-c` mode's `__main__` has no `__file__` at all), it isn't
-    in an env var or argv, and reading ahead on stdin itself just blocks
-    (nothing to read yet) rather than revealing anything — the worst a
-    submission can do by trying is time out and score 0.0, same as any
-    other timeout."""
+    that `submitted_code` finished running.
+
+    **A third, independent bypass, found the same way — actually
+    submitting the exploit and watching `reward=1.0` come back — proved
+    the previous paragraph's closing claim ("reading ahead on stdin
+    itself just blocks") wrong for one specific channel:** a background
+    thread that reads the raw file descriptor directly (`os.read(0,
+    ...)`, bypassing Python's buffered `sys.stdin` object entirely) can
+    win a genuine OS-level race for the phase-2 bytes the instant they
+    arrive on the pipe, before the driver's own single-threaded
+    `_stream` read gets to them — deterministically, in this
+    environment, 10/10 tries. Once the thief thread wins, the driver's
+    own subsequent read gets EOF, so `task.test_code` execs as an empty
+    string — a silent no-op, not even a visible failure. **Threads
+    share a process's entire file descriptor table**; there is no way
+    for one thread in a process to reserve a file descriptor against
+    another thread of the *same* process the way permissions or locks
+    guard against a genuinely different process. Confirmed: `flock()`,
+    permission bits, and any other channel considered during
+    investigation have the identical property — whichever reader (the
+    driver's own code, or a submission-spawned thread) wins the race to
+    the syscall gets the bytes, and nothing at the Python level can
+    change who wins.
+
+    **Mitigated, not fully closed, and named that way on purpose:** fd 0
+    is `dup()`'d away to a fresh descriptor and replaced with
+    `os.devnull` *before* `submitted_code` is ever exec'd, so the
+    specific demonstrated attack (`os.read(0, ...)`) now reads nothing
+    and gets EOF immediately — confirmed live, 0/5 across five real
+    runs, `task.test_code`'s real `AssertionError` now genuinely fires
+    every time. This closes the exact channel demonstrated, not the
+    general class: a sufficiently determined submission could still
+    enumerate every open file descriptor (`/proc/self/fd/` on Linux) or
+    guess the dup'd fd's number (POSIX allocates the lowest available
+    integer, so it's often predictable) and race that one instead. A
+    provably complete fix needs genuine process isolation between the
+    code that's rewarded and the code that determines the reward — real
+    container/VM sandboxing (gVisor, Firecracker, nsjail), the same
+    real, deferred, infrastructure-heavy work this module's own class
+    docstring already names as needed for a production deployment.
+    Documented here explicitly, not left implicit in a general "not a
+    full sandbox" disclaimer, so nobody mistakes this fix for a
+    provable guarantee against a sufficiently sophisticated policy an
+    RL run might discover."""
     sentinel = f"__SARVA_TASK_COMPLETED_{secrets.token_hex(16)}__"
     popen_kwargs: dict[str, object] = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
