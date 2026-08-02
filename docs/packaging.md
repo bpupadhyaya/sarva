@@ -792,6 +792,48 @@ bad-audio failure is unchanged — both still degrade cleanly, just now
 via a clean `RuntimeError` from the isolated decode step instead of
 whatever exception the in-process call used to raise.
 
+**A completely ordinary, non-adversarial audio attachment could exhaust
+host memory — a genuine DoS with no malicious or corrupted input
+needed, distinct from the SIGBUS bug above.** `WhisperModel.transcribe()`
+hands the fully-decoded audio array to `faster-whisper`'s own
+`FeatureExtractor`, which computes the log-mel spectrogram for the
+*entire* array in one call — a full-length STFT, materializing
+overlapping-frame, FFT, magnitude, and mel arrays all at once — before
+its own 30-second-window inference loop even begins. Confirmed live
+with real measurements, not an estimate: a plain sine-tone WAV,
+nothing crafted, drove peak RSS roughly linearly with duration — a
+30-minute file (14.4 MB compressed as mp3) reached ~3.0 GB. A
+completely ordinary 2-hour recording (a normal meeting/podcast/lecture
+attachment) would extrapolate toward ~12 GB, easily OOM-killing a
+typical 8–16 GB host, with nothing upstream bounding it — locally
+path/data-sourced audio blocks bypass `fetch.py`'s own 20 MB URL-fetch
+cap entirely, since that only applies to `url`-sourced blocks, and the
+existing decode-timeout fix bounds wall-clock time, not memory, so it
+does nothing to help here either. Since the actual blow-up happens
+inside a vendored dependency this project doesn't own the internals
+of, the fix is a duration cap at the `sarva.audio.transcribe()` call
+site: `_MAX_TRANSCRIBE_SECONDS = 600` (10 minutes, chosen from the
+measured ~100 MB/minute rate to keep worst-case memory around 1 GB),
+checked right after decode (where duration is cheaply knowable from
+the decoded sample count) and before the expensive feature-extraction
+step ever runs. Raises the same `RuntimeError` shape every other
+`transcribe()` failure already does, so `AudioToTextDegrader` needed no
+changes at all — its existing broad `except Exception: pass` already
+treats this identically to a decode failure, falling back to the clean
+metadata-only report. **A real, adjacent gap found while making this
+fix, not a new one introduced by it:** `sarva transcribe` (the CLI
+command, the one place a real person runs this directly rather than
+through the degrader) never caught `RuntimeError` at all — meaning a
+decode failure, a decode timeout, *or* this new duration-cap error all
+crashed with a raw traceback through that one specific command, a
+pre-existing gap this fix closed at the same time by widening the
+command's own `except` clause. Verified with a real synthetic WAV at
+601 seconds (601s, wired via `wave` module directly, no ffmpeg
+dependency) and a real `resource`-measured memory comparison: reverting
+the fix made the same test spend over a minute genuinely transcribing
+the whole file rather than rejecting it early, confirming the check
+fires for the real reason, not a contrived one.
+
 **`synthesize()` itself could crash with a raw subprocess error, found
 by actually running it against the real `espeak-ng` binary with a bad
 `--voice`.** `espeak-ng` genuinely exits 1 for an unrecognized voice

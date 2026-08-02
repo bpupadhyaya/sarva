@@ -298,3 +298,39 @@ def test_transcribe_survives_a_native_decoder_crash_not_just_a_python_exception(
 
     with pytest.raises(RuntimeError, match="could not decode audio"):
         transcribe(fuzzed)
+
+
+@pytest.mark.skipif(not stt_extra_installed(), reason="sarva[audio] (faster-whisper) not installed")
+def test_transcribe_rejects_audio_longer_than_the_duration_cap():
+    # A real bug found by actually generating an ordinary, non-
+    # adversarial 30-minute audio file (a plain sine tone, nothing
+    # crafted) and measuring peak memory: faster-whisper's own feature
+    # extraction computes the log-mel spectrogram for the ENTIRE decoded
+    # audio in one call before its windowed inference loop even begins
+    # -- confirmed live at ~100MB of peak RSS per minute of audio, so a
+    # completely ordinary 30-minute recording drove peak RSS to ~3.0 GB.
+    # A real 2-hour recording (an entirely normal meeting/podcast/
+    # lecture attachment) would extrapolate toward ~12 GB, easily
+    # OOM-killing a typical host, with nothing upstream bounding it.
+    # Fixed with a duration cap checked right after decode, before the
+    # expensive feature-extraction step ever runs.
+    raw = _synthetic_wav_bytes(duration_s=601.0)
+
+    with pytest.raises(RuntimeError, match="too long to transcribe safely"):
+        transcribe(raw)
+
+
+@pytest.mark.skipif(not stt_extra_installed(), reason="sarva[audio] (faster-whisper) not installed")
+def test_transcribe_still_accepts_ordinary_short_audio_under_the_cap():
+    # The cap is a safety limit on an extreme case, not an excuse to
+    # reject ordinary real usage -- confirms the new check doesn't
+    # accidentally reject audio well under the 600s cap. (Not testing
+    # exactly at the 600s boundary: transcribing ten real minutes of
+    # audio, even with the tiny model, is too slow for a fast test
+    # suite -- the cap-exceeded test above already proves the check
+    # itself fires correctly on the real duration arithmetic.)
+    raw = _synthetic_wav_bytes(duration_s=1.0)
+
+    text = transcribe(raw)
+
+    assert isinstance(text, str)

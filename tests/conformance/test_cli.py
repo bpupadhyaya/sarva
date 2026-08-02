@@ -1116,6 +1116,32 @@ def test_transcribe_fails_cleanly_without_the_audio_extra(tmp_path, monkeypatch)
     assert "sarva[audio]" in result.stdout
 
 
+def test_transcribe_fails_cleanly_on_a_runtime_error_not_a_traceback(tmp_path, monkeypatch):
+    # A real, adjacent gap found while adding a duration cap to
+    # sarva.audio.transcribe() (which raises RuntimeError for a decode
+    # failure, a decode timeout, or now audio too long to safely
+    # transcribe): this command never caught RuntimeError at all --
+    # AudioToTextDegrader already treated every RuntimeError from that
+    # same function as a clean, expected fallback case, but `sarva
+    # transcribe` (the one place a real person runs this directly, not
+    # through the degrader) crashed with a raw traceback on the
+    # identical failures instead.
+    import sarva.audio as audio_module
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("audio too long to transcribe safely: 1800s exceeds the 600s cap")
+
+    monkeypatch.setattr(audio_module, "transcribe", _raise)
+    audio_path = tmp_path / "clip.wav"
+    audio_path.write_bytes(b"irrelevant, never actually decoded")
+
+    result = runner.invoke(app, ["transcribe", str(audio_path)])
+
+    assert result.exit_code == 1
+    assert "too long to transcribe safely" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_transcribe_with_a_nonexistent_audio_file_fails_cleanly_not_a_traceback(tmp_path):
     # A real bug found by actually running `sarva transcribe
     # /nonexistent/audio.wav`: Path.read_bytes() raised a raw

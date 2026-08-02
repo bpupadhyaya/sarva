@@ -861,6 +861,18 @@ def transcribe(
         # detail text was fixed for earlier.
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
+    except RuntimeError as e:
+        # A real, adjacent gap found while adding the duration-cap fix
+        # to sarva.audio.transcribe(): that function already raises
+        # RuntimeError for a decode failure, a decode timeout, and now
+        # audio too long to safely transcribe -- but nothing here ever
+        # caught any of them. AudioToTextDegrader already treats every
+        # RuntimeError from this same function as a clean, expected
+        # fallback case; this CLI command (the one place a real person
+        # runs `sarva transcribe` directly, not through the degrader)
+        # crashed with a raw traceback on the identical failures instead.
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     # The transcript is externally-derived text (real speech, not this
     # project's own strings) -- never markup-parsed, same discipline
     # chat/run already apply to model output.

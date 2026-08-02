@@ -9535,3 +9535,115 @@ possibly applying this round's "measure real resource cost under
 ordinary input" lens to the audio and document degraders too, which
 share the same general "handle a real user-supplied media attachment"
 threat model this bug was found in.
+
+## Local speech-to-text had the identical memory-exhaustion shape as the just-fixed video bug, one layer further along the same real-media-attachment pipeline -- plus an adjacent, pre-existing uncaught-RuntimeError gap in the CLI found along the way
+
+A round-40 sweep, applying the same lens the last round's own journal
+entry explicitly suggested extending: "measure real resource cost
+under ordinary, non-adversarial input," not just check error-handling
+paths, applied this time to the audio degrader and `sarva.audio.
+transcribe()` rather than video. It found the identical bug shape one
+step further along the same "real user-supplied media attachment"
+pipeline this project has now hardened three times (native-crash
+isolation for video and audio decode, and now this).
+
+**The mechanism:** `WhisperModel.transcribe()` hands the fully-decoded
+audio array to `faster-whisper`'s own `FeatureExtractor`, which
+computes the log-mel spectrogram for the *entire* array in one call --
+a full-length STFT, materializing overlapping-frame, FFT, magnitude,
+and mel arrays all at once -- before its own 30-second-window inference
+loop even begins. Architecturally identical to last round's video bug
+(materialize everything, then process a piece at a time), just inside
+a vendored dependency this project doesn't own the internals of.
+
+**Confirmed live with real measurements, not an estimate, using a
+completely ordinary, non-adversarial audio file:** a plain sine-tone
+WAV/mp3, nothing crafted or malicious, drove peak RSS roughly linearly
+with duration -- 5 min: 885 MB, 10 min: 1.3 GB, 20 min: 2.1 GB, 30 min
+(a 14.4 MB compressed file): ~3.0 GB. Extrapolating, a completely
+ordinary 2-hour recording -- a normal meeting, podcast, or lecture
+attachment, nothing anyone would think twice about attaching -- would
+reach ~12 GB, easily OOM-killing a typical 8-16 GB host. Worse than the
+video case in one specific way: locally `path`/`data`-sourced audio
+blocks bypass `sarva.multimodal.fetch`'s own 20 MB URL-fetch size cap
+entirely, since that only applies to `url`-sourced blocks, and the
+existing decode-timeout fix (added for the earlier SIGBUS bug) bounds
+wall-clock time, not memory, so it provides zero protection here
+either -- the same "an existing mitigation for a different concern
+doesn't help with this one" pattern the video finding's own journal
+entry already named.
+
+**Fixed with a duration cap at the `sarva.audio.transcribe()` call
+site**, since the actual memory blow-up happens inside a vendored
+dependency this project can't change: `_MAX_TRANSCRIBE_SECONDS = 600`
+(10 minutes), chosen from the measured ~100 MB/minute rate to bound
+worst-case memory to roughly 1 GB -- generous enough for real,
+ordinary use (a voice memo, a short meeting clip, a podcast segment)
+while closing off the unbounded case. Checked immediately after decode
+(where duration is cheaply knowable from the already-decoded sample
+count, `len(audio_array) / 16000`) and before the expensive feature-
+extraction step ever runs, raising the same `RuntimeError` shape every
+other `transcribe()` failure already produces.
+
+**Needed zero changes to `AudioToTextDegrader` itself:** its existing
+`except Exception: pass` already treats every `RuntimeError` from
+`transcribe()` identically, falling back to the honest metadata-only
+report -- "too long to safely transcribe" needed no special handling
+beyond what "couldn't decode this" already gets, the same reasoning
+that made the video fix's own caller-side changes minimal too.
+
+**A real, adjacent, pre-existing gap found and closed while making
+this fix, not one introduced by it:** `sarva transcribe` (the CLI
+command, the *one* place a real person runs this function directly
+rather than through the degrader) never caught `RuntimeError` at all --
+meaning a decode failure, a decode timeout, or this new duration-cap
+error all crashed with a raw, uncaught traceback through that specific
+command, even though `AudioToTextDegrader` already handled every one of
+those cases cleanly. Confirmed by checking `tests/conformance/test_cli.py`
+for existing coverage: only `ImportError` and a nonexistent-file
+`OSError` were ever tested for this command, nothing for a decode
+failure. Fixed by widening the command's own `except` clause to also
+catch `RuntimeError`, giving `sarva transcribe` the identical clean-
+failure treatment the degrader already had -- the same "one caller
+never inherited a fix the others already have" shape this project has
+found and closed many times before, just discovered incidentally this
+time rather than by a dedicated sweep.
+
+**Verified the new tests are real, including the timing itself as
+proof:** a real synthetic WAV at 601 seconds (stdlib `wave` module
+directly, no ffmpeg dependency, ~0.9s to generate) confirms the cap
+fires with the real duration arithmetic in the error message
+(`"1800s exceeds the 600s cap"` for the earlier 30-minute repro, and
+the 601s test asserting the same shape). Reverting the fix and
+re-running that test didn't just fail an assertion -- it took over a
+minute to fail, because the reverted code genuinely ran the full,
+uncapped transcription against 601 seconds of audio rather than
+rejecting it early, the timing itself independently confirming the
+check is doing real work, not asserting against a mocked value. All 22
+pre-existing audio/CLI/degrader tests pass unchanged. 3 new tests, 631
+-> 634 Python tests. `ruff check`/`format --check` clean.
+`docs/packaging.md` updated in the same section as the earlier SIGBUS
+fix, explicitly distinguished from it (no malicious input required, a
+different failure mode entirely, and the existing timeout mitigation
+doesn't help against this one either).
+
+**The "measure real resource cost under ordinary input" lens has now
+found two real, high-severity bugs in consecutive rounds, in two
+different media-degradation modules with the same underlying shape.**
+Worth stating what's left in this family, named honestly rather than
+assumed clean by extension: the document degrader was checked this
+same round and found proportional, not disproportionate (a 2.64 GB
+text file drives ~5.3 GB peak RSS, a ~2x multiplier from holding raw
+bytes and decoded string simultaneously, not the ~85-3000x blow-up
+the video and audio bugs both had) -- a real, but much lower-priority,
+"no cap on local file reads" pattern already implicitly accepted
+elsewhere in this codebase for any local file open, not a new bug
+class worth a dedicated fix this round.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- confirmed genuinely deferred,
+not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
+worth a fresh, genuinely open-ended Explore-agent sweep next time.
