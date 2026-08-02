@@ -66,9 +66,37 @@ def atomic_write(path: Path, write_fn: Callable[[Path], None]) -> None:
     correct under concurrency, not just under its current callers.
     Thread id is genuinely unique among the threads alive at any one
     moment (unlike a PID, which is stable but shared by every thread of
-    one process), so appending it removes the collision entirely."""
+    one process), so appending it removes the collision entirely.
+
+    **The temp file is cleaned up if `write_fn` raises, not left behind
+    forever -- a real bug found by actually making `write_fn` raise
+    partway through a real write and checking the directory afterward.**
+    A crash-safe *target* file (the whole point of this module) still
+    leaked its own *temp* file on every write failure: nothing ever
+    removed the sibling `path.tmp-<pid>-<tid>` this function creates,
+    so a disk-full write, an interrupted `torch.save`, or any other
+    `write_fn` failure left a stray, permanently orphaned file on disk
+    with no code path anywhere that ever cleaned it up. Confirmed live:
+    a `write_fn` that wrote 15000 bytes then raised left exactly that
+    file sitting on disk after the exception propagated. Worst for
+    `Trainer.save_checkpoint` (multi-GB checkpoint writes during long
+    training runs) -- a disk-full failure there is a realistic scenario
+    that this bug made actively worse, not just unhandled: the leaked
+    partial checkpoint consumes disk space, making the *next* save more
+    likely to fail too, the same underlying cause compounding itself.
+    Fixed with a `try`/`except`/`finally`-shaped cleanup: on any
+    exception from `write_fn`, the temp file is removed (best-effort --
+    a failure to remove it doesn't mask or replace the original
+    exception, which always still propagates) before re-raising."""
     tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
-    write_fn(tmp_path)
+    try:
+        write_fn(tmp_path)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     os.replace(tmp_path, path)
 
 

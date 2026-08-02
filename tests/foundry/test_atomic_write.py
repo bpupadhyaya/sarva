@@ -19,6 +19,26 @@ def test_atomic_write_text_writes_the_content(tmp_path):
     assert path.read_text() == '{"merges": []}'
 
 
+def test_atomic_write_cleans_up_the_tmp_file_if_write_fn_raises(tmp_path):
+    # Mirrors the identical fix in sarva.atomic_write -- see that
+    # module's own test for the live-confirmed leak: a write_fn failure
+    # (e.g. a disk-full torch.save mid-checkpoint) used to leave a
+    # permanently orphaned, potentially multi-GB temp file with nothing
+    # anywhere ever cleaning it up.
+    path = tmp_path / "model.pt"
+    path.write_bytes(b"good weights")
+
+    def failing_write(tmp_path_arg):
+        tmp_path_arg.write_bytes(b"x" * 15000)
+        raise OSError("simulated disk-full mid-checkpoint")
+
+    with pytest.raises(OSError, match="simulated disk-full"):
+        atomic_write(path, failing_write)
+
+    assert path.read_bytes() == b"good weights"
+    assert list(tmp_path.glob("*.tmp-*")) == []
+
+
 def test_atomic_write_does_not_destroy_the_previous_file_if_interrupted_mid_write(
     tmp_path, monkeypatch
 ):

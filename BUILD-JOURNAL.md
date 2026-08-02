@@ -9271,3 +9271,89 @@ lacks); real container/VM sandboxing for the RL coding-task harness
 concurrent inference requests (§3.6f -- confirmed genuinely deferred,
 not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
 worth a fresh, genuinely open-ended Explore-agent sweep next time.
+
+## atomic_write leaked its own temp file forever on every write failure -- a fourth consecutive round finding a real bug by re-examining a freshly-shipped mechanism's own correctness
+
+A round-37 sweep, with no named gap left in the backlog, applying the
+same lens that had already paid off three rounds running: re-examine a
+recently-shipped mechanism's own correctness, not just whether a fix
+propagated to its call sites. This time turned on `sarva.atomic_write`
+itself -- the module built two milestones back specifically to close a
+different bug class (interrupted-write data loss) across seven real
+call sites, then fixed again last round for a thread-safety defect in
+its own temp-filename scheme.
+
+**The mechanism:** `atomic_write(path, write_fn)` calls `write_fn(
+tmp_path)` then `os.replace(tmp_path, path)`, with no `try`/`except`
+around the call to `write_fn`. If `write_fn` itself raises -- a
+disk-full mid-write, an interrupted `torch.save`, any real I/O failure
+-- the exception correctly propagates without ever corrupting the real
+target file (the crash-safety guarantee this whole module exists to
+provide genuinely holds). But the *temp* file `write_fn` had already
+started writing to is never removed on that path -- nothing anywhere
+in this module, or any of its seven real callers, ever cleans it up.
+
+**Confirmed live, before touching any fix code:** a `write_fn` that
+wrote 15000 bytes then raised `OSError` left exactly that file sitting
+on disk, permanently, after the exception propagated -- the original
+target file correctly intact, but a stray `<name>.tmp-<pid>-<tid>`
+orphaned right next to it.
+
+**Worse than a generic disk-space leak in one specific, realistic
+case:** `sarva_foundry.train.trainer.Trainer.save_checkpoint` calls
+this exact helper wrapping `torch.save` of full model + optimizer
+state -- multi-GB writes during real training runs, where a disk-full
+mid-write is a genuinely realistic failure mode, not a hypothetical
+one. This bug made that specific failure actively self-reinforcing
+rather than merely unhandled: the leaked partial checkpoint consumes
+disk space, making the *next* checkpoint save more likely to hit the
+identical disk-full failure again, the same root cause compounding
+itself with every retry. The same bug reached `WriteFileTool.run()`
+(arbitrary real user files the agent edits) and the foundry tokenizer's
+JSON save via the identical shared helper, though with lower
+individual severity than the checkpoint case.
+
+**Fixed with a `try`/`except`/`finally`-shaped cleanup inside
+`atomic_write` itself, not at any individual call site:** on any
+exception from `write_fn`, the temp file is removed via `unlink(
+missing_ok=True)` -- wrapped in its own inner `try`/`except OSError:
+pass` so a *failure* to clean up (e.g. a permissions issue) never masks
+or replaces the original, real exception, which always still
+propagates unchanged -- before re-raising. `except BaseException`,
+deliberately broader than `except Exception`, so the cleanup also fires
+on a `KeyboardInterrupt` mid-write, not just an ordinary exception.
+Applied identically in both `sarva.atomic_write` and its intentionally-
+mirrored `sarva_foundry.atomic_write` copy.
+
+**Verified the new tests are real:** reverted each file individually
+via `git stash` and re-ran its new regression test -- both failed with
+the exact leaked temp file present (`AssertionError: assert
+[PosixPath('...tmp-<pid>-<tid>')] == []`) before re-applying. All 10
+pre-existing atomic_write tests pass unchanged. 2 new tests, 626 -> 628
+Python tests. `ruff check`/`format --check` clean. `docs/memory.md`
+updated as a third follow-up entry to the atomic-write propagation
+history it sits next to.
+
+**The methodology note from the last three rounds now holds at four
+rounds running:** re-examining a freshly-shipped mechanism's own
+correctness -- not just checking whether it propagated to every call
+site, or whether it closed the one demonstrated exploit -- has now
+found a real, independent bug in `atomic_write` twice in two
+consecutive rounds (thread-safety last round, this leak this round),
+on top of the RL harness's raw-fd race and the cross-process locks'
+Windows byte-write bug in the two rounds before that. This specific
+module has now had three real, distinct bugs found and fixed across
+three different sweeps since it was first written two milestones ago
+-- worth remembering as a candidate for one more close look before
+assuming it's fully settled, rather than concluding after two clean
+fixes that a third pass would be redundant.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- confirmed genuinely deferred,
+not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
+worth a fresh, genuinely open-ended Explore-agent sweep next time,
+possibly starting with one more close look at `atomic_write` itself
+given its track record this round.

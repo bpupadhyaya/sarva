@@ -133,6 +133,26 @@ callers. Fixed by including `threading.get_ident()` in the temp
 filename too (unique among the threads alive at any one moment, unlike
 a PID), in both `sarva.atomic_write` and its `sarva_foundry` mirror.
 
+**The same helper also leaked its own temp file on every write
+failure — a real bug found by a later sweep applying the exact same
+lens (re-examine the mechanism itself) a third round running.** A
+crash-safe *target* file (the whole point of this module) still left
+its sibling *temp* file behind, permanently, whenever `write_fn`
+itself raised partway through — nothing anywhere ever cleaned it up.
+Confirmed live: a `write_fn` that wrote 15000 bytes then raised left
+exactly that file sitting on disk after the exception propagated.
+Worst for `sarva_foundry.train.trainer.Trainer.save_checkpoint`
+(multi-GB checkpoint writes during real training runs) — a disk-full
+failure there is a realistic scenario this bug made actively worse,
+not just unhandled: the leaked partial checkpoint consumes disk space,
+making the *next* save more likely to hit the same disk-full failure
+again, the underlying cause compounding itself. Fixed with a
+`try`/`except`/`finally`-shaped cleanup in `atomic_write` itself: on
+any exception from `write_fn`, the temp file is removed (best-effort —
+a failure to remove it doesn't mask or replace the original exception)
+before re-raising, in both `sarva.atomic_write` and its `sarva_foundry`
+mirror.
+
 **A different, higher-level race lived one layer up, in the server's
 own turn handling — a real lost-update bug on concurrent turns against
 the same session.** `POST /chat` and `/ws/chat` each do `store.load(

@@ -37,6 +37,30 @@ def test_atomic_write_leaves_no_tmp_file_behind_on_success(tmp_path):
     assert list(tmp_path.glob("*.tmp-*")) == []
 
 
+def test_atomic_write_cleans_up_the_tmp_file_if_write_fn_raises(tmp_path):
+    # A real bug found by actually making write_fn raise partway through
+    # a real write and checking the directory afterward: the target
+    # file was already crash-safe (the whole point of this module), but
+    # the sibling TEMP file it creates was never cleaned up on a write_fn
+    # failure -- a disk-full torch.save, an interrupted checkpoint, or
+    # any other write_fn error left a permanently orphaned file with
+    # nothing anywhere ever removing it. Confirmed live before this fix:
+    # a write_fn that wrote 15000 bytes then raised left exactly that
+    # file sitting on disk after the exception propagated.
+    path = tmp_path / "checkpoint.bin"
+    path.write_bytes(b"good content")
+
+    def failing_write(tmp_path_arg):
+        tmp_path_arg.write_bytes(b"x" * 15000)
+        raise OSError("simulated disk-full mid-write")
+
+    with pytest.raises(OSError, match="simulated disk-full"):
+        atomic_write(path, failing_write)
+
+    assert path.read_bytes() == b"good content"
+    assert list(tmp_path.glob("*.tmp-*")) == []
+
+
 def test_atomic_write_does_not_destroy_the_previous_file_if_interrupted_mid_write(
     tmp_path, monkeypatch
 ):
