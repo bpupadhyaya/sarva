@@ -87,17 +87,39 @@ def atomic_write(path: Path, write_fn: Callable[[Path], None]) -> None:
     Fixed with a `try`/`except`/`finally`-shaped cleanup: on any
     exception from `write_fn`, the temp file is removed (best-effort --
     a failure to remove it doesn't mask or replace the original
-    exception, which always still propagates) before re-raising."""
+    exception, which always still propagates) before re-raising.
+
+    **That fix only covered `write_fn` failing, not `os.replace()`
+    itself -- a real bug found by a third sweep of this exact module,
+    re-reading it line by line specifically because it had already had
+    two real bugs found in it.** The rename call sat *after* the
+    `try` block, uncovered by the same cleanup. If `os.replace()` itself
+    raises -- a real, non-hypothetical case on Windows, where `os.
+    replace` maps to `MoveFileEx`/`MOVEFILE_REPLACE_EXISTING` and fails
+    with a sharing-violation `PermissionError` when the destination is
+    open or locked by another process (antivirus/backup software
+    holding a handle, or another reader mid-`open()`) -- the temp file
+    (by this point fully, successfully written by `write_fn`) leaked
+    exactly like the already-fixed case, just reached through a
+    different trigger the first fix didn't cover. Confirmed live:
+    monkeypatching `os.replace` to raise *after* `write_fn` had already
+    produced valid content at the temp path left that fully-written
+    file on disk, permanently, while the original target was correctly
+    untouched (a leak, not data loss -- but the identical unbounded-
+    accumulation-under-repeated-failure concern the first fix's own
+    docstring already named). Fixed by widening the `try` block to cover
+    `os.replace()` too, so any failure at either step -- not just
+    `write_fn`'s -- triggers the identical cleanup."""
     tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
     try:
         write_fn(tmp_path)
+        os.replace(tmp_path, path)
     except BaseException:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
-    os.replace(tmp_path, path)
 
 
 def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644) -> None:

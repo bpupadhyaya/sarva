@@ -153,6 +153,26 @@ a failure to remove it doesn't mask or replace the original exception)
 before re-raising, in both `sarva.atomic_write` and its `sarva_foundry`
 mirror.
 
+**That fix only covered `write_fn` failing, not `os.replace()` itself —
+a real bug found by a third sweep of this same module, deliberately
+re-reading it line by line because it had already had two real bugs
+found in it.** The rename call sat *after* the `try` block, uncovered
+by the same cleanup. `os.replace()` itself can genuinely raise — a
+real, not hypothetical, case on Windows, where `os.replace` maps to
+`MoveFileEx`/`MOVEFILE_REPLACE_EXISTING` and fails with a sharing-
+violation `PermissionError` when the destination is open or locked by
+another process (antivirus/backup software holding a handle, another
+reader mid-`open()`) — leaking the temp file exactly like the
+already-fixed case, just reached through a different trigger the first
+fix didn't cover. Confirmed live: monkeypatching `os.replace` to raise
+*after* `write_fn` had already produced valid content at the temp path
+left that fully-written file on disk, permanently, while the original
+target was correctly untouched — a leak, not data loss, but the
+identical unbounded-accumulation-under-repeated-failure concern the
+first fix already named. Fixed by widening the `try` block to cover
+`os.replace()` too, so a failure at either step triggers the identical
+cleanup, in both files.
+
 **A different, higher-level race lived one layer up, in the server's
 own turn handling — a real lost-update bug on concurrent turns against
 the same session.** `POST /chat` and `/ws/chat` each do `store.load(

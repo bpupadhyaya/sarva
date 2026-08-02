@@ -9357,3 +9357,87 @@ not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
 worth a fresh, genuinely open-ended Explore-agent sweep next time,
 possibly starting with one more close look at `atomic_write` itself
 given its track record this round.
+
+## atomic_write's own cleanup fix from last round didn't cover os.replace() itself -- a third real bug in the same ~70-line module, found by taking the prior journal entry's own suggestion seriously
+
+A round-38 sweep, explicitly pointed at the last journal entry's own
+closing suggestion: give `atomic_write.py` one more very close, line-
+by-line read given it had already had two real, distinct bugs found in
+it across two consecutive rounds. This is now the third sweep to
+examine this specific module in detail, and it found a third real bug.
+
+**The mechanism:** last round's fix wrapped `write_fn(tmp_path)` in a
+`try`/`except BaseException` that cleans up the temp file on any
+`write_fn` failure. But the subsequent `os.replace(tmp_path, path)`
+call sat *after* that `try` block, entirely uncovered by the same
+cleanup. If `os.replace()` itself raises, the exception propagates with
+no cleanup at all -- the exact same leaked-temp-file outcome the
+previous fix closed, just reached through a different trigger that fix
+never covered.
+
+**Not a hypothetical trigger, either:** `os.replace()` failing is a
+real, documented Windows behavior, not a contrived test scenario. On
+Windows, `os.replace` maps to `MoveFileEx` with
+`MOVEFILE_REPLACE_EXISTING`, which fails with a sharing-violation
+`PermissionError` when the destination file is open or locked by
+another process -- antivirus or backup software holding a handle,
+another reader mid-`open()` on the very file being replaced. This is
+exactly the same "Windows behaves differently from POSIX in ways this
+module has to account for" theme the previous round's fix (the
+mandatory-locking bug in both cross-process locks) already established
+for a sibling piece of infrastructure.
+
+**Confirmed live, before touching any fix code:** monkeypatched
+`os.replace` to raise `PermissionError` *after* `write_fn` had already
+succeeded and produced valid, complete content at the temp path --
+exactly simulating a locked-destination failure on a fully-written
+file. Result: the original target file correctly untouched (data loss
+never happens, the module's core guarantee genuinely still holds), but
+the fully-written temp file left on disk permanently -- a leak, not
+corruption, but the identical "unbounded accumulation under repeated
+failure" concern the write_fn-failure fix's own docstring already named
+a round ago.
+
+**Fixed by widening the `try` block to cover `os.replace()` too**,
+rather than adding a second, separate cleanup path: `write_fn(tmp_path)`
+and `os.replace(tmp_path, path)` now both run inside the same
+`try`/`except BaseException` cleanup-then-`raise` structure. Confirmed
+this stays correct even in the theoretical edge case where `os.replace`
+raises *after* the rename has actually, successfully happened (an
+unusual but not impossible platform quirk): the cleanup always unlinks
+`tmp_path`, never `path`, so even in that scenario the worst outcome is
+a harmless no-op unlink (`missing_ok=True`) on an already-moved file,
+never any risk to the real target. Applied identically in both
+`sarva.atomic_write` and its `sarva_foundry` mirror.
+
+**Verified the new tests are real:** reverted each file individually
+via `git stash` and re-ran its new regression test -- both failed with
+the exact leaked temp file present before re-applying, the same shape
+of proof used for the write_fn-failure fix last round. All 12
+pre-existing atomic_write tests (including both fixes from the last two
+rounds) pass unchanged. 2 new tests, 628 -> 630 Python tests. `ruff
+check`/`format --check` clean. `docs/memory.md` updated as a fourth
+follow-up entry to the atomic-write history it sits next to.
+
+**The methodology note now holds at five rounds running, and this
+specific module has had three real, distinct bugs found across three
+separate sweeps.** Re-examining a freshly-shipped mechanism's own
+correctness -- not just whether it propagated to every call site, or
+whether the ONE demonstrated exploit/failure mode is closed -- keeps
+finding real bugs specifically in the places already known to have had
+one. Worth stating plainly: after this fix, a careful line-by-line read
+found no further issues in `atomic_write.py` (parent-directory-missing
+handling, mode preservation across `os.replace`, and the large-write/
+partial-failure boundary were all specifically checked and came back
+clean this round) -- this module is now genuinely believed correct,
+not just "not yet found broken again."
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- confirmed genuinely deferred,
+not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
+worth a fresh, genuinely open-ended Explore-agent sweep next time, this
+time without `atomic_write.py` as an obvious next target given it's now
+had three careful passes with the third coming back clean.

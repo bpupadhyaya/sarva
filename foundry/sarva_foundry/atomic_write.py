@@ -39,25 +39,28 @@ def atomic_write(path: Path, write_fn: Callable[[Path], None]) -> None:
     `path` concurrently raced the same temp file and one of them raised
     an uncaught `FileNotFoundError`).
 
-    The temp file is cleaned up if `write_fn` raises, not left behind
-    forever -- mirrors the identical fix in `sarva.atomic_write` (see
-    that module's own docstring for the live-confirmed leak: a
-    `write_fn` failure, e.g. a disk-full `torch.save` mid-checkpoint,
-    used to leave a permanently orphaned, potentially multi-GB temp
-    file with nothing anywhere ever cleaning it up -- worse than just
-    unhandled, since the leaked partial checkpoint consumes disk space,
-    making the *next* save more likely to hit the same disk-full
-    failure again)."""
+    The temp file is cleaned up if `write_fn` OR `os.replace()` itself
+    raises, not left behind forever -- mirrors the identical fix in
+    `sarva.atomic_write` (see that module's own docstring for both
+    live-confirmed leaks this closes: a `write_fn` failure, e.g. a
+    disk-full `torch.save` mid-checkpoint, and a real, non-hypothetical
+    `os.replace()` failure on Windows, where a locked/open destination
+    -- antivirus or backup software holding a handle, another reader
+    mid-`open()` -- makes the rename itself raise `PermissionError`
+    after `write_fn` already succeeded. Either way, the fully-written
+    temp file used to leak permanently -- worse than just unhandled,
+    since a leaked partial checkpoint consumes disk space, making the
+    *next* save more likely to hit the same failure again)."""
     tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
     try:
         write_fn(tmp_path)
+        os.replace(tmp_path, path)
     except BaseException:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
-    os.replace(tmp_path, path)
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:

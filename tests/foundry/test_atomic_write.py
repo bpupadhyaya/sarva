@@ -39,6 +39,28 @@ def test_atomic_write_cleans_up_the_tmp_file_if_write_fn_raises(tmp_path):
     assert list(tmp_path.glob("*.tmp-*")) == []
 
 
+def test_atomic_write_cleans_up_the_tmp_file_if_os_replace_itself_raises(tmp_path, monkeypatch):
+    # Mirrors the identical fix in sarva.atomic_write -- see that
+    # module's own test for the live-confirmed leak: the first cleanup
+    # fix only covered write_fn failing, not os.replace() itself, which
+    # is a real, non-hypothetical Windows failure mode (a locked/open
+    # destination makes MoveFileEx raise a sharing-violation
+    # PermissionError after write_fn already succeeded).
+    path = tmp_path / "model.pt"
+    path.write_bytes(b"good weights")
+
+    def failing_replace(src, dst):
+        raise PermissionError("simulated locked-destination failure")
+
+    monkeypatch.setattr(os_module, "replace", failing_replace)
+
+    with pytest.raises(PermissionError, match="simulated locked-destination"):
+        atomic_write_text(path, "new weights that should replace it")
+
+    assert path.read_bytes() == b"good weights"
+    assert list(tmp_path.glob("*.tmp-*")) == []
+
+
 def test_atomic_write_does_not_destroy_the_previous_file_if_interrupted_mid_write(
     tmp_path, monkeypatch
 ):

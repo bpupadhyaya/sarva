@@ -61,6 +61,34 @@ def test_atomic_write_cleans_up_the_tmp_file_if_write_fn_raises(tmp_path):
     assert list(tmp_path.glob("*.tmp-*")) == []
 
 
+def test_atomic_write_cleans_up_the_tmp_file_if_os_replace_itself_raises(tmp_path, monkeypatch):
+    # A real bug found by a third sweep of this exact module: the first
+    # cleanup fix only covered write_fn failing -- os.replace() itself
+    # sat after the try block, uncovered. A real, non-hypothetical case
+    # on Windows: os.replace maps to MoveFileEx/MOVEFILE_REPLACE_EXISTING
+    # and fails with a sharing-violation PermissionError when the
+    # destination is open/locked by another process (antivirus/backup
+    # software, another reader mid-open()). Confirmed live before this
+    # fix: monkeypatching os.replace to raise AFTER write_fn had already
+    # produced valid content at the temp path left that fully-written
+    # file on disk permanently, while the original target was correctly
+    # untouched (a leak, not data loss, but the identical unbounded-
+    # accumulation-under-repeated-failure concern the first fix closed).
+    path = tmp_path / "checkpoint.bin"
+    path.write_bytes(b"good content")
+
+    def failing_replace(src, dst):
+        raise PermissionError("simulated locked-destination failure")
+
+    monkeypatch.setattr(os_module, "replace", failing_replace)
+
+    with pytest.raises(PermissionError, match="simulated locked-destination"):
+        atomic_write_bytes(path, b"new content that should replace it")
+
+    assert path.read_bytes() == b"good content"
+    assert list(tmp_path.glob("*.tmp-*")) == []
+
+
 def test_atomic_write_does_not_destroy_the_previous_file_if_interrupted_mid_write(
     tmp_path, monkeypatch
 ):
