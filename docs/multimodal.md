@@ -120,6 +120,34 @@ killed the pytest process itself with a fatal-signal stack dump — the
 strongest form of "verify the fix is necessary" this project's
 revert-and-verify discipline has produced yet.
 
+**A second real bug in the same worker, a genuine memory-exhaustion
+DoS found by actually generating an ordinary, non-corrupted video and
+measuring peak memory, not by fuzzing:** the worker used to do
+`frames = list(container.decode(stream))` — every frame of the entire
+video decoded and held in memory at once, before sampling just 4 of
+them. Confirmed live: a completely ordinary 60-second, 1280×720, 30fps
+mp4 (834 KB compressed, generated with plain `ffmpeg`, no corruption or
+crafting at all) drove peak RSS to 2.6 GB — roughly 3000× the file's
+own size. Unlike the SIGBUS bug above, no malicious or corrupted file
+is needed; a completely ordinary video of modest file size — a 20-
+minute screen recording is an entirely normal thing for a real user to
+attach — scales this linearly toward tens of GB, exhausting host
+memory well before the worker's own 30-second decode timeout even
+fires (that timeout bounds wall-clock time, not memory, so it does
+nothing to stop this). Fixed by sampling via `container.seek()` to each
+target timestamp (evenly spaced across the stream's own duration) and
+decoding forward only until the nearest actual frame there is found —
+never materializing more than one frame at a time, and never decoding
+further into the stream than the distance between keyframes (a video's
+GOP structure, typically a few seconds' worth of frames, not the
+video's total length). Confirmed live: peak RSS for the identical
+60-second test video dropped from 2.6 GB to ~37 MB, landing on frames
+at the exact requested timestamps, not merely close to them. Verified
+with a real worker subprocess (the exact invocation this module itself
+uses) against a real 3000-frame synthetic video: the reverted, old
+list-based code measured ~549 MB peak RSS for that file; the new code
+stays comfortably under 200 MB.
+
 `default_degraders()` wires all three into every real `AgentLoop` call
 site (CLI, server) — but degradation itself is opt-in at the loop level
 (`AgentLoop(degraders=...)`), not automatic: without it, a conversation

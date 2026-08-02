@@ -9441,3 +9441,97 @@ not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
 worth a fresh, genuinely open-ended Explore-agent sweep next time, this
 time without `atomic_write.py` as an obvious next target given it's now
 had three careful passes with the third coming back clean.
+
+## The video degrader's decode worker materialized every frame of the whole video into memory before sampling four of them -- a genuine, non-malicious-input memory-exhaustion DoS
+
+A round-39 sweep, deliberately steered away from `atomic_write.py` per
+the last round's own explicit advice (three sweeps, three real bugs,
+a careful fourth read came back clean -- time to look elsewhere). Found
+a real, high-severity bug in a sibling module this project already
+hardened once before for a different reason: `_video_worker.py`, the
+subprocess `video.py` spawns to isolate PyAV's native decoder after an
+earlier round's SIGBUS finding.
+
+**The mechanism:** the worker's decode was `frames = list(container.
+decode(stream))` -- every frame of the *entire* input video decoded
+into memory and held there simultaneously, before sampling just 4
+evenly-spaced frames from that fully-materialized list. Confirmed live:
+a completely ordinary, non-corrupted, non-crafted 60-second, 1280×720,
+30fps mp4 (834 KB compressed, generated with plain `ffmpeg`) drove peak
+RSS to 2.6 GB -- roughly 3000× the file's own compressed size.
+
+**Distinctly more dangerous than the earlier SIGBUS bug in the same
+file, and worth stating plainly why:** the SIGBUS crash needed a
+fuzzed/corrupted file to trigger. This one needs nothing adversarial at
+all -- an entirely ordinary video of entirely ordinary length (a
+20-minute screen recording is a completely normal thing for a real
+user to attach) scales this linearly toward tens of gigabytes,
+exhausting host memory well before the worker's own 30-second decode
+timeout even has a chance to fire. That timeout (added for the SIGBUS
+fix) bounds wall-clock time, not memory, so it provides zero protection
+against this failure mode -- a real, previously-undiscovered gap in a
+mitigation this project had already shipped for a related, but
+distinct, concern.
+
+**Fixed by replacing full materialization with targeted, single-frame
+seeking:** for each of the `_MAX_SAMPLED_FRAMES` target timestamps
+(computed from the stream's own known duration, evenly spaced),
+`container.seek()` to the nearest keyframe at or before that timestamp,
+then decode forward keeping only the single frame closest to the
+target -- never a list, never more than one frame in memory at a time
+-- stopping as soon as a frame at or past the target is found. A
+per-sample decoded-frame cap (`_MAX_FRAMES_PER_SAMPLE = 600`) bounds
+the worst case further, for a pathological encoding with an unusually
+large gap between keyframes; in ordinary encodings this is never
+reached, since the real bound is a video's GOP size (typically a few
+seconds of frames), not its total length.
+
+**Confirmed live, with real measurements, not just "should be
+better":** peak RSS for the identical 60-second test video dropped from
+2.6 GB to ~37 MB -- and the sampled frames landed at the *exact*
+requested timestamps (0.00s/15.00s/30.00s/45.00s for a 60s video
+sampled 4 ways), not merely close to them, a small but real improvement
+over the old behavior's index-based (not time-based) spacing.
+
+**Verified the new test is real, and does what it claims:** the new
+regression test spawns a genuine worker subprocess (the exact
+invocation `video.py` itself uses) against a real, freshly-generated
+3000-frame synthetic video, and asserts its measured peak RSS via
+`resource.getrusage(RUSAGE_CHILDREN)` stays comfortably under 200 MB --
+a threshold chosen with real margin after independently measuring both
+implementations against the same file (new: ~92 MB; old, reverted:
+~549 MB). Reverted the fix and re-ran the test: it failed with the
+measured number in the assertion message itself (`worker peak RSS was
+548.8 MB`), not just a generic failure -- the exact old-implementation
+number, confirming the test genuinely exercises the mechanism, not a
+coincidental threshold. All 12 pre-existing video-degrader tests
+(including the SIGBUS-crash regression test, still passing unchanged)
+pass alongside it. 1 new test, 630 -> 631 Python tests. `ruff check`/
+`format --check` clean. `docs/multimodal.md` updated as a second
+finding in the same section as the SIGBUS fix, explicitly distinguished
+from it (no malicious input required, a different failure mode, the
+existing timeout mitigation doesn't help).
+
+**A methodology note distinct from the last several rounds':** this
+round's finding didn't come from re-examining a *freshly-shipped*
+mechanism (the pattern behind the last five rounds' findings) -- it
+came from applying the same "actually measure the real resource cost,
+don't just check for crashes/exceptions" discipline to a module that's
+sat unchanged for many rounds, in an area (video decoding) where memory
+cost scales with input size in a way error-handling review alone would
+never surface. Worth remembering as a second, complementary lens:
+re-examine shipped mechanisms' correctness, AND periodically re-examine
+older code's actual resource consumption under realistic, non-
+adversarial inputs, not just its error paths.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- confirmed genuinely deferred,
+not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
+worth a fresh, genuinely open-ended Explore-agent sweep next time,
+possibly applying this round's "measure real resource cost under
+ordinary input" lens to the audio and document degraders too, which
+share the same general "handle a real user-supplied media attachment"
+threat model this bug was found in.

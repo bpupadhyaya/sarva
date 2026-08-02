@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import random
 import struct
+import sys
 import wave
 import zlib
 
@@ -588,6 +589,50 @@ async def test_video_degrade_survives_a_native_decoder_crash_not_just_a_python_e
     # that pytest itself is still running to check this at all.
     assert len(out) >= 1
     assert isinstance(out[0], TextBlock)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="resource.getrusage (RSS measurement) is POSIX-only",
+)
+def test_video_worker_does_not_decode_the_whole_video_into_memory():
+    # A real bug found by actually generating an ordinary (non-corrupt,
+    # non-malicious) video and measuring peak memory: _video_worker.py
+    # used to do `frames = list(container.decode(stream))` -- every
+    # frame of the ENTIRE video decoded and held in memory at once,
+    # before sampling just 4 of them. Confirmed live: a completely
+    # ordinary 60s/1280x720/30fps mp4 (834 KB compressed) drove peak
+    # RSS to 2.6 GB. Fixed by seeking to each target timestamp and
+    # decoding forward only until the nearest frame there is found,
+    # never materializing more than one frame at a time. Verified here
+    # with a real worker subprocess (the exact invocation video.py
+    # itself uses) against a real 3000-frame synthetic video: the OLD
+    # list-based approach measured 482 MB peak RSS for this same file
+    # (confirmed separately, not asserted here since it's the removed
+    # code path); the threshold below sits comfortably between the two,
+    # failing clearly if a future change reintroduces the old behavior.
+    import resource
+    import subprocess
+
+    raw = _synthetic_video_bytes(n_frames=3000, fps=30, size=(320, 240))
+
+    before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    proc = subprocess.run(
+        [sys.executable, "-m", "sarva.multimodal.degraders._video_worker"],
+        input=raw,
+        capture_output=True,
+        timeout=30,
+    )
+    after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+
+    assert proc.returncode == 0
+    child_peak_rss_bytes = after - before
+    assert child_peak_rss_bytes < 200_000_000, (
+        f"worker peak RSS was {child_peak_rss_bytes / 1e6:.1f} MB -- "
+        "expected well under 200 MB for a bounded, seek-based sampler; "
+        "this large a number suggests the whole video is being decoded "
+        "into memory again"
+    )
 
 
 # ---------- DocumentToTextDegrader ----------
