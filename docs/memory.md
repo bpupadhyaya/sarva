@@ -216,6 +216,19 @@ reverting `SessionStore.locked` reproduced `AttributeError: 'SessionStore'
 object has no attribute 'locked'` in both new session-store tests and
 every dependent server/CLI test before re-applying.
 
+**`locked()` itself inherited a real Windows-specific bug from the
+`sarva.config` lock it mirrored, found and fixed by a later sweep
+re-examining the mechanism it had just copied.** The marker byte
+`msvcrt.locking()` needs to exist was rewritten on every single
+acquisition (a truncating `open(path, "wb")`), which is harmless for
+POSIX's purely advisory `flock()` but conflicts with Windows'
+*mandatory* byte-range lock: a second caller's rewrite targets exactly
+the byte a first caller already holds locked, failing before the
+second caller ever reaches its own lock attempt. See the packaging
+chapter for the full mechanism and the `sarva.config` fix this mirrors
+— fixed identically here with `os.open(..., O_CREAT)`, writing the
+marker byte only once.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:

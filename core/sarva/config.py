@@ -131,15 +131,44 @@ def _exclusive_lock(path: Path):
     all, since `_write_config`'s atomic `os.replace()` already
     guarantees a reader only ever sees a complete old or new version,
     never a torn one -- locking is only needed to serialize writers
-    against EACH OTHER, not readers against writers."""
+    against EACH OTHER, not readers against writers.
+
+    **The lock file is opened without truncating it, and the marker
+    byte written only if it isn't already there -- a real bug found by
+    reasoning through what a SECOND, contending caller actually does on
+    Windows.** The previous version re-opened the lock file with
+    truncating `"wb"` mode and rewrote the marker byte on every single
+    acquisition attempt. On POSIX that's harmless (`flock()` is purely
+    advisory -- it doesn't interact with ordinary reads/writes at all),
+    but on Windows, `msvcrt.locking()` is a *mandatory* byte-range lock
+    the OS enforces against **any** I/O to that region from other
+    processes, including a plain `write()` call that never itself calls
+    `locking()`. A second caller's truncating open + write targets
+    exactly the byte range the first caller already holds locked -- that
+    write fails with a sharing-violation `OSError` *before* the second
+    caller ever reaches its own `msvcrt.locking()` call, defeating the
+    intended blocking-retry semantics entirely: contention crashes the
+    second caller instead of making it wait, the opposite of what this
+    function exists to do. Not live-verified here (no Windows machine in
+    this environment) -- reasoned from documented Win32/CRT mandatory-
+    locking semantics, the same honesty this project already applies to
+    every other Windows-only code path, not assumed correct by analogy
+    to the POSIX branch. Fixed with `os.open(..., O_CREAT)` (no
+    `O_TRUNC`): the marker byte is written once, only if the file turns
+    out to be empty, and every later acquisition just opens and locks
+    the already-populated file without writing to it at all."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
+    fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    f = os.fdopen(fd, "r+b")
+    try:
         # Content is irrelevant -- this file exists purely as a lock
         # target -- but msvcrt.locking() requires the byte range being
         # locked to actually exist in the file, so one byte is written
-        # (and the file truncated fresh) on every acquisition.
-        f.write(b"\0")
-        f.flush()
+        # the first time this lock file is ever used, never again after.
+        if f.seek(0, os.SEEK_END) < 1:
+            f.seek(0)
+            f.write(b"\0")
+            f.flush()
         f.seek(0)
         if sys.platform == "win32":
             msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
@@ -153,6 +182,8 @@ def _exclusive_lock(path: Path):
                 msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    finally:
+        f.close()
 
 
 def _write_config(path: Path, data: dict[str, str]) -> None:

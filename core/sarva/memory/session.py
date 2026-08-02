@@ -151,7 +151,21 @@ class SessionStore:
         sees only a complete old-or-new version thanks to that same
         atomic write, never a torn one); locking only matters for
         serializing writers against each other, not readers against
-        writers."""
+        writers.
+
+        **The lock file is opened without truncating it, and the marker
+        byte written only if it isn't already there -- mirrors the
+        identical fix in `sarva.config`'s own `_exclusive_lock` (see
+        that function's own docstring for the real bug this closes: a
+        second, contending caller's truncating `open(path, "wb")`
+        rewrite on every acquisition attempt targets the exact byte
+        range Windows' *mandatory* `msvcrt.locking()` already holds
+        locked for a first caller, so the second caller's own `write()`
+        call fails with a sharing-violation `OSError` before it ever
+        reaches its own lock attempt -- contention crashing instead of
+        waiting, the opposite of what this method exists to do). Not
+        live-verified here (no Windows machine in this environment),
+        reasoned from documented Win32/CRT mandatory-locking semantics."""
         if name is None:
             yield
             return
@@ -159,14 +173,18 @@ class SessionStore:
         lock_path = self._path(name).with_suffix(".lock")
 
         def _acquire():
-            f = lock_path.open("wb")
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+            f = os.fdopen(fd, "r+b")
             # Content is irrelevant -- this file exists purely as a lock
             # target -- but msvcrt.locking() requires the byte range
             # being locked to actually exist in the file, so one byte is
-            # written (and the file truncated fresh) on every
-            # acquisition, the same as sarva.config's own lock file.
-            f.write(b"\0")
-            f.flush()
+            # written the first time this lock file is ever used, never
+            # again after (see this method's own docstring for why never
+            # rewriting it matters, not just why it needs to exist).
+            if f.seek(0, os.SEEK_END) < 1:
+                f.seek(0)
+                f.write(b"\0")
+                f.flush()
             f.seek(0)
             if sys.platform == "win32":
                 msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)

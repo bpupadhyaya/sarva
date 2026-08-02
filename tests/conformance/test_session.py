@@ -161,6 +161,28 @@ async def test_locked_rejects_an_invalid_session_name(store):
             pass
 
 
+async def test_locked_never_rewrites_the_lock_file_after_first_creation(store):
+    # Mirrors the identical fix in sarva.config's own _exclusive_lock --
+    # see that test's own docstring for the real Windows bug this closes
+    # and why mtime, not inode/content, is the property that actually
+    # distinguishes "never touched again" from "rewrote the same byte
+    # value" (both versions write the identical single byte, so inode
+    # and content alone can't tell them apart).
+    import asyncio
+
+    async with store.locked("shared"):
+        pass
+    lock_path = store._path("shared").with_suffix(".lock")
+    first_mtime = lock_path.stat().st_mtime_ns
+
+    for _ in range(5):
+        await asyncio.sleep(0.05)
+        async with store.locked("shared"):
+            pass
+
+    assert lock_path.stat().st_mtime_ns == first_mtime
+
+
 async def test_locked_serializes_concurrent_asyncio_tasks_on_the_same_session(store):
     # The in-process half of the cross-process fix's own claim: two
     # asyncio tasks racing a load-sleep-save cycle on the SAME session

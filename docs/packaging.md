@@ -559,6 +559,37 @@ are real: reverted the fix and watched both fail — one with
 `ImportError: cannot import name '_exclusive_lock'`, the other with the
 real lost-update (`KeyError: 'OPENAI_API_KEY'`) — before re-applying.
 
+**The lock itself had a real Windows-specific bug, found by a much
+later sweep re-examining this exact mechanism after mirroring it into
+`SessionStore`.** `_exclusive_lock` re-opened its dedicated `.lock`
+file with truncating `"wb"` mode and rewrote the one-byte marker on
+*every* acquisition, not just the first. Harmless on POSIX — `flock()`
+is purely advisory and doesn't interact with ordinary reads/writes at
+all — but `msvcrt.locking()` on Windows is a *mandatory* byte-range
+lock the OS enforces against any I/O to that region from other
+processes, including a plain `write()` that never itself calls
+`locking()`. A second, contending caller's truncating write targets
+exactly the byte a first caller already holds locked: that write fails
+with a sharing-violation `OSError` *before* the second caller ever
+reaches its own `msvcrt.locking()` call — contention crashing the
+second caller instead of making it wait, the opposite of what this
+function exists to do. Not live-verified here either (the same honest
+Windows gap named above), reasoned from documented Win32/CRT mandatory-
+locking semantics rather than assumed correct by analogy to the POSIX
+branch. Fixed with `os.open(..., O_CREAT)` (no `O_TRUNC`): the marker
+byte is written once, only if the file turns out to be empty, and
+every later acquisition just opens and locks the already-populated
+file without writing to it at all. The same fix landed in
+`SessionStore.locked` (see the memory chapter), which had mirrored the
+original, buggy version faithfully. **Verified via mtime, not inode or
+content:** both the buggy and fixed versions write the identical single
+byte value, so a file's content and inode stay the same either way —
+the property that actually distinguishes "rewrote the same byte" from
+"never touched it again" is whether a write syscall happened at all,
+observable as whether `mtime` advances across repeated acquisitions.
+Reverted and watched the new test fail with a real, later `mtime` on
+every one of five repeated acquisitions before re-applying.
+
 `Onboarding.tsx` is the screen this makes possible: on mount it polls
 `GET /doctor`; if any provider (including a reachable Ollama) is already
 configured, it completes immediately and the user never sees it. If

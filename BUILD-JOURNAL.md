@@ -9177,3 +9177,97 @@ at code-signing/notarization for the desktop release bundles (needs a
 real signing identity this environment doesn't have -- likely stays
 deferred). No other named-but-not-yet-picked-up gaps remain after this
 milestone -- worth a fresh Explore-agent sweep next time.
+
+## The cross-process lock itself had a real Windows bug -- rewriting the marker byte on every acquisition conflicts with Windows' own mandatory locking, found by re-examining a mechanism this project had just mirrored into a second file
+
+A round-36 sweep, explicitly told there was no named-but-unaddressed
+gap left in the backlog and to find something genuinely new after 36
+rounds of coverage. It found a real bug in the newest, freshest piece
+of infrastructure this project has: the cross-process lock shipped
+last round, by turning the "check for other copies of a pattern that
+may not have inherited a fix" technique on itself -- re-examining the
+lock's own mechanism (mirrored from `sarva.config`'s several-rounds-old
+`_exclusive_lock`) rather than assuming a directly-copied,
+already-shipped pattern was correct just because it had been used once
+before without incident.
+
+**The mechanism:** both `_exclusive_lock` (`sarva.config`) and the new
+`SessionStore.locked` re-opened their dedicated `.lock` file with
+truncating `"wb"` mode and rewrote a one-byte marker (needed because
+`msvcrt.locking()` requires the byte range being locked to already
+exist) on *every single acquisition*, not just the first. On POSIX
+this is completely harmless -- `flock()` is purely advisory and doesn't
+interact with ordinary reads/writes at all, regardless of who else has
+it locked. But `msvcrt.locking()` on Windows is a **mandatory**
+byte-range lock the OS enforces against *any* I/O to that region from
+*other* processes, including a plain `write()` call that never itself
+calls `locking()`. A second, contending caller's truncating open+write
+targets exactly the byte range a first caller already holds locked --
+that write fails with a sharing-violation `OSError` *before* the second
+caller ever reaches its own `msvcrt.locking()` call. The intended
+blocking-retry semantics (wait for the first caller to finish, however
+long that takes) is defeated entirely: contention crashes the second
+caller instead of making it wait, the exact opposite of what both
+functions exist to do -- and the multi-second-model-call scenario this
+project's own `SessionStore.locked` docstring specifically calls out as
+the reason the lock has to genuinely block, not just retry a few times,
+is precisely when this would bite.
+
+**Honestly scoped, not claimed to be live-verified:** this environment
+has no Windows machine, and (checked directly, not assumed) no CI job
+runs either `test_config.py` or `test_session.py` on a real
+`windows-latest` runner -- `windows-audio` is the only Windows CI job
+that exists, and it runs only `test_audio.py`. The finding is reasoned
+through documented Win32/CRT mandatory-locking semantics, the same
+honesty this project has applied to every other Windows-only code path
+(the TTS SAPI fix, the permissions fixes) rather than assumed correct
+by analogy to the POSIX branch just because the POSIX branch works.
+
+**Fixed identically in both files:** `os.open(path, os.O_CREAT |
+os.O_RDWR)` (deliberately no `O_TRUNC`) instead of a truncating
+`Path.open("wb")`. The marker byte is written exactly once -- checked
+via `f.seek(0, os.SEEK_END) < 1` -- the first time a given lock file is
+ever used; every later acquisition just opens and locks the
+already-populated file without writing to it at all.
+
+**Verified via a property that actually distinguishes the two
+behaviors, after a first attempt didn't:** the obvious first instinct
+-- compare inode and content across repeated acquisitions -- turned out
+to prove nothing, since *both* the buggy and fixed versions write the
+identical single byte value (`b"\0"`), so content and inode end up
+identical either way regardless of whether a rewrite happened. Caught
+this before it shipped: the first version of the new regression test
+passed against the *reverted*, still-buggy code, which is exactly the
+kind of test that looks like coverage but proves nothing -- a real
+instance of this project's own revert-and-verify discipline catching a
+weak test, not just a weak fix. The property that genuinely
+distinguishes "wrote the same byte again" from "never touched it
+again" is whether a `write()` syscall happened at all, observable as
+whether the file's `mtime` advances -- redesigned both tests around
+`st_mtime_ns` with a short real sleep between acquisitions (to be
+robust against filesystem timestamp granularity, not race it), and
+*then* reverting reproduced a real, later `mtime` on every one of five
+repeated acquisitions, the genuine bug, before re-applying the fix.
+All pre-existing config/session tests (including the existing real
+two-thread `_exclusive_lock` contention test) pass unchanged. 2 new
+tests, 624 -> 626 Python tests. `ruff check`/`format --check` clean.
+`docs/packaging.md` and `docs/memory.md` both updated, cross-referencing
+each other since the fix and its reasoning are identical in both files.
+
+**A methodology note worth keeping, now confirmed a third time:**
+re-examining a pattern's own *infrastructure* -- not just checking
+whether a fix propagated to every call site, but whether the mechanism
+itself, once copied into a second location, was actually correct in
+the first place -- has now found a real bug in three consecutive
+rounds (the RL harness's raw-fd race, `atomic_write`'s own thread-
+safety, and now this). Freshly-shipped code that gets *reused*
+elsewhere deserves a second look at the reused mechanism itself, not
+just at its new call site.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- confirmed genuinely deferred,
+not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
+worth a fresh, genuinely open-ended Explore-agent sweep next time.

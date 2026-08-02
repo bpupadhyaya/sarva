@@ -135,6 +135,41 @@ def test_exclusive_lock_actually_serializes_two_concurrent_acquirers(tmp_path):
     assert order == ["A-acquired", "A-released", "B-acquired"]
 
 
+def test_exclusive_lock_never_rewrites_the_lock_file_after_first_creation(tmp_path):
+    # A real bug found by reasoning through what a second, contending
+    # caller does on Windows: the previous version re-opened the lock
+    # file with truncating "wb" mode and rewrote its marker byte on
+    # EVERY acquisition. Harmless on POSIX (flock() is purely advisory),
+    # but on Windows msvcrt.locking() is a *mandatory* lock the OS
+    # enforces against any I/O to that byte range from other processes
+    # -- a second caller's truncating write targets exactly the byte a
+    # first caller already holds locked, failing with a sharing-
+    # violation OSError before the second caller ever reaches its own
+    # lock attempt, crashing instead of waiting. Not directly observable
+    # on POSIX (no Windows machine in this environment), but the actual
+    # fix -- never writing to an already-populated lock file again -- IS
+    # observable here via mtime: inode and content stay identical either
+    # way (both versions write the same single byte value), but mtime
+    # only advances if a write() genuinely happened. A short real sleep
+    # makes the comparison robust against filesystem timestamp
+    # granularity rather than racing it.
+    import time
+
+    from sarva.config import _exclusive_lock
+
+    lock_path = tmp_path / "test.lock"
+    with _exclusive_lock(lock_path):
+        pass
+    first_mtime = lock_path.stat().st_mtime_ns
+
+    for _ in range(5):
+        time.sleep(0.05)
+        with _exclusive_lock(lock_path):
+            pass
+
+    assert lock_path.stat().st_mtime_ns == first_mtime
+
+
 def test_save_config_survives_two_concurrent_callers_with_no_lost_update(tmp_path, monkeypatch):
     # A real bug found by actually simulating two concurrent callers
     # (e.g. the CLI and the desktop app, or two CLI invocations): the
