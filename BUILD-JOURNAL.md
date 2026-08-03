@@ -10361,3 +10361,88 @@ surface not yet caught, or return to open-ended bug-hunting with a
 fresh lens -- the "repeated cost in a long-running process" lens from
 rounds 43-45 is fairly well-mined; a genuinely different angle is
 worth trying next.
+
+
+## Long-term markdown memory: the design doc's third named memory tier, closed after a completeness audit found it genuinely missing
+
+With both design-doc-named agent-orchestration patterns now built
+(subagent fan-out, verifier subagent), ran a dedicated completeness
+audit -- not a bug sweep, specifically "what's named in the design doc
+or specs but not actually built" -- before assuming the loop had run
+out of real feature work. Found several real candidates (a TypeScript
+SDK, a dedicated code-execution sandbox tool, a web-search tool, image
+generation output, an `EditFileTool`), but the strongest, most
+concretely-named, most cleanly-scoped one was §3.4's literal promise:
+"long-term memory as plain markdown files (human-readable,
+greppable)." Confirmed genuinely missing: `core/sarva/memory/` had
+only `session.py` (JSONL, per-conversation) and `vector.py` (SQLite +
+TF-IDF, session-scoped semantic recall) -- no `longterm.py`, no
+markdown-file-based storage anywhere.
+
+Built `sarva.memory.longterm.LongTermMemoryStore`: one real `.md` file
+per topic under `~/.sarva/memory/`, each a genuinely appendable,
+human-readable document a person can open in any text editor -- headed
+by a UTC-timestamped entry per note, topic names slugified (so
+`"Project Status"` and `"project-status"` land in the same file,
+deliberately, not a bug). Search is deliberately EXACT substring
+matching, not semantic -- `VectorMemoryStore` already covers semantic
+recall, and the whole point of this tier is that it's plain, greppable
+text, so its own search should match that promise rather than
+duplicate the other tier's ranking. Deliberately NOT session-scoped,
+unlike `RememberTool`/`RecallMemoryTool` -- a note written from one
+conversation must be visible to every future one, the entire reason
+this tier exists distinct from the other two.
+
+**A real lost-update race caught and closed BEFORE shipping, not found
+in production later:** writing a note is a read-modify-write (read the
+topic's current content, append, write back). Left unlocked, this is
+the exact bug shape already found and fixed twice in this codebase
+(`sarva.config`'s save/unset race, `SessionStore`'s cross-process
+race) -- reintroducing it in brand-new code would have been a
+regression, not an oversight, given everything already learned this
+session about this exact bug class. Extracted `sarva.file_lock` (a
+small, shared module wrapping the identical `flock`/`msvcrt.locking`
+mechanism `sarva.config._exclusive_lock` and `SessionStore.locked` each
+independently hand-implemented) as the THIRD caller of this mechanism
+-- the same "centralize once duplicated three times" threshold that
+justified extracting `sarva.atomic_write` earlier in this project's
+history. `config.py`/`session.py` were deliberately NOT refactored onto
+the new shared module in this same change (a real, named follow-up, not
+silently forgotten) to keep this feature's own diff focused.
+
+**Verified the lock actually matters, not just that the code runs:**
+temporarily removed the lock from `write()` and raced 8 real OS threads
+writing to the same topic -- 7 of 8 notes were silently lost to the
+exact race being guarded against, confirmed live with the actual lost
+note numbers in the assertion failure. Restoring the lock made all 8
+survive, every time. This is the standard revert-and-verify discipline
+applied one level deeper than usual: not just "does the new test fail
+without the whole feature" (it does — `ModuleNotFoundError`) but "does
+the SPECIFIC mechanism inside the feature actually prevent the SPECIFIC
+bug it claims to prevent."
+
+Wired into the agent as two new `BUILTIN_TOOLS`: `NoteTool` (`note`)
+and `SearchNotesTool` (`search_notes`), following the same
+lazy-store-construction discipline `RememberTool`/`RecallMemoryTool`
+already established (opened on first real use, not at module-import
+time -- verified with the same laziness test pattern). Cross-session
+visibility verified directly: two different `ToolContext`s carrying
+different `session_id`s, confirming a note written under one is found
+by a search under the other.
+
+19 new tests (12 `LongTermMemoryStore`, 2 `file_lock`, 5 tool-level),
+680 total Python tests. `ruff check`/`format --check` clean.
+`docs/memory.md` updated: the chapter's own opening ("two layers") was
+factually wrong the moment this shipped, fixed to "three layers," plus
+a full new section with a comparison table against the other two
+tiers.
+
+**Next:** the completeness audit's other candidates (TypeScript SDK,
+code-execution sandbox tool, web-search tool, image generation,
+`EditFileTool`) remain real, named-but-unbuilt gaps, roughly in that
+order of scope/value -- worth picking up in a future round, though
+several (web search, image generation) need a real external API
+dependency decision the author should weigh in on rather than being
+guessed at silently. The three infra-blocked items remain deferred
+(Tauri `csp: null`, RL harness sandboxing, inference batching); the
+quantization/`Budget` NaN-validation gaps remain real-but-unreachable.

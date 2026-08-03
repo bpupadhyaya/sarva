@@ -19,6 +19,11 @@ import httpx
 from sarva.agent.events import AgentResult
 from sarva.agent.subagents import DelegateTool
 from sarva.atomic_write import atomic_write_text
+from sarva.memory.longterm import (
+    DEFAULT_LONGTERM_MEMORY_DIR,
+    LongTermMemoryError,
+    LongTermMemoryStore,
+)
 from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
 from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.multimodal.fetch import FetchError, ensure_public_host, ssrf_safe_transport
@@ -366,6 +371,101 @@ class RecallMemoryTool:
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
 
 
+class NoteTool:
+    """Non-destructive: appends to a durable, CROSS-SESSION markdown note
+    under a topic, never overwrites or deletes anything already written.
+
+    Deliberately NOT session-scoped, unlike `RememberTool` -- this is the
+    design doc's own "long-term memory as plain markdown files" tier
+    (`sarva.memory.longterm`), meant to persist and be visible across
+    every future conversation, organized by topic rather than by
+    session. Use `remember`/`recall_memory` for session-scoped semantic
+    notes; use this for durable, human-readable knowledge a person could
+    also open directly in a text editor.
+
+    The default store is opened lazily, on first `run()`, not in
+    `__init__` -- the same reason `RememberTool`'s docstring gives:
+    `BUILTIN_TOOLS` below is a module-level list, so eager construction
+    here would create real files on disk as a side effect of merely
+    *importing* this module."""
+
+    spec = ToolSpec(
+        name="note",
+        description=(
+            "Save a durable note under a topic to long-term memory, visible across "
+            "every future conversation (not just this session). Stored as plain, "
+            "human-readable markdown -- use for knowledge worth keeping long-term, "
+            "not transient details of the current task."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "A short topic name, e.g. 'user-preferences'.",
+                },
+                "content": {"type": "string"},
+            },
+            "required": ["topic", "content"],
+            "additionalProperties": False,
+        },
+        destructive=False,
+    )
+
+    def __init__(self, store: LongTermMemoryStore | None = None):
+        self._store = store
+
+    def _get_store(self) -> LongTermMemoryStore:
+        if self._store is None:
+            self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
+        return self._store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        try:
+            path = self._get_store().write(args["topic"], args["content"])
+        except LongTermMemoryError as e:
+            return ToolResultBlock(tool_call_id="", content=[TextBlock(text=str(e))], is_error=True)
+        return ToolResultBlock(
+            tool_call_id="", content=[TextBlock(text=f"Noted under {path.stem!r}.")]
+        )
+
+
+class SearchNotesTool:
+    """Non-destructive: read-only, exact substring search over every
+    long-term note. Deliberately not semantic (that's `recall_memory`'s
+    job) -- the whole point of this tier is that it's plain, greppable
+    text, so search matches that promise directly rather than
+    duplicating the other tier's own similarity ranking."""
+
+    spec = ToolSpec(
+        name="search_notes",
+        description="Search long-term notes (across every past conversation) for exact text.",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        destructive=False,
+    )
+
+    def __init__(self, store: LongTermMemoryStore | None = None):
+        self._store = store
+
+    def _get_store(self) -> LongTermMemoryStore:
+        if self._store is None:
+            self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
+        return self._store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        matches = self._get_store().search(args["query"])
+        if not matches:
+            text = "No notes matched."
+        else:
+            text = "\n".join(f"- {m.topic}: ...{m.snippet}..." for m in matches)
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
+
+
 BUILTIN_TOOLS: list[Tool] = [
     ReadFileTool(),
     WriteFileTool(),
@@ -373,5 +473,7 @@ BUILTIN_TOOLS: list[Tool] = [
     WebFetchTool(),
     RememberTool(),
     RecallMemoryTool(),
+    NoteTool(),
+    SearchNotesTool(),
     DelegateTool(),
 ]

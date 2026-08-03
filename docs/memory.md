@@ -1,8 +1,13 @@
-# Chapter 5 — Memory: Sessions and Semantic Recall
+# Chapter 5 — Memory: Sessions, Semantic Recall, and Long-Term Notes
 
 Chapter 4 covered what a conversation is made of. This chapter is about
 what happens to it after the run ends — `core/sarva/memory/`, which has
-two layers, deliberately kept separate.
+three layers, deliberately kept separate: session persistence (this
+conversation's own history), semantic recall (session-scoped notes,
+found by meaning), and long-term memory (durable notes visible across
+every conversation, found by exact text). The third layer was a real,
+named-but-unbuilt gap for a long time — closed further down this
+chapter.
 
 ## Session persistence: plain files
 
@@ -362,6 +367,67 @@ checked that the parameter exists. A run with no session at all
 (`sarva chat` with no `--session`) leaves `ctx.session_id` as `None` and
 falls back to the tool's own default, exactly as before this was wired
 in — every existing call site that never sets a session is unaffected.
+
+## Long-term memory: plain markdown files, one per topic
+
+The design doc's own literal promise (§3.4): "long-term memory as plain
+markdown files (human-readable, greppable)." A third memory tier,
+built once the "keep pushing until every named feature is actually
+built" pass reached it — genuinely distinct from the two above, not a
+restyled version of either:
+
+|  | `SessionStore` | `VectorMemoryStore` | `LongTermMemoryStore` |
+|---|---|---|---|
+| Scope | one conversation | usually one session | every conversation |
+| Organized by | session name | session id | topic |
+| Format | JSON | SQLite | plain markdown |
+| Search | none (full replay) | semantic (TF-IDF cosine) | exact substring |
+
+`sarva.memory.longterm.LongTermMemoryStore` writes one real `.md` file
+per topic under `~/.sarva/memory/` (default), each a genuinely
+appendable, human-readable document — open `~/.sarva/memory/
+project-status.md` in any text editor and every note is right there in
+plain text, headed by a UTC timestamp, no query tool required. A topic
+name is slugified (`"Project Status"` and `"project-status"` land in
+the same file, deliberately — the more useful behavior for a
+human-organized note system, not a bug), and an unusable name (no
+alphanumeric content at all) is rejected with a clean
+`LongTermMemoryError` rather than producing an empty or malformed
+filename.
+
+**Search is deliberately exact substring matching, not semantic** —
+`VectorMemoryStore` already covers semantic recall; the whole point of
+this tier is that it's plain, greppable text, so its own search matches
+that promise directly instead of duplicating the other tier's ranking.
+
+### A real lost-update race, caught and closed before it ever shipped, not found in production later
+
+Writing a note is a read-modify-write (read the topic's current
+content, append a new entry, write the whole file back). Left
+unlocked, this is the *exact* bug shape already found and fixed twice
+in this codebase — `sarva.config`'s save/unset race and
+`SessionStore`'s cross-process race — and reintroducing it in brand-new
+code would have been a regression, not an oversight. `sarva.file_lock`
+was extracted as a small, shared module (the same cross-process
+`flock`/`msvcrt.locking` mechanism, now with three independent
+callers instead of two hand-mirrored copies) and `LongTermMemoryStore.
+write()` holds a real per-topic lock for its whole read-modify-write
+span. Confirmed live, not just reasoned through: temporarily removing
+the lock and racing 8 real OS threads writing to the same topic lost 7
+of 8 notes to the exact race being guarded against; restoring the lock
+made all 8 survive, every time.
+
+### Wired into the agent as two more built-in tools
+
+`NoteTool` (`note`) and `SearchNotesTool` (`search_notes`) join
+`BUILTIN_TOOLS`, following the same lazy-store-construction discipline
+`RememberTool`/`RecallMemoryTool` already established (opened on first
+real use, not at module-import time). Deliberately NOT session-scoped
+— unlike `remember`/`recall_memory`, a note written from one
+conversation must be visible to every future one, which is the entire
+reason this tier exists; verified directly with two different
+`ToolContext`s carrying different `session_id`s, confirming a note
+written under one is found by a search under the other.
 
 ## Build it yourself
 

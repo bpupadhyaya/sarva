@@ -8,14 +8,17 @@ import os
 import pytest
 import sarva.agent.tools as tools_module
 from sarva.agent.tools import (
+    NoteTool,
     ReadFileTool,
     RecallMemoryTool,
     RememberTool,
     RunShellTool,
+    SearchNotesTool,
     ToolContext,
     WebFetchTool,
     WriteFileTool,
 )
+from sarva.memory.longterm import LongTermMemoryStore
 from sarva.memory.vector import VectorMemoryStore
 
 
@@ -354,3 +357,66 @@ def test_default_memory_tools_do_not_open_the_store_until_first_run():
     recall = RecallMemoryTool()
     assert remember._store is None
     assert recall._store is None
+
+
+@pytest.mark.asyncio
+async def test_note_then_search_notes_round_trip(ctx, tmp_path):
+    store = LongTermMemoryStore(tmp_path / "memory")
+    note = NoteTool(store=store)
+    search = SearchNotesTool(store=store)
+
+    result = await note.run({"topic": "project status", "content": "launch is next week"}, ctx)
+    assert not result.is_error
+
+    result = await search.run({"query": "launch"}, ctx)
+    assert not result.is_error
+    assert "project-status" in result.content[0].text
+    assert "launch" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_search_notes_with_no_matches_says_so(ctx, tmp_path):
+    search = SearchNotesTool(store=LongTermMemoryStore(tmp_path / "memory"))
+    result = await search.run({"query": "anything"}, ctx)
+    assert "No notes matched" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_note_rejects_an_unusable_topic_name_cleanly(ctx, tmp_path):
+    note = NoteTool(store=LongTermMemoryStore(tmp_path / "memory"))
+    result = await note.run({"topic": "!!!", "content": "some content"}, ctx)
+    assert result.is_error is True
+    assert "invalid topic name" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_note_is_visible_across_different_sessions(tmp_path):
+    # The whole point of this tier, unlike RememberTool: a note written
+    # from one session must be readable from a completely different
+    # session's own ToolContext -- no session_id scoping at all.
+    store = LongTermMemoryStore(tmp_path / "memory")
+    note = NoteTool(store=store)
+    search = SearchNotesTool(store=store)
+    ctx_a = ToolContext(
+        workdir=str(tmp_path), run_dir=str(tmp_path / "run"), session_id="session-a"
+    )
+    ctx_b = ToolContext(
+        workdir=str(tmp_path), run_dir=str(tmp_path / "run"), session_id="session-b"
+    )
+
+    await note.run({"topic": "shared", "content": "written from session a"}, ctx_a)
+    result = await search.run({"query": "written from session a"}, ctx_b)
+
+    assert "shared" in result.content[0].text
+
+
+def test_default_longterm_memory_tools_do_not_open_the_store_until_first_run():
+    # Same laziness property as the memory tools above, same reason:
+    # BUILTIN_TOOLS constructs these at module import time with no store
+    # argument -- eagerly opening the default store in __init__ would
+    # create real files/directories under ~/.sarva/memory/ as a side
+    # effect of merely importing sarva.agent.tools.
+    note = NoteTool()
+    search = SearchNotesTool()
+    assert note._store is None
+    assert search._store is None
