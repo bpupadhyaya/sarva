@@ -11351,3 +11351,84 @@ potentially-blocking operation directly from its own `async def run()`
 without `asyncio.to_thread` -- this round only checked the long-term-
 memory tier specifically, not every tool in `core/sarva/agent/tools.py`
 against this exact lens.
+
+
+## `remember`/`recall_memory` had the identical event-loop-freeze shape as `NoteTool` — plus a second bug hiding behind the first, caught mid-fix
+
+Round 54, directly following round 53's own closing suggestion: check
+whether any OTHER built-in tool calls a synchronous, potentially-
+blocking operation directly from its own `async def run()` without
+`asyncio.to_thread` -- round 53 only checked the long-term-memory tier
+specifically. Checked the sibling memory tools sharing that same
+chapter: `RememberTool`/`RecallMemoryTool` (`sarva.memory.vector`).
+
+Found the identical shape immediately: Python's `sqlite3` module blocks
+for up to its own default 5-second `timeout` waiting for another
+connection's write lock to clear before raising "database is locked,"
+and both tools called `add()`/`search()` directly with no `asyncio.
+to_thread`. Confirmed live: a real second OS process holding a genuine
+`BEGIN EXCLUSIVE` lock on the same database for 3 seconds froze the
+calling process's entire event loop for the whole window -- a
+heartbeat coroutine that should tick roughly every 0.05s recorded ZERO
+ticks across the full window, the identical severity class round 53
+just fixed one tier over.
+
+**A second, genuinely separate bug was hiding behind the first, caught
+mid-fix rather than by a fresh sweep of its own:** both tools' default
+store is opened LAZILY on first `run()`, and `VectorMemoryStore.
+__init__` does its own `CREATE TABLE IF NOT EXISTS` + `commit()` --
+just as capable of blocking on the same contended lock as `add()`/
+`search()` themselves. The first attempt at this fix (wrapping only
+the already-open store's method call in `asyncio.to_thread`, mirroring
+`NoteTool`'s own fix exactly) left the freeze fully reachable on a
+tool's very first call in a fresh process -- caught immediately by
+re-running the same live repro after the "fix," which showed the
+identical zero-tick freeze. Closed by folding the lazy construction
+and the method call into one `asyncio.to_thread` dispatch (`RememberTool.
+_add`/`RecallMemoryTool._search`).
+
+**A real thread-affinity constraint surfaced that `NoteTool`'s own fix
+never had to deal with:** unlike `LongTermMemoryStore.write()`
+(self-contained, opens a fresh lock file per call), `VectorMemoryStore`
+holds one persistent `sqlite3.Connection` for its whole lifetime, and
+Python's `sqlite3` module by default only permits a connection to be
+used from the exact thread that created it. Confirmed live: a naive
+`asyncio.to_thread(conn.execute, ...)` against a connection created on
+the event-loop thread raised `ProgrammingError: SQLite objects created
+in a thread can only be used in that same thread`, since `asyncio.
+to_thread` dispatches to a pool thread that can differ call to call.
+Fixed by connecting with `check_same_thread=False` and adding an
+explicit `threading.Lock` around every real use of the connection --
+disabling sqlite3's own safety check alone doesn't make one connection
+safe for genuinely concurrent multi-thread access, so the lock does the
+actual serializing (held only around the actual `execute`/`commit`
+calls in `add()`, and only around the row-fetch in `search()`, not the
+pure-Python TF-IDF/cosine-similarity computation that follows it).
+
+**Verified live** the fix brings the heartbeat count back up to 58 of
+~60 expected ticks across the identical contended window. **Verified
+by reverting** and watching the new test fail with the literal old
+bug's own number -- `0` ticks -- reproducing itself. 1 new test, 698
+-> 699 Python tests, all passing, `ruff check`/`format --check` clean.
+`docs/memory.md` gained a new subsection directly under round 53's own
+`NoteTool` fix, the one this closes out the sibling case of.
+
+**Nine consecutive rounds now (46-54)** have found real bugs -- and
+this round is the second time (after round 51's own off-by-one) that a
+fix-in-progress was caught having a real bug of its own before it ever
+shipped, this time by re-running the same live repro rather than the
+existing test suite.
+
+**Next:** `WebFetchTool`/`RunShellTool` are the two other built-ins
+that touch genuinely external/slow resources (network, subprocess) --
+both already have their own timeout/async handling from earlier
+rounds, but haven't been checked against this SPECIFIC "does a
+synchronous call block the event loop directly" lens the way the
+memory tools just were; worth a quick confirmation pass rather than
+assuming their existing async-native implementations are automatically
+safe. The completeness-audit backlog remains at three items needing
+external-dependency/scope decisions from the author (a code-execution
+sandbox tool, web search, image generation). The three infra-blocked
+items remain deferred (Tauri `csp: null`, RL harness sandboxing,
+inference batching); the quantization/`Budget` NaN-validation and
+explicit-partial-`Budget` gaps remain real-but-unreachable.

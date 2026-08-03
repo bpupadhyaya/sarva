@@ -473,6 +473,59 @@ the same contended window. Verified by reverting and watching the new
 test fail with the literal old bug's own number — `0` ticks —
 reproducing itself in the assertion failure. 1 new test, 698 total.
 
+### The identical shape, one round later, in `remember`/`recall_memory` — and a second bug hiding behind the first
+
+The very next round applied the same lens to the other two memory
+tools sharing this file's chapter: `remember`/`recall_memory`
+(`sarva.memory.vector`). Python's `sqlite3` module blocks for up to its
+own default 5-second `timeout` waiting for another connection's write
+lock to clear before raising "database is locked," and `RememberTool.
+run()`/`RecallMemoryTool.run()` both called `add()`/`search()` directly
+with no `asyncio.to_thread` — the identical mistake `NoteTool` had just
+been fixed for, in a sibling tool sharing this exact chapter. Confirmed
+live: a real second OS process holding a genuine SQLite `BEGIN
+EXCLUSIVE` lock on the same database for 3 seconds froze the calling
+process's entire event loop for the whole window (0 of ~61 expected
+heartbeat ticks).
+
+**A second, genuinely separate bug was hiding behind the first, caught
+mid-fix rather than found by a fresh sweep of its own:** both tools'
+own default store is opened lazily on first `run()` (`_get_store()`),
+and `VectorMemoryStore.__init__` does its own `CREATE TABLE IF NOT
+EXISTS` + `commit()` against the same database — just as capable of
+blocking on the identical contended lock as `add()`/`search()`
+themselves. Wrapping only the already-open store's method call in
+`asyncio.to_thread` (mirroring `NoteTool`'s own fix exactly) would have
+left the freeze fully reachable on a tool's very first call in a fresh
+process — caught by the same live repro, re-run after the first
+attempt, showing the identical zero-tick freeze despite the "fix"
+already being in place. Closed by folding the lazy construction and
+the method call into one `asyncio.to_thread` dispatch (`RememberTool.
+_add`/`RecallMemoryTool._search`) so both blocking-prone operations
+move off the event loop together.
+
+Fixing this also surfaced a real thread-affinity constraint `NoteTool`'s
+own fix never had to deal with: unlike `LongTermMemoryStore.write()`
+(self-contained, opens a fresh lock file per call), `VectorMemoryStore`
+holds one persistent `sqlite3.Connection` for its whole lifetime, and
+Python's `sqlite3` module by default only permits a connection to be
+used from the exact thread that created it — confirmed live, a naive
+`asyncio.to_thread(conn.execute, ...)` against a connection created on
+the event-loop thread raised `ProgrammingError: SQLite objects created
+in a thread can only be used in that same thread`, since `asyncio.
+to_thread` dispatches to a pool thread that can differ from call to
+call. Fixed by connecting with `check_same_thread=False` and adding an
+explicit `threading.Lock` around every real use of the connection —
+disabling sqlite3's own safety check alone doesn't make one connection
+safe for genuinely concurrent access from multiple threads, so the
+lock does the actual serializing.
+
+Verified live the fix brings the heartbeat count back up to 58 of ~60
+expected ticks across the identical contended window. Verified by
+reverting and watching the new test fail with the literal old bug's
+own number — `0` ticks — reproducing itself. 1 new test, 698 -> 699
+total.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools

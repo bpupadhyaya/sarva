@@ -33,6 +33,7 @@ import math
 import os
 import re
 import sqlite3
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,7 +108,35 @@ class VectorMemoryStore:
         # was previously left at 0644/0755 (this machine's real umask).
         db_path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(db_path.parent, 0o700)
-        self._conn = sqlite3.connect(str(db_path))
+        # A real bug found by giving RememberTool/RecallMemoryTool their
+        # own fresh-eyes sweep, the same lens that just found NoteTool
+        # blocking the whole event loop on a contended cross-process
+        # lock (see sarva.memory.longterm): `add`/`search` below are
+        # fully synchronous, and Python's sqlite3 module blocks for up
+        # to its own default 5-second `timeout` waiting for another
+        # writer's lock to clear before raising "database is locked" --
+        # RememberTool/RecallMemoryTool called these methods directly
+        # from their own `async def run()` bodies with no
+        # `asyncio.to_thread`. Confirmed live: a real second OS process
+        # holding an EXCLUSIVE write lock on this same database for 3s
+        # froze the calling process's ENTIRE event loop for the whole
+        # window (0 of ~61 expected heartbeat ticks). Fixing this at the
+        # tool layer (matching NoteTool's own fix) needs
+        # `check_same_thread=False` here too: sqlite3 connections are
+        # thread-affined to whichever thread created them by default,
+        # and `asyncio.to_thread` dispatches to a pool thread that may
+        # differ from the one that constructed this store (confirmed
+        # live: a naive `asyncio.to_thread(conn.execute, ...)` against a
+        # connection created on the event-loop thread raised
+        # `ProgrammingError: SQLite objects created in a thread can only
+        # be used in that same thread`). `check_same_thread=False` alone
+        # only disables that safety check, though -- it does not make a
+        # single connection safe for genuinely concurrent use from
+        # multiple threads at once, so `self._lock` (below) serializes
+        # every real access to `self._conn`, in both `add`/`search` and
+        # this constructor's own use of it.
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         try:
             self._conn.execute(
                 """
@@ -129,11 +158,12 @@ class VectorMemoryStore:
         os.chmod(db_path, 0o600)
 
     def add(self, session_id: str, text: str) -> int:
-        cursor = self._conn.execute(
-            "INSERT INTO entries (session_id, text) VALUES (?, ?)", (session_id, text)
-        )
-        self._conn.commit()
-        return cursor.lastrowid
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO entries (session_id, text) VALUES (?, ?)", (session_id, text)
+            )
+            self._conn.commit()
+            return cursor.lastrowid
 
     def search(
         self, query: str, top_k: int = 5, session_id: str | None = None
@@ -144,12 +174,13 @@ class VectorMemoryStore:
         `session_id`'s if given) — a query scoped to one session is
         scored against that session's own term statistics, not polluted
         by unrelated sessions' vocabulary."""
-        if session_id is not None:
-            rows = self._conn.execute(
-                "SELECT id, session_id, text FROM entries WHERE session_id = ?", (session_id,)
-            ).fetchall()
-        else:
-            rows = self._conn.execute("SELECT id, session_id, text FROM entries").fetchall()
+        with self._lock:
+            if session_id is not None:
+                rows = self._conn.execute(
+                    "SELECT id, session_id, text FROM entries WHERE session_id = ?", (session_id,)
+                ).fetchall()
+            else:
+                rows = self._conn.execute("SELECT id, session_id, text FROM entries").fetchall()
 
         if not rows:
             return []

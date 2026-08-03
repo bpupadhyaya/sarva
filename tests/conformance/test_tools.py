@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 import pytest
 import sarva.agent.tools as tools_module
@@ -453,6 +454,78 @@ async def test_remember_then_recall_round_trip(ctx, tmp_path):
     result = await recall.run({"query": "where is the launch code"}, ctx)
     assert not result.is_error
     assert "blue folder" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_remember_does_not_freeze_the_event_loop_while_waiting_on_a_contended_lock(
+    tmp_path, monkeypatch
+):
+    # A real bug found by the same sweep that just found NoteTool's
+    # identical shape: VectorMemoryStore's SQLite connection can block
+    # for up to sqlite3's own 5-second default timeout waiting for
+    # another writer's lock, and RememberTool.run() called `add()`
+    # directly with no `asyncio.to_thread`. Confirmed live before the
+    # fix: a real second OS process holding a genuine SQLite EXCLUSIVE
+    # lock on the same database for 3s froze this process's entire
+    # event loop for the whole window -- a heartbeat coroutine that
+    # should tick roughly every 0.05s recorded ZERO ticks across the
+    # full ~3s call. Also caught along the way: the lazy `_get_store()`
+    # construction path (its own CREATE TABLE + commit) is just as
+    # capable of blocking as `add()` itself -- exercised directly here
+    # by letting RememberTool build its own store lazily on first
+    # run(), the same path BUILTIN_TOOLS's real, no-store-argument
+    # construction takes, rather than pre-building one synchronously
+    # (which would itself block the test on the very same contended
+    # lock, before RememberTool.run() is ever even called).
+    import subprocess
+    import sys
+
+    db_path = tmp_path / "memory.db"
+    monkeypatch.setattr(tools_module, "DEFAULT_MEMORY_DB_PATH", db_path)
+    holder = tmp_path / "hold_lock.py"
+    holder.write_text(
+        "import sqlite3, sys, time\n"
+        "path, hold = sys.argv[1], float(sys.argv[2])\n"
+        "conn = sqlite3.connect(path, timeout=hold + 10)\n"
+        "conn.execute('CREATE TABLE IF NOT EXISTS entries "
+        "(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, text TEXT NOT NULL)')\n"
+        "conn.commit()\n"
+        "conn.execute('BEGIN EXCLUSIVE')\n"
+        "conn.execute(\"INSERT INTO entries (session_id, text) VALUES ('holder', 'x')\")\n"
+        "open(path + '.acquired', 'w').write('1')\n"
+        "time.sleep(hold)\n"
+        "conn.commit()\n"
+    )
+    marker = Path(str(db_path) + ".acquired")
+    proc = subprocess.Popen([sys.executable, str(holder), str(db_path), "1.0"])
+    while not marker.exists():
+        await asyncio.sleep(0.02)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+    remember = RememberTool()  # no store given -- lazily builds one on first run()
+    ctx_obj = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+
+    result = await remember.run({"text": "hello"}, ctx_obj)
+
+    hb_task.cancel()
+    proc.wait(timeout=10)
+
+    assert not result.is_error
+    # The real, decisive assertion: while run() was blocked waiting on
+    # the contended lock (both its own lazy store construction and the
+    # add() call), the event loop must have kept running other
+    # coroutines -- a near-zero tick count is the literal old bug
+    # reproducing itself (the loop frozen solid for the whole ~1s wait).
+    assert ticks >= 10, f"event loop only ticked {ticks} times -- looks frozen"
 
 
 @pytest.mark.asyncio

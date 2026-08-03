@@ -425,8 +425,25 @@ class RememberTool:
             self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
         return self._store
 
+    def _add(self, session_id: str, text: str) -> None:
+        self._get_store().add(session_id, text)
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
-        self._get_store().add(ctx.session_id or self._session_id, args["text"])
+        # A real bug found by giving this tool the same sweep that just
+        # found NoteTool blocking the whole event loop on a contended
+        # cross-process lock (see VectorMemoryStore.__init__'s own
+        # docstring for the confirmed repro): `add()` can block for up
+        # to sqlite3's own 5-second default timeout waiting for another
+        # writer's lock, and this ran directly on the event loop with no
+        # `asyncio.to_thread`. `_get_store()`'s own lazy construction
+        # (its `VectorMemoryStore(...)` call does its own `CREATE TABLE
+        # IF NOT EXISTS` + commit) is just as capable of blocking on that
+        # same contended lock as `add()` itself, so both are dispatched
+        # together in `_add` -- routing only `add()` through
+        # `asyncio.to_thread` and leaving `_get_store()` called directly
+        # here would have left the identical freeze reachable on a
+        # tool's very first call.
+        await asyncio.to_thread(self._add, ctx.session_id or self._session_id, args["text"])
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text="Saved to memory.")])
 
 
@@ -461,10 +478,16 @@ class RecallMemoryTool:
             self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
         return self._store
 
+    def _search(self, query: str, top_k: int, session_id: str | None):
+        return self._get_store().search(query, top_k=top_k, session_id=session_id)
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
         top_k = args.get("top_k", 5)
         session_id = ctx.session_id or self._session_id
-        results = self._get_store().search(args["query"], top_k=top_k, session_id=session_id)
+        # See RememberTool.run's own comment -- the identical
+        # event-loop-blocking gap (including the same lazy-construction
+        # angle), same fix.
+        results = await asyncio.to_thread(self._search, args["query"], top_k, session_id)
         if not results:
             text = "No relevant memories found."
         else:
