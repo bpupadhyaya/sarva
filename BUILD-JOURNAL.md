@@ -9647,3 +9647,115 @@ lacks); real container/VM sandboxing for the RL coding-task harness
 concurrent inference requests (§3.6f -- confirmed genuinely deferred,
 not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
 worth a fresh, genuinely open-ended Explore-agent sweep next time.
+
+## Long-context RoPE scaling silently corrupted the whole model for a NaN factor, and crashed uncleanly for three other individually-valid-looking but numerically extreme configs
+
+A round-41 sweep, after a quick clean re-check of the two freshly-
+shipped memory-cap fixes (video/audio degraders -- no new issue found
+there) and a clean check of MoE routing under degenerate all-tokens-
+one-expert input, applied a genuinely fresh angle: correctness of
+`RopeScalingConfig`/`precompute_rope` under extreme or adversarial
+`factor` values, not just the already-tested "does scaling do the
+right math for reasonable inputs" property tests. Found four real
+bugs, all in the same shape: a value that individually passes whatever
+validation exists, but silently produces NaN/Inf or crashes uncleanly
+once it reaches the actual computation.
+
+**The most severe, by a real margin: `factor=nan` was accepted with no
+error at all.** `RopeScalingConfig.__post_init__`'s only check was
+`factor <= 0`, and `nan <= 0` evaluates to `False` in Python -- NaN
+sailed straight through. Confirmed live: `precompute_rope`'s own
+cos/sin tables came back 100% NaN, and building a real
+`DecoderOnlyTransformer` with this config and running a forward pass
+produced logits that were 100% NaN, no exception anywhere, no
+diagnostic of any kind. **Reachable through a real, non-synthetic
+path, not just a direct constructor call worth dismissing as
+contrived:** `sarva.providers.foundry_provider.save_checkpoint_bundle`/
+`load_checkpoint_bundle` round-trip `rope_scaling` straight through a
+checkpoint's `config.json` via `json.dumps`/`json.loads`, and Python's
+`json` module accepts and round-trips the non-standard `NaN` literal
+by default -- confirmed live, `json.dumps({"factor": float("nan")})`
+produces the literal text `{"factor": NaN}`, and `json.loads` on that
+exact string returns `float("nan")` right back, with zero diagnostics
+at either the save or the load step. A NaN factor in a saved
+checkpoint's config would silently corrupt every future load of that
+checkpoint -- the kind of bug that could sit in a real, already-trained
+artifact for a long time before anyone notices the model just doesn't
+work, with no error pointing at why.
+
+**Three more real bugs found by systematically pushing each remaining
+individually-valid-looking parameter to its numerical extreme, not
+random fuzzing:**
+
+- `factor=1e-300` for linear scaling (finite, positive -- passes every
+  existing check) divides positions down to a value that overflows,
+  and `cos`/`sin` of a non-finite angle is itself NaN. Confirmed live:
+  100% NaN output, no exception -- the identical silent-corruption
+  shape as the NaN-factor bug, just reached through a factor that
+  individually looked completely valid.
+- `factor=1e300` for NTK scaling raised an uncaught native
+  `OverflowError` from `factor ** (head_dim/(head_dim-2))` exceeding
+  float range -- a real crash, just not the module's own documented
+  `ValueError` contract every other invalid-input path in this project
+  gives callers.
+- `head_dim=2` with NTK scaling raised an uncaught `ZeroDivisionError`.
+  `head_dim=2` is even, so it passes the earlier "head_dim must be
+  even" check, but NTK's own exponent formula (`head_dim / (head_dim -
+  2)`) divides by zero for exactly this value.
+
+**Fixed with validation at two layers, matching where each failure
+mode actually becomes detectable:** `RopeScalingConfig.__post_init__`
+now checks `math.isfinite(factor)` (catching NaN and ±Inf in the same
+check that already rejected non-positive values) -- the cheapest,
+earliest possible rejection point for the most severe bug.
+`precompute_rope` adds three more checks at the points where each
+remaining failure mode actually manifests: an explicit `head_dim <= 2`
+guard before NTK's own division, a `try`/`except OverflowError`
+around the NTK effective-theta computation re-raised as a clean
+`ValueError`, and -- the one deliberately general-purpose check,
+rather than a fourth narrow one -- a final `torch.isfinite(cos).all()
+`/`sin` check after computing the actual output tables, which catches
+the near-zero-linear-factor case *and* any other numerically-extreme
+theta/factor/head_dim/max_seq_len combination this function can't
+practically enumerate in advance, without needing to guess a
+"reasonable" bound for `factor` itself.
+
+**Verified all four independently, the standard bar:** reverted the
+fix and watched each of the four new tests fail for the exact right
+reason -- the raw `OverflowError`, the raw `ZeroDivisionError`, and
+`Failed: DID NOT RAISE ValueError` for the two silent-NaN cases (the
+strongest possible confirmation for a silent-corruption bug: the
+absence of an error is itself the demonstrated bad behavior) -- before
+re-applying. All 9 pre-existing rope-scaling tests, including the ones
+proving linear/NTK's actual mathematical properties under *normal*
+inputs, pass completely unchanged; a sanity check confirmed ordinary,
+realistic scaling configs (`factor=4.0`, both methods) still produce
+correct output shapes after all four fixes. 4 new tests, 634 -> 638
+Python tests. `ruff check`/`format --check` clean.
+`docs/foundry/transformer.md` updated with all four findings in the
+same section as the existing RoPE-scaling documentation.
+
+**Distinct from the last two rounds' "measure real resource cost"
+lens, and worth naming as its own, complementary technique:** this
+round's bugs weren't about resource consumption at all -- they're
+classic silent-numerical-corruption bugs, found by systematically
+pushing each individually-plausible-looking parameter (not randomly
+fuzzed bytes, not an obviously malformed value) to its mathematical
+extreme and checking whether the *output* stayed finite, not just
+whether the function raised. The NaN-factor finding in particular is
+a reminder that validating "is this parameter positive" is not the
+same as validating "is this parameter a real, finite number" --
+`<= 0` and `math.isfinite` are not interchangeable checks, and Python
+will not warn you they diverge.
+
+**Next:** the Tauri `csp: null` gap (the last remaining long-standing
+deferred item, still needs a GUI/Windows machine this environment
+lacks); real container/VM sandboxing for the RL coding-task harness
+(genuinely deferred, infrastructure-heavy work); batching multiple
+concurrent inference requests (§3.6f -- confirmed genuinely deferred,
+not a hidden bug). No other named-but-not-yet-picked-up gaps remain --
+worth a fresh, genuinely open-ended Explore-agent sweep next time,
+possibly applying this round's "push each individually-valid-looking
+numerical parameter to its extreme" lens to other hyperparameter-
+validation surfaces in `sarva_foundry` (MoE config, quantization
+parameters) that haven't had this specific treatment yet.

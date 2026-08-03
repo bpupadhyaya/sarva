@@ -166,6 +166,61 @@ depends only on relative position, never absolute — for a *fixed*
 scaling config, verified the same way the unscaled table's relative-
 position invariance is verified in `test_model.py`.
 
+**Four real validation gaps found by a sweep specifically targeting
+"correctness under extreme/adversarial `factor` values," a genuinely
+fresh angle after many rounds spent elsewhere.** All four are silent-
+corruption or ugly-crash bugs, not crashes on obviously-malformed
+input — every value involved individually passes whatever check
+existed at the time, and only produces a NaN/Inf/exception once it
+reaches the actual math:
+
+- **`factor=nan` was accepted with no error at all**, since Python's
+  `nan <= 0` evaluates to `False` — the original check only rejected
+  non-positive values. Confirmed live: `precompute_rope`'s own cos/sin
+  tables came back 100% NaN, and a real `DecoderOnlyTransformer`'s
+  logits were 100% NaN too, no exception anywhere. Reachable through a
+  real, non-synthetic path, not just a direct constructor call —
+  `save_checkpoint_bundle`/`load_checkpoint_bundle` round-trip
+  `rope_scaling` through a checkpoint's `config.json` via
+  `json.dumps`/`json.loads`, and Python's `json` module accepts and
+  round-trips the non-standard `NaN` literal by default (confirmed
+  live: `json.dumps({"factor": float("nan")})` produces literal
+  `{"factor": NaN}`, and `json.loads` on that string returns
+  `float("nan")` right back) — a NaN factor in a saved checkpoint would
+  silently corrupt every future load of it. `RopeScalingConfig.
+  __post_init__` now checks `math.isfinite(factor)`, rejecting NaN and
+  ±Inf in the same check that already rejected non-positive values.
+- **`factor=1e-300` (linear scaling) — individually finite and
+  positive, so it passed every existing check — divides positions down
+  to a value that overflows, and `cos`/`sin` of a non-finite angle is
+  itself NaN.** Confirmed live: 100% NaN cos/sin tables, no exception,
+  the identical silent-corruption shape as the NaN-factor bug, just
+  reached through a factor that individually looked valid.
+  `precompute_rope` now checks `torch.isfinite(cos).all()`/`sin` after
+  computing them and raises a clear `ValueError` naming the actual
+  theta/head_dim/max_seq_len/scaling combination that produced it —
+  one check that catches this and any other numerically-extreme
+  combination this function can't practically enumerate in advance,
+  rather than trying to guess a "reasonable" bound for `factor` itself.
+- **`factor=1e300` (NTK scaling) raised an uncaught native
+  `OverflowError`** from `factor ** (head_dim/(head_dim-2))` exceeding
+  float range — a real crash, just not the module's own documented
+  `ValueError` contract. Now caught and re-raised as a clear
+  `ValueError` naming the factor and head_dim involved.
+- **`head_dim=2` with NTK scaling raised an uncaught
+  `ZeroDivisionError`.** `head_dim=2` is even, so it passes the
+  earlier "head_dim must be even" check, but NTK's own exponent formula
+  (`head_dim / (head_dim - 2)`) divides by zero for exactly this value
+  — a real, if pathological, edge case (a 2-dimensional attention head
+  is an unusual config, but nothing before this fix actually prevented
+  it). Now an explicit, named check before the division.
+
+Verified each independently: reverted the fix and watched all four new
+tests fail for the exact right reason (the raw `OverflowError`/
+`ZeroDivisionError`; `Failed: DID NOT RAISE ValueError` for the two
+silent-NaN cases) before re-applying. All 9 pre-existing rope-scaling
+tests pass unchanged.
+
 ## Native multimodal input: a vision encoder + projector
 
 `sarva_foundry.model.vision` is the third and last named piece of

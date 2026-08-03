@@ -91,6 +91,71 @@ def test_factor_must_be_positive():
         RopeScalingConfig("ntk", factor=-1.0)
 
 
+def test_factor_must_be_finite_not_just_positive():
+    # A real bug found by actually constructing this with factor=nan and
+    # running a real forward pass: `nan <= 0` is False in Python, so the
+    # plain positivity check above let NaN straight through with no
+    # error at all -- confirmed live, precompute_rope's own cos/sin
+    # tables came back 100% NaN, and a real DecoderOnlyTransformer's
+    # logits were 100% NaN too, silently, no exception anywhere. Also
+    # reachable through a real, non-synthetic path: a checkpoint's
+    # config.json round-trips a NaN factor silently through
+    # json.dumps/json.loads (Python's json module accepts the non-
+    # standard NaN literal by default), so a corrupted checkpoint could
+    # load with no diagnostic at all without this check.
+    import math
+
+    import pytest
+
+    with pytest.raises(ValueError, match="finite"):
+        RopeScalingConfig("linear", factor=float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        RopeScalingConfig("ntk", factor=float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        RopeScalingConfig("linear", factor=-math.inf)
+
+
+def test_ntk_scaling_rejects_head_dim_of_two():
+    # A real bug found by actually calling precompute_rope with
+    # head_dim=2 and ntk scaling: head_dim=2 is even, so it passes the
+    # earlier "head_dim must be even" check, but NTK's own exponent
+    # formula (head_dim / (head_dim - 2)) divides by zero for exactly
+    # this value -- an uncaught ZeroDivisionError instead of this
+    # module's own documented ValueError contract, confirmed live
+    # before this fix.
+    import pytest
+
+    with pytest.raises(ValueError, match="head_dim"):
+        precompute_rope(2, 32, _THETA, scaling=RopeScalingConfig("ntk", factor=2.0))
+
+
+def test_ntk_scaling_rejects_a_factor_too_large_to_compute():
+    # A real bug found by actually calling this with an extreme but
+    # individually-valid (finite, positive) factor: factor=1e300 makes
+    # `factor ** exponent` overflow float range, an uncaught native
+    # OverflowError instead of a clean, actionable ValueError, confirmed
+    # live before this fix.
+    import pytest
+
+    with pytest.raises(ValueError, match="overflow"):
+        precompute_rope(_HEAD_DIM, 32, _THETA, scaling=RopeScalingConfig("ntk", factor=1e300))
+
+
+def test_linear_scaling_rejects_a_factor_too_small_to_stay_finite():
+    # A real bug found by actually calling this with an extreme but
+    # individually-valid (finite, positive) factor: factor=1e-300
+    # divides positions down to a value that overflows, and cos/sin of a
+    # non-finite angle is itself NaN -- confirmed live, the returned
+    # cos/sin tables came back 100% NaN with no exception anywhere,
+    # before this fix, the same silent-corruption shape the NaN-factor
+    # bug has, just reached through a factor that individually passes
+    # every existing check.
+    import pytest
+
+    with pytest.raises(ValueError, match="non-finite"):
+        precompute_rope(_HEAD_DIM, 32, _THETA, scaling=RopeScalingConfig("linear", factor=1e-300))
+
+
 def test_relative_position_invariance_still_holds_under_scaling():
     # Mirrors test_model.py's test_rope_encodes_relative_not_absolute_position
     # for a scaled table: a rotated dot product must still depend only on

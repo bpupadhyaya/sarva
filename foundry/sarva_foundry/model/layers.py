@@ -14,6 +14,7 @@ implement directly.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -72,8 +73,27 @@ class RopeScalingConfig:
     factor: float
 
     def __post_init__(self) -> None:
-        if self.factor <= 0:
-            raise ValueError(f"factor must be positive, got {self.factor}")
+        # A real bug found by actually constructing this with factor=nan
+        # and running a real forward pass: `nan <= 0` is False in Python,
+        # so a plain `factor <= 0` check lets NaN straight through with
+        # no error at all. Confirmed live: precompute_rope's cos/sin
+        # tables came back 100% NaN, and a real DecoderOnlyTransformer's
+        # logits were 100% NaN too -- no exception anywhere, silent total
+        # corruption. Reachable through a real, non-synthetic path, not
+        # just a direct constructor call: `sarva.providers.foundry_
+        # provider.load_checkpoint_bundle` deserializes this straight
+        # from a checkpoint's config.json via json.loads, and Python's
+        # json module accepts and round-trips the non-standard NaN
+        # literal by default -- confirmed live, `json.dumps({"factor":
+        # float("nan")})` produces `{"factor": NaN}`, and `json.loads`
+        # on that string returns `float("nan")` right back, with zero
+        # diagnostics at either the save or the load step. A NaN factor
+        # in a saved checkpoint's config.json would silently corrupt
+        # every future load of that checkpoint. `math.isfinite` rejects
+        # both NaN and +/-Inf in one check, on top of the existing
+        # non-positive rejection.
+        if not math.isfinite(self.factor) or self.factor <= 0:
+            raise ValueError(f"factor must be a finite positive number, got {self.factor}")
 
 
 def precompute_rope(
@@ -98,7 +118,28 @@ def precompute_rope(
 
     effective_theta = theta
     if scaling is not None and scaling.method == "ntk":
-        effective_theta = theta * (scaling.factor ** (head_dim / (head_dim - 2)))
+        # A real bug found by actually calling this with head_dim=2 (even,
+        # so it passes the check above, but pathological for NTK's own
+        # exponent formula): `head_dim / (head_dim - 2)` divides by zero,
+        # an uncaught ZeroDivisionError instead of the module's own
+        # documented ValueError contract. Confirmed live before this fix.
+        if head_dim <= 2:
+            raise ValueError(
+                f"ntk scaling requires head_dim > 2 (its exponent formula divides by "
+                f"head_dim - 2), got head_dim={head_dim}"
+            )
+        try:
+            effective_theta = theta * (scaling.factor ** (head_dim / (head_dim - 2)))
+        except OverflowError as e:
+            # A real bug found by actually calling this with an extreme
+            # (but already individually valid -- finite, positive)
+            # factor: factor=1e300 makes `factor ** exponent` overflow
+            # float range, an uncaught native OverflowError instead of a
+            # clean, actionable ValueError. Confirmed live before this fix.
+            raise ValueError(
+                f"ntk scaling factor {scaling.factor} is too large for head_dim={head_dim} "
+                "-- the resulting effective theta overflowed"
+            ) from e
 
     inv_freq = 1.0 / (effective_theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
     positions = torch.arange(max_seq_len).float()
@@ -107,7 +148,27 @@ def precompute_rope(
 
     freqs = torch.outer(positions, inv_freq)  # (max_seq_len, head_dim/2)
     emb = torch.cat([freqs, freqs], dim=-1)  # (max_seq_len, head_dim)
-    return emb.cos(), emb.sin()
+    cos, sin = emb.cos(), emb.sin()
+    # A real bug found by actually calling this with an extreme but
+    # individually-valid linear factor (factor=1e-300, finite and > 0,
+    # so RopeScalingConfig's own validation accepts it): dividing
+    # positions by a near-zero factor overflows position values, and
+    # cos/sin of an overflowed (non-finite) angle is itself NaN.
+    # Confirmed live before this fix: the returned cos/sin tables were
+    # 100% NaN, silently, with no exception anywhere -- the same silent-
+    # corruption shape the NaN-factor bug above has, just reached
+    # through a factor that individually passes every existing check.
+    # A single finiteness check here catches this and any other
+    # numerically-extreme combination of theta/factor/head_dim/
+    # max_seq_len this function can't practically enumerate in advance,
+    # without needing to guess a "reasonable" bound for `factor` itself.
+    if not (torch.isfinite(cos).all() and torch.isfinite(sin).all()):
+        raise ValueError(
+            f"rope scaling produced non-finite values for theta={theta}, "
+            f"head_dim={head_dim}, max_seq_len={max_seq_len}, scaling={scaling} -- "
+            "the requested factor is too extreme for this configuration"
+        )
+    return cos, sin
 
 
 def _rotate_half(x: Tensor) -> Tensor:
