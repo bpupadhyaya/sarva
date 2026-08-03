@@ -11275,3 +11275,79 @@ NaN-validation and explicit-partial-`Budget` gaps remain
 real-but-unreachable. A genuinely fresh area (not `AgentLoop`/
 `spawn_subagent`, which has now had five rounds of attention running)
 is worth trying next.
+
+
+## `note` could freeze the whole `sarva serve` process, not just one request — a genuinely fresh-area sweep after five rounds on the agent loop
+
+Round 53, directly following round 52's own closing note: `AgentLoop`/
+`spawn_subagent` had had five straight rounds of attention (48-52);
+time to sweep a genuinely different area rather than wait for a sixth
+regression to surface there organically. Swept `core/sarva/memory/`
+instead -- `longterm.py`, `session.py`, `vector.py`, and the tool
+wrappers around them.
+
+`session.py`, `vector.py`, and most of `longterm.py` came back clean --
+already correctly guarded from prior rounds (atomic writes, a
+documented cross-process lock via `asyncio.to_thread` in `SessionStore.
+locked`, `MemoryStoreError` handling for corrupted SQLite). But
+`NoteTool.run()` (backing the `note` built-in tool) had a real bug:
+`LongTermMemoryStore.write()` is a fully synchronous method that
+blocks on a real cross-process `flock` for as long as another writer
+holds it -- `NoteTool.run()` called it directly from its `async def`
+body with no `asyncio.to_thread`, exactly the mistake `SessionStore.
+locked`'s own docstring already documents fixing once for the
+identical flock-blocking shape. That fix never propagated to this
+newer memory tier.
+
+**Confirmed live:** wrote a repro spawning a real second OS process
+(`subprocess.Popen`, not a thread or asyncio task within one process)
+that flocks a topic's `.md.lock` file for 3 seconds, then in the main
+process ran a 0.05s heartbeat coroutine concurrently with a real
+`NoteTool.run()` call contending on the same lock. The heartbeat,
+which should tick roughly 54 times across a ~2.7s window, recorded
+**zero** ticks -- the entire event loop was frozen solid for the whole
+lock-hold window, not just the one tool call. In a real `sarva serve`
+process this means any two concurrent writers to the same long-term-
+memory topic (an ordinary `note` tool call from one conversation racing
+another, or a `sarva note` CLI invocation against a running server)
+freezes every OTHER user's in-flight `/chat`/`/ws/chat` turn too --
+the same severity class as the session cross-process lock bug this
+tier's own docstring already names as the pattern to avoid regressing,
+just never actually checked against this newer code.
+
+**Fixed** by wrapping the `store.write(...)` call in `asyncio.to_thread`
+inside `NoteTool.run()` -- the simplest correct fix here, since
+(unlike `SessionStore.locked`, an async context manager spanning
+multiple awaits) `LongTermMemoryStore.write()` is a single synchronous
+call with no yield points to preserve; moving the whole call off-thread
+needs no changes to `longterm.py` itself. `SearchNotesTool` only ever
+reads and never contends on this lock, confirmed unaffected and left
+as-is.
+
+**Verified live** the fix brings the heartbeat count back to 52 of ~54
+expected ticks across the identical contended window. **Verified by
+reverting** and watching the new test fail with the literal old bug's
+own number -- `0` ticks -- reproducing itself in the assertion
+failure. 1 new test, 697 -> 698 Python tests, all passing, `ruff
+check`/`format --check` clean. `docs/memory.md` gained a new subsection
+directly under the long-term-memory chapter's own overlong-topic-name
+fix.
+
+**Eight consecutive rounds now (46-53)** have found real bugs by
+giving recently-shipped OR previously-checked code a dedicated
+fresh-eyes sweep -- this round specifically proves the lens generalizes
+beyond the agent loop itself: the same "did an earlier fix's pattern
+actually get applied everywhere it needed to be" question, asked of a
+completely different module.
+
+**Next:** the completeness-audit backlog remains at three items needing
+external-dependency/scope decisions from the author (a code-execution
+sandbox tool, web search, image generation). The three infra-blocked
+items remain deferred (Tauri `csp: null`, RL harness sandboxing,
+inference batching); the quantization/`Budget` NaN-validation and
+explicit-partial-`Budget` gaps remain real-but-unreachable. Worth
+checking next: does any OTHER built-in tool call a synchronous,
+potentially-blocking operation directly from its own `async def run()`
+without `asyncio.to_thread` -- this round only checked the long-term-
+memory tier specifically, not every tool in `core/sarva/agent/tools.py`
+against this exact lens.

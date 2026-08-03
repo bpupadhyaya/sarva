@@ -522,8 +522,25 @@ class NoteTool:
         return self._store
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        # A real bug found by actually racing a genuine second OS process
+        # holding the per-topic flock (see LongTermMemoryStore.write's own
+        # docstring) against this tool's own call into it: `write()` is a
+        # fully synchronous method that blocks on that flock for as long
+        # as another writer holds it -- calling it directly from this
+        # `async def` runs it straight on the event loop with no
+        # `asyncio.to_thread`, exactly the mistake `SessionStore.locked`'s
+        # own docstring already documents fixing once for the identical
+        # flock-blocking shape. Confirmed live: a real second process
+        # holding the topic's `.md.lock` for 3s froze this process's
+        # ENTIRE event loop for the whole window -- a heartbeat coroutine
+        # that should have ticked roughly every 0.05s recorded ZERO ticks
+        # across the full 2.7s call, meaning every other in-flight
+        # `/chat`/`/ws/chat` turn in a real `sarva serve` process would
+        # have frozen too, not just this one tool call. `SearchNotesTool`
+        # below only ever reads (never contends on this lock), so it's
+        # unaffected and left as-is.
         try:
-            path = self._get_store().write(args["topic"], args["content"])
+            path = await asyncio.to_thread(self._get_store().write, args["topic"], args["content"])
         except LongTermMemoryError as e:
             return ToolResultBlock(tool_call_id="", content=[TextBlock(text=str(e))], is_error=True)
         return ToolResultBlock(

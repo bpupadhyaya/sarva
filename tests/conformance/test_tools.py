@@ -594,6 +594,66 @@ async def test_note_is_visible_across_different_sessions(tmp_path):
     assert "shared" in result.content[0].text
 
 
+@pytest.mark.asyncio
+async def test_note_does_not_freeze_the_event_loop_while_waiting_on_a_contended_lock(tmp_path):
+    # A real bug found by giving NoteTool its own dedicated fresh-eyes
+    # sweep (a genuinely new area, after five straight rounds on the
+    # agent loop itself): LongTermMemoryStore.write() is a fully
+    # synchronous method that blocks on a real cross-process flock for
+    # as long as another writer holds it (see its own docstring), and
+    # NoteTool.run() called it directly from its `async def` body with
+    # no `asyncio.to_thread` -- exactly the mistake `SessionStore.
+    # locked`'s own docstring already documents fixing once for the
+    # identical flock-blocking shape, never propagated to this newer
+    # memory tier. Confirmed live before the fix: a real second OS
+    # process holding the topic's `.md.lock` for 3s froze this
+    # process's ENTIRE event loop for the whole window -- a heartbeat
+    # coroutine that should tick roughly every 0.05s recorded ZERO
+    # ticks across the full ~2.7s call, meaning every other in-flight
+    # `/chat`/`/ws/chat` turn in a real `sarva serve` process would
+    # have frozen too, not just this one tool call.
+    import subprocess
+    import sys
+
+    memory_dir = tmp_path / "memory"
+    store = LongTermMemoryStore(memory_dir)
+    lock_path = store._path_for("shared-topic").with_suffix(".md.lock")
+
+    holder = tmp_path / "hold_lock.py"
+    holder.write_text(
+        "import fcntl, sys, time\n"
+        "f = open(sys.argv[1], 'a+b')\n"
+        "fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+        "time.sleep(float(sys.argv[2]))\n"
+        "fcntl.flock(f.fileno(), fcntl.LOCK_UN)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(holder), str(lock_path), "1.0"])
+    await asyncio.sleep(0.2)  # let the other process actually acquire the lock first
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    note = NoteTool(store=store)
+    ctx_obj = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+    result = await note.run({"topic": "shared-topic", "content": "hello"}, ctx_obj)
+    hb_task.cancel()
+    proc.wait(timeout=10)
+
+    assert not result.is_error
+    # The real, decisive assertion: while NoteTool.run() was blocked
+    # waiting on the contended lock, the event loop must have kept
+    # running other coroutines -- a near-zero tick count is the literal
+    # old bug reproducing itself (the loop frozen solid for the whole
+    # ~1s wait).
+    assert ticks >= 10, f"event loop only ticked {ticks} times -- looks frozen"
+
+
 def test_default_longterm_memory_tools_do_not_open_the_store_until_first_run():
     # Same laziness property as the memory tools above, same reason:
     # BUILTIN_TOOLS constructs these at module import time with no store

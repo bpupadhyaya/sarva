@@ -446,6 +446,33 @@ for the `.md`/`.md.lock` suffix), raising the same clean, documented
 Verified live that the identical 500-character topic now produces a
 clean validation error with no local path anywhere in it.
 
+### A real bug found by a fresh-eyes sweep of a genuinely different area: `note` could freeze the whole server, not just one request
+
+After several rounds focused on the agent loop's own subagent
+concurrency, a round deliberately swept a different area instead —
+long-term memory. `LongTermMemoryStore.write()` is a fully synchronous
+method that blocks on a real cross-process `flock` for as long as
+another writer holds it (see the lost-update-race fix above), and
+`NoteTool.run()` called it directly from its `async def` body with no
+`asyncio.to_thread` — exactly the mistake `SessionStore.locked`'s own
+fix (see the session-persistence section above) already closed once
+for the identical flock-blocking shape, never propagated to this newer
+tier. Confirmed live: a real second OS process holding a topic's
+`.md.lock` for 3 seconds froze the *entire* event loop for the whole
+window — a heartbeat coroutine that should tick roughly every 0.05s
+recorded **zero** ticks across the full ~2.7s call. In a real `sarva
+serve` deployment this means every other in-flight `/chat`/`/ws/chat`
+turn freezes too, not just the one `note` call — the same severity
+class as the session-locking bug this tier's own docstring already
+names as the pattern to avoid regressing. Fixed by wrapping the call in
+`asyncio.to_thread`, moving the blocking acquire (and the write itself)
+off the event loop. `SearchNotesTool` only ever reads and never
+contends on this lock, so it's unaffected. Verified live the fix
+brings the heartbeat count back up to 52 of ~54 expected ticks across
+the same contended window. Verified by reverting and watching the new
+test fail with the literal old bug's own number — `0` ticks —
+reproducing itself in the assertion failure. 1 new test, 698 total.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools
