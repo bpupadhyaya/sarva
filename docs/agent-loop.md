@@ -34,6 +34,35 @@ on that decision, and looping back to `CALLING_MODEL` afterward — with
 the tool results appended to the conversation — is how the model
 verifies what just happened and decides whether it's actually done.
 
+### Every run's transcript directory used to live forever — a real resource leak in any long-running `sarva serve`
+
+A round-43 sweep, looking specifically for "resources that accumulate
+across many calls in a long-running process" rather than blow up on a
+single call, found that `run_dir/transcript.jsonl` above was written
+into a fresh `run_root/<run_id>/` directory on **every** `AgentLoop.run()`
+call, and nothing anywhere ever deleted an old one. Confirmed live:
+running 25 ordinary turns against a real router the same way
+`sarva.server.app`'s `/chat`/`/ws/chat` handlers do (a fresh `AgentLoop`
+per request, discarded after) left exactly 25 directories on disk —
+unbounded growth over the lifetime of a long-running server process,
+with each directory retaining the complete event stream for that turn
+(full message text, tool-call arguments, tool-result content)
+indefinitely, with no user-visible retention policy at all. Reachable
+through completely ordinary use, no adversarial input needed — every
+`sarva run`/`sarva chat` invocation and every request against a busy
+`sarva serve` deployment adds one more directory that lives forever.
+
+Fixed with `_prune_old_runs`, called once per `run()` right after
+creating that run's own directory: keeps the most recent
+`_MAX_RETAINED_RUNS` (200) directories by mtime and deletes the rest —
+some retention window is the intended behavior (this file's own opening
+paragraph calls a run "inspectable"), just not an unbounded one.
+Verified by reverting and watching the new test fail with
+`AttributeError: <module 'sarva.agent.loop'> has no attribute
+'_MAX_RETAINED_RUNS'` — the test monkeypatches that constant down to 3
+so it doesn't need to actually run 200+ turns to prove pruning happens.
+All 30 pre-existing agent-loop tests pass unchanged.
+
 ## Tool use: concurrent, typed, gated by one policy
 
 A `Tool` is a small, explicit contract:

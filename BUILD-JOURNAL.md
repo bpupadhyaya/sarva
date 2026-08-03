@@ -9835,3 +9835,81 @@ extreme" and "resource cost under ordinary input" lenses fairly
 thoroughly across the surfaces that had them; worth looking for a third,
 different lens entirely next time rather than re-running these two
 again.
+
+
+## Every AgentLoop run's transcript directory lived forever -- a real resource leak in any long-running `sarva serve` deployment
+
+Round 43, following round 42's own explicit suggestion to try a
+genuinely different lens after four rounds spent on "numerical
+extremes" and "resource cost under ordinary input": this round targeted
+"resource leaks under repeated/looped use in a long-running process,"
+not one-shot cost. Found that `AgentLoop.run()` creates a fresh
+`run_root/<run_id>/` directory on every single call and writes the
+full event transcript into it, with nothing anywhere in the codebase
+ever deleting one -- confirmed by grepping for `rmtree`/`unlink`/
+`prune`/`cleanup` across `core/sarva`, which found nothing touching
+`run_root` after creation.
+
+Confirmed live: constructing a real `Router`/`MockProvider` from this
+repo's own fixtures and calling `AgentLoop(...).run(...)` 25 times the
+same way `sarva.server.app`'s `/chat` and `/ws/chat` handlers actually
+do it (a brand-new `AgentLoop` per request, discarded after) left
+exactly 25 directories on disk, zero deleted. Each directory's
+`transcript.jsonl` holds the complete event stream for that turn --
+full message text, tool-call arguments, and tool-result content --
+retained indefinitely with no TTL, size cap, or CLI command to prune
+(no `runs`/`gc`/`prune` subcommand exists). Reachable through
+completely ordinary use: every `sarva run`/`sarva chat` invocation and
+every request against a long-running `sarva serve` process adds one
+more permanent directory. This is exactly the "append to a store
+forever across the lifetime of a long-running process with no
+eviction" shape the round's lens was aimed at, and separately touches
+on the same "unintended local persistence of potentially sensitive
+data" concern an earlier round's `~/.sarva/config.json` permissions fix
+already treated as worth hardening.
+
+**Fixed with `_prune_old_runs`**, called once per `run()` immediately
+after creating that run's own directory: keeps the most recent
+`_MAX_RETAINED_RUNS` (200) directories by mtime, deletes the rest via
+`shutil.rmtree(..., ignore_errors=True)`. Deliberately a bounded
+retention window, not outright removal -- `AgentLoop`'s own docstring
+calls a run "inspectable," so keeping a recent window is the intended
+behavior, just not an unbounded one. `keep` is passed explicitly at the
+call site (`_prune_old_runs(run_root, keep=_MAX_RETAINED_RUNS)`) rather
+than as a function default -- a real test-authoring mistake caught
+along the way: Python binds default-argument values at function-
+definition time, so the first version of the fix (with `keep:
+int = _MAX_RETAINED_RUNS` as a default parameter) didn't actually pick
+up `monkeypatch.setattr`'ing the module constant in the test, since the
+default had already been bound into the function object before the
+test ever ran. Caught immediately by the test itself asserting the
+wrong count (6 instead of 3) and fixed by moving the reference to
+call time.
+
+**Verified by reverting and watching the new test fail for the exact
+right reason:** `AttributeError: <module 'sarva.agent.loop'> has no
+attribute '_MAX_RETAINED_RUNS'` -- the test monkeypatches that constant
+down to 3 so it can prove pruning happens without actually running
+200+ turns. All 30 pre-existing agent-loop tests pass unchanged. 1 new
+test, 641 -> 642 Python tests. `ruff check`/`format --check` clean.
+`docs/agent-loop.md` updated with the finding right after the
+transcript/state-machine section it directly concerns.
+
+**A genuinely new bug shape for this project's sweeps so far:** every
+prior round found either a crash, a silent-corruption bug, or a
+one-shot resource-exhaustion bug (a single call spiking memory/CPU).
+This is the first finding in the "slow, unbounded accumulation across
+many ordinary calls over the life of a long-running process" shape --
+worth remembering as its own distinct lens, separate from both
+"measure real resource cost under ordinary input" (one call) and "push
+parameters to their numerical extreme" (one call, extreme input).
+
+**Next:** the same three previously-identified items remain genuinely
+deferred (Tauri `csp: null`, RL harness container/VM sandboxing,
+inference-request batching). The quantization and `Budget`
+NaN-validation gaps noted last round remain real-but-currently-
+unreachable, unchanged. Worth checking whether other long-running-
+process state has the same unbounded-accumulation shape as this
+round's finding -- `VectorMemoryStore`'s in-memory TF-IDF index and any
+other server-side in-memory caches haven't been checked with this
+specific lens yet.

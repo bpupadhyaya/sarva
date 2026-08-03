@@ -28,6 +28,7 @@ T1 simplifications still true (documented, not hidden):
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -105,6 +106,35 @@ _TOOL_TIMEOUT_SECONDS = 90
 # a counter that means something else.
 _MAX_STREAM_RETRIES = 5
 
+# A real bug found by actually running `AgentLoop.run()` in a loop the way
+# `sarva.server.app`'s /chat and /ws/chat handlers do (a fresh AgentLoop
+# per request): every single call creates a new `run_root/<run_id>/`
+# directory and never deletes it, no matter how the run ends. Confirmed
+# live: 25 ordinary, non-adversarial turns against a real router left 25
+# directories on disk with zero cleanup anywhere in this codebase --
+# unbounded growth over the lifetime of a long-running `sarva serve`
+# process, plus indefinite retention of full transcript content (message
+# text, tool arguments, tool results) with no user-visible retention
+# policy, the same class of unintended local persistence this project's
+# own config.json permissions fix (see BUILD-JOURNAL.md) already treated
+# as worth hardening. Pruned to the most recent `_MAX_RETAINED_RUNS`
+# directories (by mtime) on every new run rather than removed outright --
+# `AgentLoop`'s own docstring calls a run "inspectable," so some retention
+# window is the intended behavior, just not an unbounded one.
+_MAX_RETAINED_RUNS = 200
+
+
+def _prune_old_runs(run_root: Path, keep: int) -> None:
+    try:
+        run_dirs = [p for p in run_root.iterdir() if p.is_dir()]
+    except OSError:
+        return
+    if len(run_dirs) <= keep:
+        return
+    run_dirs.sort(key=lambda p: p.stat().st_mtime)
+    for old_dir in run_dirs[: len(run_dirs) - keep]:
+        shutil.rmtree(old_dir, ignore_errors=True)
+
 
 def _required_modalities(messages: list[Message]) -> set[Modality]:
     """What the routed model must support, computed from what's actually in
@@ -181,8 +211,10 @@ class AgentLoop:
         run-scoped identifier like `run_id` below (a fresh UUID every
         call, unrelated to which saved conversation this is)."""
         run_id = uuid.uuid4().hex[:12]
-        run_dir = Path(self._run_root) / run_id
+        run_root = Path(self._run_root)
+        run_dir = run_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        _prune_old_runs(run_root, keep=_MAX_RETAINED_RUNS)
         transcript_path = run_dir / "transcript.jsonl"
 
         async def emit(event: AgentEvent) -> AgentEvent:

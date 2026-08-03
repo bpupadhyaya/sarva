@@ -384,6 +384,29 @@ async def test_transcript_is_replayable(run_root):
     assert len(lines) == len(events)
 
 
+@pytest.mark.asyncio
+async def test_run_directories_are_pruned_beyond_the_retention_cap(run_root, monkeypatch):
+    # A real bug found by actually running AgentLoop.run() in a loop the
+    # way sarva.server.app's /chat and /ws/chat handlers do (a fresh
+    # AgentLoop per request, discarded after): every run created a new
+    # run_root/<run_id>/ directory and nothing anywhere ever deleted one,
+    # unbounded growth over the lifetime of a long-running `sarva serve`
+    # process. Uses a small monkeypatched cap so the test doesn't need to
+    # actually run 200+ turns to prove pruning happens.
+    import sarva.agent.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "_MAX_RETAINED_RUNS", 3)
+
+    for i in range(6):
+        provider = MockProvider(script=[ScriptedTurn(text=f"turn {i}")])
+        loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+        async for _ in loop.run(f"task {i}"):
+            pass
+
+    run_dirs = list(Path(run_root).iterdir())
+    assert len(run_dirs) == 3
+
+
 def test_required_modalities_text_only():
     messages = [Message(role="user", content=[TextBlock(text="hi")])]
     assert _required_modalities(messages) == {Modality.TEXT}
