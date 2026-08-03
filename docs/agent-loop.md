@@ -73,13 +73,13 @@ class Tool(Protocol):
     async def run(self, args: dict, ctx: ToolContext) -> ToolResultBlock: ...
 ```
 
-`BUILTIN_TOOLS` ships six: `ReadFileTool`, `WriteFileTool`,
+`BUILTIN_TOOLS` ships seven: `ReadFileTool`, `WriteFileTool`,
 `RunShellTool`, `WebFetchTool`, `RememberTool`, `RecallMemoryTool` (the
 last two backed by the semantic memory store — see the memory
-chapter). MCP-backed tools (see the MCP chapter) implement the exact
-same `Tool` protocol, which is why the loop never needs to know or care
-whether a given tool call is local Python or a round trip to a
-subprocess speaking MCP.
+chapter), and `DelegateTool` (subagent fan-out — see below). MCP-backed
+tools (see the MCP chapter) implement the exact same `Tool` protocol,
+which is why the loop never needs to know or care whether a given tool
+call is local Python or a round trip to a subprocess speaking MCP.
 
 When a model turn ends in `TOOL_USE`, every requested call runs
 concurrently via `asyncio.gather` — not sequentially, and not with the
@@ -437,15 +437,67 @@ externally rather than timing out cleanly, about as unambiguous a
 confirmation as this project's revert-and-verify discipline has
 produced. All 29 pre-existing agent-loop tests pass unchanged.
 
-## What's honestly not built yet
+## Subagent fan-out: `delegate_task`, one level deep
 
 The design doc's own architecture section names "subagent fan-out" and
 "verifier subagent" patterns alongside the loop this chapter describes.
-**Neither exists in code yet** — `AgentLoop` today drives exactly one
-model conversation with one flat tool list; there's no mechanism for
-one agent run to spawn and coordinate others. Real, deferred work,
-named here rather than implied to already exist because the design doc
-mentions it.
+This chapter used to say **neither exists in code** — true for a long
+time, closed now for the first of the two: `delegate_task`
+(`sarva.agent.subagents.DelegateTool`) lets the model spawn a fresh,
+independent `AgentLoop` for a self-contained subtask and get back its
+final answer as a plain-text tool result.
+
+The spawning logic itself lives in `AgentLoop.run()`, not in the tool —
+that's the one place with a router, providers, budget, and live spend
+to build a subagent from. `ToolContext` gained one new, optional field
+for this: `spawn_subagent`, a closure built fresh by every `run()` call
+and left `None` in any context that doesn't support delegation (a bare
+`ToolContext` built directly, e.g. in a test). `DelegateTool.run()`
+just calls it — no other tool's surface changed at all.
+
+Three deliberate scoping decisions, matching this project's "narrow
+first real slice, not the full design" pattern elsewhere:
+
+- **One level of fan-out only.** The spawn closure filters `DelegateTool`
+  itself out of the subagent's own tool list, so a delegated task cannot
+  itself delegate further. Verified directly: script a subagent to try
+  calling `delegate_task` anyway, and its own loop dispatches it as an
+  ordinary `unknown tool: delegate_task` error (the same path any
+  unrecognized tool name takes) and keeps going — not a crash, not
+  actual recursion.
+- **Subagent spend counts against the parent's own remaining budget, not
+  a fresh independent one.** The subagent is built with
+  `Budget(max_model_calls=<parent's remaining>, ...)`, and its own final
+  `Spend` is added back into the parent's live `Spend` once it
+  completes — so the very next budget check in the parent loop reflects
+  the subagent's real cost. Without this, a model could spawn subagents
+  to bypass its own budget entirely. Verified with a genuinely tight
+  shared budget: the subagent burns through what's left and never
+  reaches a real answer, `delegate_task` reports a clean tool error (not
+  a crash), and the PARENT's own run correctly ends in
+  `BUDGET_EXCEEDED` too — proving the merge is real, not cosmetic.
+- **Routed via `TaskClass.SUBTASK`** — cheap delegated work, distinct
+  from the parent's own `TaskClass.MAIN`. This is the first real use of
+  that enum entry anywhere in the codebase; `routing.yaml` had a
+  `subtask:` chain configured since the very first routing policy, but
+  nothing had ever actually requested it before this.
+
+**Confirmed end to end with `MockProvider`, not just unit-tested in
+isolation:** a full three-call exchange (parent delegates → a real
+subagent turn runs → parent uses the subagent's answer to finish) with
+the subagent's own model-call cost showing up in the parent's final
+`Spend.model_calls` count. Verified by reverting and watching the
+whole test file fail to even import (`ModuleNotFoundError: No module
+named 'sarva.agent.subagents'`) — the strongest possible confirmation
+that this is genuinely new code, not a config flip. 5 new tests, all
+pre-existing agent-loop tests pass unchanged.
+
+**Still honestly not built:** the "verifier subagent" pattern — a
+second agent whose job is specifically to critique/check the first
+one's work — is a separate, bigger design decision (what triggers it,
+what "verified" means, how a rejection feeds back) left for a future
+milestone rather than bolted on as a variant of fan-out just because
+the mechanics are related.
 
 ## Build it yourself
 

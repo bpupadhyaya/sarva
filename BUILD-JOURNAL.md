@@ -10080,3 +10080,96 @@ checked so far (`AgentLoop`, `FoundryProvider`, Ollama probing,
 `VectorMemoryStore`, YAML registry loading, MCP client, foundry-extra
 detection) -- worth a genuinely fresh angle next round rather than a
 fourth pass at the same lens.
+
+
+## Subagent fan-out: `delegate_task`, closing a real, long-named design-doc gap instead of another hardening sweep
+
+The user explicitly asked this loop not to stop until all named
+features are complete, not just bug-hunting sweeps indefinitely.
+Re-reading `docs/agent-loop.md`'s own "What's honestly not built yet"
+section (there since Chapter 3 first shipped) surfaced a real,
+concretely-named gap: the design doc's architecture section names
+"subagent fan-out" and "verifier subagent" patterns alongside the agent
+loop, and neither existed in code -- `AgentLoop` drove exactly one model
+conversation with one flat tool list, with no mechanism for one run to
+spawn and coordinate another. `TaskClass.SUBTASK` had existed in the
+routing enum and `routing.yaml`'s own policy chain since the very first
+routing milestone, confirmed via `grep` to have never actually been
+requested by any caller before this.
+
+Built the first of the two, scoped deliberately narrow rather than
+attempting the full design at once: `delegate_task`
+(`sarva.agent.subagents.DelegateTool`) lets the model spawn a fresh,
+independent `AgentLoop` for a self-contained subtask and get back its
+final answer as a plain-text tool result. The spawning logic lives in
+`AgentLoop.run()` itself (the one place with a router, providers,
+budget, and live spend to build a subagent from), reached through one
+new optional field on `ToolContext` (`spawn_subagent`, a closure,
+`None` in any context that doesn't support delegation) rather than
+widening every tool's own surface area. `DelegateTool` itself has zero
+knowledge of `AgentLoop` -- kept that way specifically to avoid a
+three-way circular import between `tools.py` (needs `DelegateTool` for
+`BUILTIN_TOOLS`), `subagents.py` (would need `AgentLoop` to spawn one),
+and `loop.py` (already needs `ToolContext`/`Tool` from `tools.py`);
+worked through on paper before writing code, not discovered by trial
+and error.
+
+**Three deliberate scoping decisions**, each with a real, demonstrated
+reason rather than an assumption:
+
+- **One level of fan-out only.** The spawn closure filters
+  `DelegateTool` out of the subagent's own tool list. Verified directly,
+  not just by code inspection: scripted a subagent to try calling
+  `delegate_task` anyway via `MockProvider` -- its own loop dispatched
+  it as an ordinary `unknown tool: delegate_task` error (the identical
+  path any unrecognized tool name already takes) and kept going, proving
+  genuine exclusion rather than accidental recursion that happened not
+  to trigger in the test.
+- **Subagent spend counts against the parent's own remaining budget.**
+  The subagent is built with `Budget(max_model_calls=<parent's
+  remaining>, ...)`, and its own final `Spend` merges back into the
+  parent's live `Spend` once it completes. Verified with a genuinely
+  tight shared budget (`max_model_calls=2`): the subagent burns through
+  what's left without producing a real answer, `delegate_task` reports a
+  clean tool error (not a crash), and the PARENT's own run correctly
+  ends in `BUDGET_EXCEEDED` too -- the parent's own subsequent call
+  genuinely got cut off because the subagent's cost was real, not
+  cosmetic. Without this merge a model could spawn unlimited subagents
+  to bypass its own budget entirely.
+- **Routed via `TaskClass.SUBTASK`**, the first real use of that enum
+  entry anywhere in this codebase.
+
+**Verified end to end with a real three-call `MockProvider` exchange,**
+not just unit-tested pieces in isolation: parent delegates -> a real
+subagent turn actually runs -> parent uses the subagent's genuine answer
+to finish, with the subagent's own model-call cost showing up in the
+parent's final `Spend.model_calls` count (asserted as an exact total,
+`== 3`, not just "greater than zero"). Reverting and re-running the new
+tests failed the strongest possible way: the whole test file wouldn't
+even import (`ModuleNotFoundError: No module named
+'sarva.agent.subagents'`), since this is a genuinely new module, not a
+config flip on existing code. All 30 pre-existing agent-loop tests pass
+unchanged. 5 new tests, 651 total Python tests. `ruff check`/`format
+--check` clean. `docs/agent-loop.md`'s "What's honestly not built yet"
+section rewritten to describe what's now built, the three scoping
+decisions, and what remains genuinely deferred.
+
+**Still honestly not built:** the "verifier subagent" pattern -- a
+second agent specifically checking the first one's work -- is a
+separate, bigger design decision (what triggers it, what "verified"
+means, how a rejection feeds back into the parent run) left for a
+future milestone rather than bolted on as a variant of fan-out just
+because the underlying mechanics (spawn a sub-`AgentLoop`, merge its
+spend) are the same. Named directly in the docs rather than implied to
+already exist, the same discipline this chapter has followed since it
+was first written.
+
+**Next:** the three previously-identified infra-blocked items remain
+genuinely deferred (Tauri `csp: null`, RL harness container/VM
+sandboxing, inference-request batching). The quantization and `Budget`
+NaN-validation gaps remain real-but-unreachable. The verifier-subagent
+pattern is now the clearest remaining named-but-unbuilt feature gap in
+the design doc -- worth either building it next, or continuing to sweep
+the codebase for other real gaps (bug or feature) with a fresh
+Explore-agent pass, since the "repeated cost in a long-running process"
+lens is now fairly well-mined across the surfaces that had it.

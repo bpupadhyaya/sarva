@@ -12,6 +12,7 @@ from PIL import Image
 from sarva.agent.budget import Budget
 from sarva.agent.events import LEGAL, AgentState
 from sarva.agent.loop import AgentLoop, _required_modalities
+from sarva.agent.subagents import DelegateTool
 from sarva.agent.tools import ToolContext, always_allow
 from sarva.multimodal.content import (
     ImageBlock,
@@ -832,3 +833,155 @@ async def test_run_without_session_id_leaves_ctx_session_id_none(run_root):
 
     finished = [e for e in events if e.type == "tool_finished"]
     assert finished[0].result.content[0].text == "None"
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_spawns_a_real_subagent_and_merges_its_spend(run_root):
+    # The real proof subagent fan-out works end to end, not just that
+    # DelegateTool exists: a fresh, independent AgentLoop actually runs
+    # to completion, its final text comes back as the tool result, AND
+    # its own real model-call cost is added into the PARENT's spend --
+    # confirmed by the exact total, not just "some number greater than
+    # zero." Three real provider calls happen: the parent's initial
+    # request, the subagent's own single turn, and the parent's final
+    # turn after getting the subagent's answer back.
+    delegate_call = ToolCallBlock(
+        id="d1", name="delegate_task", arguments={"task": "say something useful"}
+    )
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(tool_calls=[delegate_call]),
+            ScriptedTurn(text="the subagent's own real answer"),
+            ScriptedTurn(text="parent's final answer, using the subagent's work"),
+        ]
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[DelegateTool()],
+        budget=Budget(max_model_calls=10),
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("please delegate this")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0].result.is_error is False
+    assert finished[0].result.content[0].text == "the subagent's own real answer"
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.DONE
+    assert run_done[-1].final_message.text() == "parent's final answer, using the subagent's work"
+    # 1 (parent's delegate request) + 1 (the real subagent turn) + 1
+    # (parent's final turn) -- the subagent's own cost is genuinely
+    # counted, not silently free.
+    assert run_done[-1].spend.model_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_cannot_recurse_into_delegating_further(run_root):
+    # Bounds fan-out at one level: a subagent's own tool list must not
+    # include delegate_task itself. Proven by scripting the SUBAGENT to
+    # try calling delegate_task anyway -- if recursion were allowed this
+    # would spawn a third-level loop; since it's genuinely excluded, the
+    # subagent's own loop dispatches it as an ordinary unknown-tool
+    # error (the same path any unrecognized tool name takes) and keeps
+    # going, rather than crashing or actually recursing.
+    delegate_call = ToolCallBlock(
+        id="d1", name="delegate_task", arguments={"task": "try to delegate further"}
+    )
+    recursive_call = ToolCallBlock(
+        id="d2", name="delegate_task", arguments={"task": "a forbidden second level"}
+    )
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(tool_calls=[delegate_call]),  # parent delegates
+            ScriptedTurn(tool_calls=[recursive_call]),  # subagent tries to delegate again
+            ScriptedTurn(text="subagent's real final answer, after its own tool error"),
+            ScriptedTurn(text="parent's final answer"),
+        ]
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[DelegateTool()],
+        budget=Budget(max_model_calls=10),
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("please delegate this")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 1  # only the PARENT's own delegate_task call is visible here
+    assert finished[0].result.is_error is False
+    assert (
+        finished[0].result.content[0].text
+        == "subagent's real final answer, after its own tool error"
+    )
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.DONE
+    assert run_done[-1].final_message.text() == "parent's final answer"
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_reports_a_clean_error_when_the_subagent_runs_out_of_budget(run_root):
+    # A tight shared budget means the subagent's own allotment (what's
+    # left of the parent's budget) is exhausted before it can produce a
+    # real answer -- DelegateTool must report this as a clean tool
+    # error, not crash, and the subagent's real (wasted) spend must
+    # still count against the parent, which is exactly why the parent's
+    # own run also ends in BUDGET_EXCEEDED rather than DONE afterward.
+    delegate_call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "do something"})
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(tool_calls=[delegate_call]),
+            ScriptedTurn(text="the subagent's only allowed call -- still not enough budget"),
+            ScriptedTurn(text="parent tries to continue anyway"),
+        ]
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[DelegateTool()],
+        budget=Budget(max_model_calls=2),
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("please delegate this")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0].result.is_error is True
+    assert "did not complete successfully" in finished[0].result.content[0].text
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.BUDGET_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_rejects_an_empty_task_string(run_root):
+    call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "   "})
+    provider = MockProvider(script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="ok")])
+    loop = AgentLoop(
+        router=_router(), providers={"mock": provider}, tools=[DelegateTool()], run_root=run_root
+    )
+
+    events = [e async for e in loop.run("delegate an empty task")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert finished[0].result.is_error is True
+    assert "non-empty" in finished[0].result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_fails_cleanly_with_no_spawn_hook_available():
+    # A bare ToolContext (e.g. built directly by a caller that isn't
+    # AgentLoop.run() itself) leaves spawn_subagent at its None default
+    # -- DelegateTool must report this cleanly rather than crash with an
+    # AttributeError on a None callable.
+    ctx = ToolContext(workdir=".", run_dir=".")
+    result = await DelegateTool().run({"task": "do something"}, ctx)
+    assert result.is_error is True
+    assert "not available" in result.content[0].text

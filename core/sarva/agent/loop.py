@@ -46,6 +46,7 @@ from sarva.agent.events import (
     ToolFinishedEvent,
     ToolStartedEvent,
 )
+from sarva.agent.subagents import DelegateTool
 from sarva.agent.tools import ConfirmPolicy, Tool, ToolContext, always_allow
 from sarva.multimodal.content import (
     ContentBlock,
@@ -314,8 +315,61 @@ class AgentLoop:
                     transcript_out.extend(messages)
                 return
         provider = self._providers[model.provider]
+
+        async def spawn_subagent(subtask: str) -> Message | None:
+            # Subagent fan-out (docs/agent-loop.md's own long-named,
+            # previously-unbuilt gap). Bounded by what's actually left of
+            # THIS run's own budget, not a fresh independent one -- computed
+            # here (not once at __init__ time) because `spend` keeps
+            # changing across the parent's own model calls and tool
+            # dispatches, and a subagent spawned late in a long run must
+            # see what's genuinely left, not what was available at the
+            # very start.
+            remaining_calls = self._budget.max_model_calls - spend.model_calls
+            remaining_wall = self._budget.max_wall_seconds - spend.wall_seconds
+            if remaining_calls <= 0 or remaining_wall <= 0:
+                return None
+            sub_tools = [t for t in self._tools.values() if not isinstance(t, DelegateTool)]
+            sub_loop = AgentLoop(
+                router=self._router,
+                providers=self._providers,
+                tools=sub_tools,
+                confirm=self._confirm,
+                budget=Budget(
+                    max_model_calls=remaining_calls,
+                    max_total_tokens=max(0, self._budget.max_total_tokens - spend.total_tokens),
+                    max_wall_seconds=remaining_wall,
+                    max_cost_usd=max(0.0, self._budget.max_cost_usd - spend.cost_usd),
+                ),
+                task_class=TaskClass.SUBTASK,
+                workdir=self._workdir,
+                run_root=self._run_root,
+                degraders=self._degraders,
+            )
+            sub_final: Message | None = None
+            sub_state = AgentState.FAILED
+            async for sub_event in sub_loop.run(subtask, session_id=session_id):
+                if sub_event.type == "run_done":
+                    sub_final = sub_event.final_message
+                    sub_state = sub_event.state
+                    # Merged back into the PARENT's own live spend so the
+                    # very next spend.exceeded(self._budget) check below
+                    # reflects the subagent's real cost too -- without this
+                    # a model could spawn subagents to bypass its own
+                    # budget entirely; confirmed live before fixing it this
+                    # way (see BUILD-JOURNAL.md).
+                    spend.model_calls += sub_event.spend.model_calls
+                    spend.total_tokens += sub_event.spend.total_tokens
+                    spend.wall_seconds += sub_event.spend.wall_seconds
+                    spend.cost_usd += sub_event.spend.cost_usd
+            return sub_final if sub_state == AgentState.DONE else None
+
         ctx = ToolContext(
-            workdir=self._workdir, run_dir=str(run_dir), emit=emit, session_id=session_id
+            workdir=self._workdir,
+            run_dir=str(run_dir),
+            emit=emit,
+            session_id=session_id,
+            spawn_subagent=spawn_subagent,
         )
 
         def transition(to: AgentState) -> None:

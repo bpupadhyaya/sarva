@@ -16,9 +16,10 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from sarva.agent.subagents import DelegateTool
 from sarva.atomic_write import atomic_write_text
 from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
-from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
+from sarva.multimodal.content import Message, TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.multimodal.fetch import FetchError, ensure_public_host, ssrf_safe_transport
 from sarva.providers.base import ToolSpec
 
@@ -35,7 +36,17 @@ class ToolContext:
     can scope themselves to the actual conversation session a run belongs
     to, threaded from `AgentLoop.run(session_id=...)`, instead of falling
     back to a tool-constructor-time default that has no idea which
-    conversation is actually running."""
+    conversation is actually running.
+
+    `spawn_subagent` is the one hook `DelegateTool` (`sarva.agent.
+    subagents`) needs and no other built-in tool does: a closure built by
+    `AgentLoop.run()` itself (the only place with a router/providers/
+    budget/spend to build a subagent from), `None` in any context that
+    doesn't support delegation (e.g. a bare ToolContext built directly in
+    a test). Kept as a narrow closure rather than exposing the router/
+    providers/tools themselves on ToolContext, so every OTHER tool's
+    surface area stays exactly what it was before subagent fan-out
+    existed."""
 
     def __init__(
         self,
@@ -43,11 +54,13 @@ class ToolContext:
         run_dir: str,
         emit: Callable[[Any], Awaitable[None]] | None = None,
         session_id: str | None = None,
+        spawn_subagent: Callable[[str], Awaitable[Message | None]] | None = None,
     ):
         self.workdir = workdir
         self.run_dir = run_dir
         self.emit = emit or (lambda event: asyncio.sleep(0))
         self.session_id = session_id
+        self.spawn_subagent = spawn_subagent
 
 
 class Tool(Protocol):
@@ -356,4 +369,5 @@ BUILTIN_TOOLS: list[Tool] = [
     WebFetchTool(),
     RememberTool(),
     RecallMemoryTool(),
+    DelegateTool(),
 ]
