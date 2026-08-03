@@ -10913,3 +10913,101 @@ now, two rounds later than it should have -- worth checking whether any
 OTHER recently-shipped feature has a similar "merges into shared state
 but doesn't re-validate an invariant that state is supposed to
 guarantee" shape.
+
+
+## Concurrent `delegate_task` calls in one round let real spend double the declared Budget -- the exact "shared-state race" shape round 48's own fix predicted, found one round later
+
+Round 49, directly following round 48's own closing suggestion: look
+for OTHER places where a recently-shipped feature merges/mutates
+shared state (spend, transcript, session data) without re-validating
+an invariant that state is supposed to guarantee. Round 48 fixed
+`verify=True` reading a budget snapshot too early relative to a
+sequential spend merge; round 49 found the SAME root cause one layer
+deeper -- a CONCURRENCY race, not just an ordering gap, in
+`delegate_task`'s own budget-merge path (`spawn_subagent`, shared by
+both features, checked once when it first shipped but not re-examined
+under real concurrent dispatch until now).
+
+The bug: every tool call in one `TOOL_USE` round already runs
+concurrently via `asyncio.gather` (a design decision from this loop's
+very first milestone). `spawn_subagent`'s own budget clamp reads the
+parent's live `spend` synchronously, before its first `await` -- and
+the real mutation back into `spend` only ever happened once a
+subagent's ENTIRE run had already finished, deep inside the loop that
+awaits it. Two `delegate_task` calls dispatched in the SAME round
+therefore both read the exact same, not-yet-decremented `spend`
+snapshot and each got granted a full, independent slice of the same
+remaining budget -- the "subagent's own slice cannot exceed the
+parent's remainder" invariant (spec-03's own conformance invariant #8,
+verified for the sequential case when subagent fan-out first shipped)
+was silently defeated the moment two delegations happened in one
+round.
+
+Confirmed live with a custom deterministic provider forcing genuine
+interleaving (`await asyncio.sleep(0.01)` on every real call, matching
+how `asyncio.gather` actually schedules concurrent subagents in
+production): `Budget(max_model_calls=3)` with two concurrent
+`delegate_task` calls in one round made **6 real provider calls** --
+double the declared cap -- through nothing more adversarial than
+"delegate these two independent things in parallel," completely
+ordinary usage, not a contrived attack. A control run with a single
+`delegate_task` call under the identical budget made only 4 real
+calls (the standard, already-accepted "checked after the call"
+one-over-budget shape every other path through this loop already
+tolerates).
+
+**Fixed with an `asyncio.Lock` scoped to one `run()` call**, guarding
+only the admission decision (compute the clamp, decide the grant,
+immediately reserve the FULL granted slice against `spend`) -- not the
+subagent's entire execution, so subagents still run fully concurrently
+once admitted; only the grant itself is serialized. Reserving the
+complete granted amount up front is a correct, non-conservative bound,
+not a guess: a subagent's own budget check already stops it from ever
+exceeding what it was granted, so the reservation can never
+undercount real usage in a way that would let a second concurrent
+delegation slip through. Once a subagent finishes, its reservation is
+reconciled down to what it ACTUALLY used (never more, by construction),
+so the parent's final reported `Spend` still reflects true cost, not
+the conservative up-front grant -- verified this reconciliation is
+exact, not just directionally correct, by confirming existing tests
+for the already-shipped tight-budget-request case (`budget=
+Budget(max_model_calls=1)` via `spawn_subagent`'s own explicit
+`budget` parameter) still report `calls=1` unchanged.
+
+**Verified live that the fix actually closes the gap, not just
+theoretically:** the identical repro now makes exactly 4 real calls
+(matching the sequential single-delegation case precisely) instead of
+6. Verified by reverting and watching the new test fail with the
+literal doubled call count reproducing itself in the assertion
+failure: `assert 6 <= (3 + 1)` -- `False`, the real old bug's exact
+numbers appearing directly, the strongest form of confirmation. Ran
+the new (inherently timing-sensitive, given it relies on genuine
+`asyncio` interleaving) test five times in a row to rule out flakiness
+before considering it done, not just once. All 692 pre-existing tests
+pass unchanged. 1 new test, 692 -> 693 Python tests. `ruff check`/
+`format --check` clean. `docs/agent-loop.md` gained a new section
+under the subagent fan-out chapter, immediately after the original
+sequential-case verification it directly extends.
+
+**Confirms round 48's own prediction exactly:** the "merges into
+shared state without re-validating an invariant that state is supposed
+to guarantee" shape wasn't a one-off in `verify=True` -- the identical
+root cause (a stale budget snapshot read before a delayed merge)
+existed in `delegate_task`'s own path too, just requiring genuine
+concurrency (not merely a later check) to trigger. Four consecutive
+rounds now (46, 47, 48, 49) have found real bugs by examining code
+shipped in the last several milestones, cementing this as this
+project's single most productive current lens.
+
+**Next:** the three completeness-audit feature items remain deferred,
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gaps remain real-but-unreachable. Worth checking next:
+does the SAME concurrent-dispatch shape apply anywhere else `spend` (or
+any other shared mutable state touched by concurrently-dispatched tool
+calls) is read-then-later-written across an `await` boundary -- this
+round only checked `spawn_subagent`'s own budget math specifically,
+prompted by round 48's finding, not every other shared-state mutation
+reachable from concurrent tool dispatch.

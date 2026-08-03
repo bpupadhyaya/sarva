@@ -337,6 +337,30 @@ class AgentLoop:
                 return
         provider = self._providers[model.provider]
 
+        # A real bug found by actually dispatching TWO concurrent
+        # delegate_task calls in one TOOL_USE round (ordinary usage --
+        # "delegate these two independent things in parallel" -- not an
+        # adversarial trick): `asyncio.gather` (below) runs every tool
+        # call in a round concurrently, and `spawn_subagent`'s own budget
+        # clamp reads `spend` synchronously before its first `await`. Two
+        # concurrent calls both read the SAME, not-yet-decremented
+        # `spend` (real mutation only happened once a subagent's ENTIRE
+        # run had already finished), so each got granted a full
+        # independent slice of the same remaining budget -- confirmed
+        # live: `Budget(max_model_calls=3)` with two concurrent
+        # delegate_task calls made 6 real provider calls, double the
+        # declared cap, with the parent still reporting a coherent (if
+        # too-late) `spend.model_calls == 6`. This lock serializes just
+        # the grant decision (read remaining budget, decide the slice,
+        # immediately reserve it against `spend`) so a second concurrent
+        # caller sees the correctly-reduced remainder -- the subagents
+        # themselves still run fully concurrently afterward, only the
+        # admission decision is serialized. The reservation is
+        # reconciled down to the subagent's REAL usage once it finishes,
+        # so the final reported spend still reflects true cost, not the
+        # conservative up-front grant.
+        spend_lock = asyncio.Lock()
+
         async def spawn_subagent(
             subtask: str,
             task_class: TaskClass = TaskClass.SUBTASK,
@@ -362,32 +386,47 @@ class AgentLoop:
             def _clamp(requested: float | None, remaining: float) -> float:
                 return max(0.0, min(requested, remaining) if requested is not None else remaining)
 
-            sub_budget = Budget(
-                max_model_calls=int(
-                    _clamp(
-                        budget.max_model_calls if budget else None,
-                        self._budget.max_model_calls - spend.model_calls,
-                    )
-                ),
-                max_total_tokens=int(
-                    _clamp(
-                        budget.max_total_tokens if budget else None,
-                        self._budget.max_total_tokens - spend.total_tokens,
-                    )
-                ),
-                max_wall_seconds=_clamp(
-                    budget.max_wall_seconds if budget else None,
-                    self._budget.max_wall_seconds - spend.wall_seconds,
-                ),
-                max_cost_usd=_clamp(
-                    budget.max_cost_usd if budget else None,
-                    self._budget.max_cost_usd - spend.cost_usd,
-                ),
-            )
-            if sub_budget.max_model_calls <= 0 or sub_budget.max_wall_seconds <= 0:
-                return AgentResult(
-                    state=AgentState.BUDGET_EXCEEDED, final_message=None, spend=Spend(), run_dir=""
+            async with spend_lock:
+                sub_budget = Budget(
+                    max_model_calls=int(
+                        _clamp(
+                            budget.max_model_calls if budget else None,
+                            self._budget.max_model_calls - spend.model_calls,
+                        )
+                    ),
+                    max_total_tokens=int(
+                        _clamp(
+                            budget.max_total_tokens if budget else None,
+                            self._budget.max_total_tokens - spend.total_tokens,
+                        )
+                    ),
+                    max_wall_seconds=_clamp(
+                        budget.max_wall_seconds if budget else None,
+                        self._budget.max_wall_seconds - spend.wall_seconds,
+                    ),
+                    max_cost_usd=_clamp(
+                        budget.max_cost_usd if budget else None,
+                        self._budget.max_cost_usd - spend.cost_usd,
+                    ),
                 )
+                if sub_budget.max_model_calls <= 0 or sub_budget.max_wall_seconds <= 0:
+                    return AgentResult(
+                        state=AgentState.BUDGET_EXCEEDED,
+                        final_message=None,
+                        spend=Spend(),
+                        run_dir="",
+                    )
+                # Reserve the FULL granted slice against the parent's
+                # spend right now, while still holding the lock -- this
+                # is a correct (not overly conservative) upper bound,
+                # not a guess: the subagent's own budget check enforces
+                # that it can never itself exceed `sub_budget`, so
+                # reserving exactly that much is the real worst case.
+                spend.model_calls += sub_budget.max_model_calls
+                spend.total_tokens += sub_budget.max_total_tokens
+                spend.wall_seconds += sub_budget.max_wall_seconds
+                spend.cost_usd += sub_budget.max_cost_usd
+
             sub_tools = [t for t in self._tools.values() if not isinstance(t, DelegateTool)]
             sub_run_id = uuid.uuid4().hex[:12]
             sub_run_root = run_dir / "subagents"
@@ -411,16 +450,23 @@ class AgentLoop:
                     sub_final = sub_event.final_message
                     sub_state = sub_event.state
                     sub_spend = sub_event.spend
-                    # Merged back into the PARENT's own live spend so the
-                    # very next spend.exceeded(self._budget) check below
-                    # reflects the subagent's real cost too -- without this
-                    # a model could spawn subagents to bypass its own
-                    # budget entirely; confirmed live before fixing it this
-                    # way (see BUILD-JOURNAL.md).
-                    spend.model_calls += sub_event.spend.model_calls
-                    spend.total_tokens += sub_event.spend.total_tokens
-                    spend.wall_seconds += sub_event.spend.wall_seconds
-                    spend.cost_usd += sub_event.spend.cost_usd
+                    # Reconcile the earlier reservation down to what the
+                    # subagent ACTUALLY used (never more, since its own
+                    # budget bounds it) -- without this the parent's
+                    # reported spend would stay pinned at the conservative
+                    # up-front grant forever, overstating real cost for
+                    # every subagent that finished under its own slice.
+                    async with spend_lock:
+                        spend.model_calls += (
+                            sub_event.spend.model_calls - sub_budget.max_model_calls
+                        )
+                        spend.total_tokens += (
+                            sub_event.spend.total_tokens - sub_budget.max_total_tokens
+                        )
+                        spend.wall_seconds += (
+                            sub_event.spend.wall_seconds - sub_budget.max_wall_seconds
+                        )
+                        spend.cost_usd += sub_event.spend.cost_usd - sub_budget.max_cost_usd
             return AgentResult(
                 state=sub_state, final_message=sub_final, spend=sub_spend, run_dir=str(sub_run_dir)
             )

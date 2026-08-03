@@ -540,6 +540,47 @@ The design doc's second named pattern, "verifier subagent," is closed
 further down this chapter, once the interface correction below is
 covered first.
 
+### A real bug found much later: two CONCURRENT `delegate_task` calls in one round could let real spend double the declared `Budget`
+
+A much later round applied the exact lens that had just found `verify=
+True` silently exceeding `Budget` (see further down this chapter) to
+`delegate_task`'s own budget-merge path, one level deeper: what happens
+when a single model turn issues *multiple* `delegate_task` calls at
+once? Every tool call in a round already runs concurrently via
+`asyncio.gather` (see "Tool use" above) — including `delegate_task`
+calls. `spawn_subagent`'s budget clamp reads the parent's live `spend`
+synchronously, before its first `await`; the real mutation back into
+`spend` only ever happened once a subagent's ENTIRE run had already
+finished. Two concurrently-dispatched `delegate_task` calls therefore
+both read the exact same, not-yet-decremented `spend` and each got
+granted a full, independent slice of the same remaining budget — the
+"subagent's own budget slice cannot exceed the parent's remainder"
+invariant, verified above for the *sequential* case, was silently
+defeated the moment two delegations happened in the same round.
+Confirmed live: `Budget(max_model_calls=3)` with two concurrent
+`delegate_task` calls made **6** real provider calls — double the
+declared cap — through nothing more adversarial than "delegate these
+two independent things in parallel," completely ordinary usage.
+
+Fixed with an `asyncio.Lock` scoped to one `run()` call, guarding just
+the admission decision (compute the clamp, decide the grant, and
+immediately reserve the FULL granted slice against `spend`) rather than
+the subagent's entire execution — the subagents themselves still run
+fully concurrently once admitted, only the grant itself is serialized.
+Reserving the complete granted amount up front is a correct bound, not
+a guess: a subagent's own budget check already stops it from ever
+exceeding what it was granted, so the reservation can never undercount
+real usage. Once a subagent finishes, its reservation is reconciled
+down to what it actually used, so the parent's final reported `Spend`
+still reflects true cost rather than the conservative up-front grant.
+Verified live that the identical repro now makes exactly 4 real calls
+(3 declared plus the one standard "checked after the call" overshoot
+every other path through this loop already tolerates) instead of 6 —
+matching the sequential single-delegation case exactly. Reverting
+reproduced the literal doubled call count in the new test's own
+assertion failure (`6 <= 4` false). 1 new test, all pre-existing tests
+pass unchanged.
+
 ### `spawn_subagent`'s real shape was already frozen in spec-03 — a same-session correction, not a second milestone
 
 The paragraphs above describe the feature as first built, against the

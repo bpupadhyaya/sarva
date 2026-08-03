@@ -23,7 +23,16 @@ from sarva.multimodal.content import (
     ToolResultBlock,
 )
 from sarva.multimodal.degraders.image import ImageToTextDegrader
-from sarva.providers.base import ModelCapabilities, ModelCost, ModelInfo, ToolSpec
+from sarva.providers.base import (
+    DoneEvent,
+    ModelCapabilities,
+    ModelCost,
+    ModelInfo,
+    StopReason,
+    ToolCallEvent,
+    ToolSpec,
+    Usage,
+)
 from sarva.providers.mock import MockProvider, ScriptedTurn
 from sarva.providers.registry import Registry, Router, TaskClass, load_routing
 
@@ -958,6 +967,88 @@ async def test_delegate_task_reports_a_clean_error_when_the_subagent_runs_out_of
 
     run_done = [e for e in events if e.type == "run_done"]
     assert run_done[-1].state == AgentState.BUDGET_EXCEEDED
+
+
+class _ConcurrentDelegateRaceProvider:
+    """First real call: the parent issues TWO concurrent delegate_task
+    calls in one TOOL_USE round. Every call after that (the parent's own
+    follow-ups, and both subagents' own turns alike) keeps requesting
+    another tool call forever, so each loop only stops once ITS OWN
+    budget check trips it -- letting a test observe the REAL total
+    number of provider calls actually incurred, not just what the final
+    Spend object claims. `asyncio.sleep` on every call forces genuine
+    interleaving between the two concurrently-dispatched subagents,
+    matching how `asyncio.gather` really schedules them in production."""
+
+    name = "mock"
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    async def generate(self, request):
+        self.n += 1
+        await asyncio.sleep(0.01)
+        if self.n == 1:
+            calls = [
+                ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "subtask A"}),
+                ToolCallBlock(id="d2", name="delegate_task", arguments={"task": "subtask B"}),
+            ]
+            for c in calls:
+                yield ToolCallEvent(call=c)
+            yield DoneEvent(
+                stop_reason=StopReason.TOOL_USE,
+                message=Message(role="assistant", content=calls),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+            return
+        call = ToolCallBlock(id=f"e{self.n}", name="echo", arguments={"text": "x"})
+        yield ToolCallEvent(call=call)
+        yield DoneEvent(
+            stop_reason=StopReason.TOOL_USE,
+            message=Message(role="assistant", content=[call]),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_delegate_task_calls_do_not_let_real_spend_exceed_budget(run_root):
+    # A real bug found by actually dispatching TWO concurrent
+    # delegate_task calls in one TOOL_USE round -- ordinary usage
+    # ("delegate these two independent things in parallel"), not an
+    # adversarial trick. asyncio.gather runs every tool call in a round
+    # concurrently, and spawn_subagent's own budget clamp used to read
+    # `spend` synchronously before its first await -- two concurrent
+    # calls both read the SAME, not-yet-decremented spend (real mutation
+    # only happened once a subagent's entire run had already finished),
+    # so each got granted a full independent slice of the same remaining
+    # budget. Confirmed live before the fix: Budget(max_model_calls=3)
+    # with two concurrent delegate_task calls made 6 real provider
+    # calls, double the declared cap.
+    provider = _ConcurrentDelegateRaceProvider()
+    budget = Budget(max_model_calls=3, max_wall_seconds=3600.0)
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[DelegateTool(), _EchoTool()],
+        budget=budget,
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("please delegate this to two subagents concurrently")]
+
+    run_done = [e for e in events if e.type == "run_done"][-1]
+    assert run_done.state == AgentState.BUDGET_EXCEEDED
+    # The real, decisive assertion: actual provider calls made must never
+    # exceed the declared budget by more than the single extra call every
+    # OTHER path through this loop already tolerates (checked only AFTER
+    # the call that trips it, the same "one call over" shape
+    # test_delegate_task_reports_a_clean_error_when_the_subagent_runs_out_of_budget
+    # already establishes for the sequential case) -- not silently
+    # doubled by a concurrency race.
+    assert provider.n <= budget.max_model_calls + 1
 
 
 @pytest.mark.asyncio
