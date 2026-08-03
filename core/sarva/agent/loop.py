@@ -547,28 +547,68 @@ class AgentLoop:
             sub_final: Message | None = None
             sub_state = AgentState.FAILED
             sub_spend = Spend()
-            async for sub_event in sub_loop.run(subtask, session_id=session_id, run_id=sub_run_id):
-                if sub_event.type == "run_done":
-                    sub_final = sub_event.final_message
-                    sub_state = sub_event.state
-                    sub_spend = sub_event.spend
-                    # Reconcile the earlier reservation down to what the
-                    # subagent ACTUALLY used (never more, since its own
-                    # budget bounds it) -- without this the parent's
-                    # reported spend would stay pinned at the conservative
-                    # up-front grant forever, overstating real cost for
-                    # every subagent that finished under its own slice.
+            reconciled = False
+            try:
+                async for sub_event in sub_loop.run(
+                    subtask, session_id=session_id, run_id=sub_run_id
+                ):
+                    if sub_event.type == "run_done":
+                        sub_final = sub_event.final_message
+                        sub_state = sub_event.state
+                        sub_spend = sub_event.spend
+                        # Reconcile the earlier reservation down to what
+                        # the subagent ACTUALLY used (never more, since
+                        # its own budget bounds it) -- without this the
+                        # parent's reported spend would stay pinned at
+                        # the conservative up-front grant forever,
+                        # overstating real cost for every subagent that
+                        # finished under its own slice.
+                        async with spend_lock:
+                            spend.model_calls += (
+                                sub_event.spend.model_calls - sub_budget.max_model_calls
+                            )
+                            spend.total_tokens += (
+                                sub_event.spend.total_tokens - sub_budget.max_total_tokens
+                            )
+                            spend.wall_seconds += (
+                                sub_event.spend.wall_seconds - sub_budget.max_wall_seconds
+                            )
+                            spend.cost_usd += sub_event.spend.cost_usd - sub_budget.max_cost_usd
+                        reconciled = True
+            finally:
+                # A real bug found by giving this reservation/reconcile
+                # pair its own fresh-eyes sweep: the reconciliation above
+                # only ever runs on a NORMAL run_done. `run_one`'s own
+                # `_TOOL_TIMEOUT_SECONDS` wraps every tool call (including
+                # whatever delegate_task-like tool called us) in
+                # `asyncio.wait_for` -- if a subagent's own provider call
+                # is still in flight when that fires, `CancelledError` is
+                # thrown into this `async for` and `run_done` never
+                # arrives, leaving the FULL up-front reservation stuck on
+                # `spend` forever: confirmed live, a cancelled subagent
+                # left the parent's reported `spend.model_calls` at 12
+                # against only 3 real provider calls actually made,
+                # permanently understating headroom for every later
+                # sibling delegation in the same run (the exact
+                # starvation shape the two rounds directly above this one
+                # already fixed for the *admission* side, now closed on
+                # the *release* side too). Released here rather than left
+                # reconciled to the subagent's true partial usage,
+                # because there IS no true partial usage available -- its
+                # own `Spend` object lives inside its own now-abandoned
+                # `run()` call and was never surfaced before cancellation
+                # cut it off. Releasing the whole reservation can only
+                # ever UNDER-count that one subagent's own now-unrecoverable
+                # real cost, never leave a phantom amount stuck forever --
+                # a one-time, honest undercount on a rare cancellation
+                # path is strictly better than a permanent, silent
+                # overcount that starves every later delegation.
+                if not reconciled:
                     async with spend_lock:
-                        spend.model_calls += (
-                            sub_event.spend.model_calls - sub_budget.max_model_calls
-                        )
-                        spend.total_tokens += (
-                            sub_event.spend.total_tokens - sub_budget.max_total_tokens
-                        )
-                        spend.wall_seconds += (
-                            sub_event.spend.wall_seconds - sub_budget.max_wall_seconds
-                        )
-                        spend.cost_usd += sub_event.spend.cost_usd - sub_budget.max_cost_usd
+                        spend.model_calls -= sub_budget.max_model_calls
+                        spend.total_tokens -= sub_budget.max_total_tokens
+                        spend.wall_seconds -= sub_budget.max_wall_seconds
+                        spend.cost_usd -= sub_budget.max_cost_usd
             return AgentResult(
                 state=sub_state, final_message=sub_final, spend=sub_spend, run_dir=str(sub_run_dir)
             )

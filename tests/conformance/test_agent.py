@@ -1236,6 +1236,98 @@ async def test_pruning_never_deletes_a_still_running_siblings_run_dir(run_root, 
     assert "ok=True" in finished[0].result.content[0].text
 
 
+class _CancelSpawnTool:
+    spec = ToolSpec(
+        name="cancel_spawn",
+        description="spawn a subagent whose own turn hangs past the tool timeout",
+        input_schema={"type": "object", "properties": {}},
+        destructive=False,
+    )
+
+    async def run(self, args, ctx: ToolContext) -> ToolResultBlock:
+        result = await ctx.spawn_subagent(
+            "hang forever",
+            budget=Budget(
+                max_model_calls=10, max_total_tokens=1000, max_wall_seconds=100.0, max_cost_usd=10.0
+            ),
+        )
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=f"state={result.state}")])
+
+
+class _CancelledSubagentProvider:
+    """Its own subagent turn hangs well past whatever _TOOL_TIMEOUT_SECONDS
+    is monkeypatched to in the test below, so run_one's asyncio.wait_for
+    cancels it mid-flight -- run_done never arrives for that subagent."""
+
+    name = "mock"
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    async def generate(self, request):
+        self.n += 1
+        if self.n == 1:
+            call = ToolCallBlock(id="t1", name="cancel_spawn", arguments={})
+            yield ToolCallEvent(call=call)
+            yield DoneEvent(
+                stop_reason=StopReason.TOOL_USE,
+                message=Message(role="assistant", content=[call]),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+            return
+        await asyncio.sleep(1.0)
+        yield DoneEvent(
+            stop_reason=StopReason.END_TURN,
+            message=Message(role="assistant", content=[TextBlock(text="never reached")]),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_subagent_releases_its_budget_reservation(run_root, monkeypatch):
+    # A real bug found by giving spawn_subagent's reservation/reconcile
+    # pair its own fresh-eyes sweep, directly following the round-51
+    # suggestion to sweep this exact mechanism next: reconciliation only
+    # ever ran on a normal run_done, but run_one's own
+    # _TOOL_TIMEOUT_SECONDS wraps every tool call in asyncio.wait_for --
+    # if a subagent's own provider call is still in flight when that
+    # fires, CancelledError cuts off the `async for` before run_done ever
+    # arrives, leaving the FULL up-front reservation stuck on the
+    # parent's spend forever. Confirmed live before the fix: a cancelled
+    # subagent left the parent's reported spend.model_calls at 12 against
+    # only 3 real provider calls actually made -- permanently
+    # understating headroom for every later sibling delegation in the
+    # same run.
+    import sarva.agent.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "_TOOL_TIMEOUT_SECONDS", 0.05)
+
+    provider = _CancelledSubagentProvider()
+    budget = Budget(
+        max_model_calls=20, max_total_tokens=2000, max_wall_seconds=3600.0, max_cost_usd=100.0
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_CancelSpawnTool()],
+        budget=budget,
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("spawn a subagent that will time out")]
+
+    run_done = [e for e in events if e.type == "run_done"][-1]
+    # The real, decisive assertion: reported spend must never stay
+    # pinned at (or near) the full up-front reservation once the
+    # subagent that earned it was cancelled -- it must come back down
+    # close to what was genuinely spent (the parent's own one real call
+    # plus at most the one in-flight call the cancelled subagent made).
+    assert run_done.spend.model_calls <= 3
+
+
 @pytest.mark.asyncio
 async def test_delegate_task_rejects_an_empty_task_string(run_root):
     call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "   "})

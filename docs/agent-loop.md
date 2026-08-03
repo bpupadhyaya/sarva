@@ -682,6 +682,59 @@ is currently unreachable in production — neither `DelegateTool` nor
 call with `budget=None` — so it's recorded here honestly rather than
 solved against a case nothing can reach yet.
 
+### A cancelled subagent left its full budget reservation stuck on the parent's spend forever
+
+A dedicated sweep of this exact reservation/reconcile mechanism —
+following this project's own standing practice of treating a recent
+fix as the next fix's first suspect — found the reconciliation above
+only ever ran on a *normal* `run_done`. `run_one`'s own
+`_TOOL_TIMEOUT_SECONDS` (see "Tool use" above) wraps every tool call,
+including whatever `delegate_task`-shaped tool called into
+`spawn_subagent`, in `asyncio.wait_for`. If a subagent's own provider
+call is still in flight when that timeout fires, `CancelledError` is
+thrown into the `async for sub_event in sub_loop.run(...)` loop and
+`run_done` never arrives — so the reconciliation code, living entirely
+inside the `if sub_event.type == "run_done":` branch, simply never
+runs, leaving the *full* up-front reservation stuck on the parent's
+`spend` permanently. Confirmed live: a subagent cancelled mid-flight
+left the parent's reported `spend.model_calls` at **12** against only
+**3** real provider calls actually made — an 8-call phantom
+reservation that understates headroom for every later sibling
+delegation in the same run, the exact starvation shape the previous
+two sections' fixes address on the *admission* side, now open on the
+*release* side instead.
+
+Fixed with a `try`/`finally` around the `async for` loop: a
+`reconciled` flag tracks whether the normal `run_done` reconciliation
+ran, and if not — cancellation, or any other exception propagating out
+of the subagent's own run — the `finally` block releases the *entire*
+reservation instead of leaving any of it stuck. This can only ever
+**under**-count that one subagent's own now-unrecoverable real cost
+(its own `Spend` lived inside its own abandoned `run()` call and was
+never surfaced before cancellation cut it off, so there's no true
+partial figure to reconcile down to) — never leave a phantom amount
+stuck forever. A one-time, honest undercount on a rare cancellation
+path is strictly better than a permanent, silent overcount that starves
+every later delegation. Verified live: the identical repro now reports
+`spend.model_calls` at **2**, tracking the real **3** provider calls
+closely instead of the phantom **12**. Verified by reverting and
+watching the new test fail with the literal old bug's own number
+reproducing itself (`12 <= 3` false). 1 new test, 696 -> 697 Python
+tests, all pre-existing tests pass unchanged.
+
+This closes the third and, as of this sweep, last identified gap in
+`spawn_subagent`'s concurrency surface — a companion sweep of the same
+area confirmed the `.active`-marker creation sequence above is provably
+race-free (no `await` between `mkdir` and the marker write, and asyncio's
+single-threaded cooperative scheduling means nothing else can run in
+that window) and that the marker's own cleanup, while not deterministic
+on every abandonment path (a `/ws/chat` client disconnect mid-stream
+depends on Python's cyclic garbage collector eventually finalizing the
+orphaned generator, not a guaranteed `finally`), is self-healing rather
+than a permanent leak — documented here rather than treated as a
+finding, since fixing it would mean changing `/ws/chat`'s own
+generator-consumption shape for a gap that already recovers on its own.
+
 ### `spawn_subagent`'s real shape was already frozen in spec-03 — a same-session correction, not a second milestone
 
 The paragraphs above describe the feature as first built, against the

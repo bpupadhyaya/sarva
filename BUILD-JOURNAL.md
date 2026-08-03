@@ -11190,3 +11190,88 @@ deferred findings remain open from rounds 49-50's sweeps — the next
 round should give the `.active`-marker mechanism itself (and
 `spawn_subagent`'s broader concurrency surface) a dedicated fresh-eyes
 sweep, per this project's own now-standing first move.
+
+
+## A cancelled subagent left its full budget reservation stuck on the parent's spend forever — a dedicated sweep of round 50/51's own mechanism, per round 51's own suggestion
+
+Round 52, directly following round 51's own closing note: give the
+`.active`-marker mechanism and `spawn_subagent`'s broader concurrency
+surface a dedicated fresh-eyes sweep, rather than waiting for it to
+surface as a regression in some future round the way rounds 50 and 51
+both did to each other. Checked four angles: whether the `.active`
+marker is reliably removed on every real abandonment path, a possible
+TOCTOU between marker creation and a sibling's prune call, what happens
+to spend reconciliation if a subagent's own `run()` is cancelled or
+raises instead of completing normally, and anything else notable in
+the same area.
+
+Two of the four turned out clean: the `mkdir`-then-`touch` marker
+creation sequence has no `await` between the two calls, and asyncio's
+single-threaded cooperative scheduling means no other coroutine
+(including a sibling's own `_prune_old_runs` call) can run in that
+window — provably race-free, not just probably. Marker cleanup on
+abandonment (e.g. a `/ws/chat` client disconnecting mid-stream, so the
+consuming `async for` is dropped without an explicit `.aclose()`) isn't
+strictly deterministic — it depends on Python's cyclic garbage
+collector eventually finalizing the orphaned generator rather than a
+guaranteed `finally`, since the generator sits in a reference cycle —
+but is self-healing under default GC behavior, not a permanent leak,
+so documented rather than fixed.
+
+**The third angle found a real, high-severity bug.** `spawn_subagent`
+reserves the FULL granted budget slice up front (round 49's own fix),
+then only reconciles it back down to actual usage inside the
+`if sub_event.type == "run_done":` branch of the `async for sub_event
+in sub_loop.run(...)` loop. `run_one`'s own `_TOOL_TIMEOUT_SECONDS`
+wraps every tool call in `asyncio.wait_for` -- if a subagent's own
+provider call is still in flight when that fires, `CancelledError` cuts
+off the loop before `run_done` ever arrives, and the reconciliation
+code simply never runs. Confirmed live: a subagent cancelled mid-flight
+left the parent's reported `spend.model_calls` at **12** against only
+**3** real provider calls actually made -- an 8-call phantom
+reservation stuck on `spend` for the rest of the run, permanently
+understating headroom for every later sibling delegation (the exact
+starvation shape rounds 50/51 fixed on the *admission* side, open on
+the *release* side).
+
+**Fixed with a `try`/`finally`** around the `async for` loop: a
+`reconciled` flag tracks whether the normal `run_done` path ran its
+reconciliation, and the `finally` block releases the ENTIRE reservation
+if not -- deliberately not a partial reconciliation, since the
+cancelled subagent's own true partial `Spend` lived inside its own now-
+abandoned `run()` call and was never surfaced before cancellation cut
+it off. Releasing everything can only ever under-count that one
+subagent's own now-unrecoverable real cost, never leave a phantom
+amount stuck forever -- a one-time honest undercount beats a permanent
+silent overcount that starves everything after it.
+
+**Verified live** the fix brings reported `spend.model_calls` down to
+**2** (tracking the real 3 calls closely) instead of staying at the
+phantom 12. **Verified by reverting** and watching the new test fail
+with the literal old bug's own number reproducing itself in the
+assertion failure: `12 <= 3` -- `False`. 1 new test, 696 -> 697 Python
+tests, all passing. `ruff check`/`format --check` clean.
+`docs/agent-loop.md` gained a new subsection directly under the
+starvation-fix entries this closes out the third and final gap
+alongside.
+
+**Seven consecutive rounds now (46-52)** have found real bugs by
+examining code shipped in the last one-to-several rounds -- this round
+by deliberately sweeping the mechanism itself rather than waiting for
+it to fail forward into a future round's regression, closing out the
+pattern rounds 50 and 51 established organically.
+
+**Next:** no further deferred findings remain open from any recent
+sweep -- `spawn_subagent`'s concurrency surface has now had three
+dedicated passes (round 49 overspend, round 50 starvation, round 52
+cancellation-leak) and one confirmed-safe TOCTOU check, plus one
+documented-not-fixed self-healing gap (`.active` marker cleanup on
+generator abandonment). The completeness-audit backlog remains at three
+items needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable. A genuinely fresh area (not `AgentLoop`/
+`spawn_subagent`, which has now had five rounds of attention running)
+is worth trying next.
