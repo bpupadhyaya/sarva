@@ -73,13 +73,30 @@ class Tool(Protocol):
     async def run(self, args: dict, ctx: ToolContext) -> ToolResultBlock: ...
 ```
 
-`BUILTIN_TOOLS` ships seven: `ReadFileTool`, `WriteFileTool`,
-`RunShellTool`, `WebFetchTool`, `RememberTool`, `RecallMemoryTool` (the
-last two backed by the semantic memory store — see the memory
-chapter), and `DelegateTool` (subagent fan-out — see below). MCP-backed
-tools (see the MCP chapter) implement the exact same `Tool` protocol,
-which is why the loop never needs to know or care whether a given tool
-call is local Python or a round trip to a subprocess speaking MCP.
+`BUILTIN_TOOLS` ships ten: `ReadFileTool`, `WriteFileTool`,
+`EditFileTool` (a targeted find-and-replace edit, distinct from
+`WriteFileTool`'s always-rewrite-the-whole-file contract — see the
+design doc's own §3.5 "file read/write/edit" line, the last of that
+trio to get built), `RunShellTool`, `WebFetchTool`, `RememberTool`,
+`RecallMemoryTool` (session-scoped semantic recall), `NoteTool`,
+`SearchNotesTool` (durable, cross-session markdown notes — see the
+memory chapter for all four), and `DelegateTool` (subagent fan-out —
+see below). MCP-backed tools (see the MCP chapter) implement the exact
+same `Tool` protocol, which is why the loop never needs to know or
+care whether a given tool call is local Python or a round trip to a
+subprocess speaking MCP.
+
+`EditFileTool` mirrors a well-proven, simple contract — the same one
+this project's own coding assistant tool uses to edit its own source
+throughout this codebase's development: `old_string` must match
+*exactly once* in the file (or the tool refuses, asking for more
+surrounding context) unless `replace_all=true` is passed. Confirmed
+live that this is genuinely a targeted edit, not a full rewrite in
+disguise: replacing one line in the middle of a 1000-line file leaves
+every other line provably untouched. Same atomic-write guarantee
+`WriteFileTool` already has (a crash mid-commit leaves the file at its
+last good, complete content, never truncated) — verified the identical
+way, by making `os.replace()` raise mid-edit.
 
 When a model turn ends in `TOOL_USE`, every requested call runs
 concurrently via `asyncio.gather` — not sequentially, and not with the

@@ -146,6 +146,94 @@ class WriteFileTool:
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=f"wrote {p}")])
 
 
+class EditFileTool:
+    """Targeted edit: replaces an exact occurrence of `old_string` with
+    `new_string` rather than rewriting the whole file the way
+    `WriteFileTool` always does. Named in the design doc's own §3.5
+    built-in-tools line ("file read/write/edit") -- the one of the three
+    not built until now. Mirrors the same exact-match-required,
+    reject-ambiguous-matches shape already proven throughout this
+    project's own development (the identical contract this project's
+    own coding assistant's file-editing tool uses): an `old_string` that
+    doesn't appear at all, or appears more than once without
+    `replace_all=true`, is a clean, actionable error rather than a
+    guess at which occurrence was meant.
+
+    File-not-found/permission errors are deliberately NOT caught here --
+    same convention `ReadFileTool`/`WriteFileTool` already establish,
+    relying on the loop's own generic tool-dispatch exception handling
+    for those; only genuinely tool-specific validation (an empty or
+    ambiguous `old_string`) gets an explicit is_error result here."""
+
+    spec = ToolSpec(
+        name="edit_file",
+        description=(
+            "Replace an exact occurrence of old_string with new_string in a file, "
+            "without rewriting the rest of the file. old_string must match exactly "
+            "once unless replace_all is true, or an unrelated occurrence could be "
+            "edited by mistake."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "replace_all": {"type": "boolean"},
+            },
+            "required": ["path", "old_string", "new_string"],
+            "additionalProperties": False,
+        },
+        destructive=True,
+    )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        p = _within_workdir(ctx.workdir, args["path"])
+        old_string = args["old_string"]
+        new_string = args["new_string"]
+        replace_all = args.get("replace_all", False)
+        if not old_string:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text="old_string must not be empty")],
+                is_error=True,
+            )
+        if old_string == new_string:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[
+                    TextBlock(text="old_string and new_string are identical -- nothing to do")
+                ],
+                is_error=True,
+            )
+        text = p.read_text()
+        count = text.count(old_string)
+        if count == 0:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=f"old_string not found in {p}")],
+                is_error=True,
+            )
+        if count > 1 and not replace_all:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[
+                    TextBlock(
+                        text=f"old_string matches {count} times in {p} -- add more surrounding "
+                        "context to old_string, or pass replace_all=true"
+                    )
+                ],
+                is_error=True,
+            )
+        n = count if replace_all else 1
+        new_text = text.replace(old_string, new_string, n)
+        atomic_write_text(p, new_text)
+        plural = "s" if n != 1 else ""
+        return ToolResultBlock(
+            tool_call_id="", content=[TextBlock(text=f"edited {p} ({n} replacement{plural})")]
+        )
+
+
 class RunShellTool:
     """Destructive by default — the loop's default confirm policy asks first."""
 
@@ -469,6 +557,7 @@ class SearchNotesTool:
 BUILTIN_TOOLS: list[Tool] = [
     ReadFileTool(),
     WriteFileTool(),
+    EditFileTool(),
     RunShellTool(),
     WebFetchTool(),
     RememberTool(),

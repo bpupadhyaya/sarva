@@ -8,6 +8,7 @@ import os
 import pytest
 import sarva.agent.tools as tools_module
 from sarva.agent.tools import (
+    EditFileTool,
     NoteTool,
     ReadFileTool,
     RecallMemoryTool,
@@ -77,6 +78,150 @@ async def test_write_does_not_destroy_the_previous_file_if_interrupted_mid_write
     read = ReadFileTool()
     result = await read.run({"path": "note.txt"}, ctx)
     assert result.content[0].text == "first, good content"
+
+
+@pytest.mark.asyncio
+async def test_edit_replaces_the_one_exact_occurrence(ctx):
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "the quick brown fox"}, ctx)
+
+    result = await edit.run({"path": "file.txt", "old_string": "brown", "new_string": "red"}, ctx)
+
+    assert not result.is_error
+    read = ReadFileTool()
+    text = (await read.run({"path": "file.txt"}, ctx)).content[0].text
+    assert text == "the quick red fox"
+
+
+@pytest.mark.asyncio
+async def test_edit_leaves_the_rest_of_a_large_file_untouched(ctx):
+    # The whole reason this tool exists distinct from WriteFileTool: a
+    # targeted change to one part of a real file must not require (or
+    # risk) resending/rewriting content that never changed.
+    write = WriteFileTool()
+    edit = EditFileTool()
+    original = "\n".join(f"line {i}" for i in range(1000))
+    await write.run({"path": "big.txt", "content": original}, ctx)
+
+    await edit.run({"path": "big.txt", "old_string": "line 500", "new_string": "EDITED"}, ctx)
+
+    read = ReadFileTool()
+    text = (await read.run({"path": "big.txt"}, ctx)).content[0].text
+    lines = text.splitlines()
+    assert lines[500] == "EDITED"
+    assert lines[499] == "line 499"
+    assert lines[501] == "line 501"
+    assert len(lines) == 1000
+
+
+@pytest.mark.asyncio
+async def test_edit_fails_cleanly_when_old_string_is_not_found(ctx):
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "the quick brown fox"}, ctx)
+
+    result = await edit.run(
+        {"path": "file.txt", "old_string": "not present anywhere", "new_string": "x"}, ctx
+    )
+
+    assert result.is_error is True
+    assert "not found" in result.content[0].text
+    # The file itself must be genuinely untouched, not partially edited.
+    read = ReadFileTool()
+    text = (await read.run({"path": "file.txt"}, ctx)).content[0].text
+    assert text == "the quick brown fox"
+
+
+@pytest.mark.asyncio
+async def test_edit_rejects_an_ambiguous_old_string_without_replace_all(ctx):
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "cat dog cat bird cat"}, ctx)
+
+    result = await edit.run({"path": "file.txt", "old_string": "cat", "new_string": "fish"}, ctx)
+
+    assert result.is_error is True
+    assert "3 times" in result.content[0].text
+    read = ReadFileTool()
+    text = (await read.run({"path": "file.txt"}, ctx)).content[0].text
+    assert text == "cat dog cat bird cat"  # untouched
+
+
+@pytest.mark.asyncio
+async def test_edit_replace_all_replaces_every_occurrence(ctx):
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "cat dog cat bird cat"}, ctx)
+
+    result = await edit.run(
+        {"path": "file.txt", "old_string": "cat", "new_string": "fish", "replace_all": True}, ctx
+    )
+
+    assert not result.is_error
+    assert "3 replacements" in result.content[0].text
+    read = ReadFileTool()
+    text = (await read.run({"path": "file.txt"}, ctx)).content[0].text
+    assert text == "fish dog fish bird fish"
+
+
+@pytest.mark.asyncio
+async def test_edit_rejects_an_empty_old_string(ctx):
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "some content"}, ctx)
+
+    result = await edit.run({"path": "file.txt", "old_string": "", "new_string": "x"}, ctx)
+
+    assert result.is_error is True
+    assert "must not be empty" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_edit_rejects_identical_old_and_new_string(ctx):
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "some content"}, ctx)
+
+    result = await edit.run(
+        {"path": "file.txt", "old_string": "content", "new_string": "content"}, ctx
+    )
+
+    assert result.is_error is True
+    assert "identical" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_edit_does_not_destroy_the_file_if_interrupted_mid_write(ctx, monkeypatch):
+    # The same atomic-write guarantee WriteFileTool already has, proven
+    # the same way: simulate os.replace() raising partway through the
+    # edit's own atomic commit -- the file must still hold its last
+    # good, complete content afterward, not a truncated 0-byte file.
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "the quick brown fox"}, ctx)
+
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        raise OSError("simulated crash during os.replace")
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    with pytest.raises(OSError):
+        await edit.run({"path": "file.txt", "old_string": "brown", "new_string": "red"}, ctx)
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    read = ReadFileTool()
+    text = (await read.run({"path": "file.txt"}, ctx)).content[0].text
+    assert text == "the quick brown fox"
+
+
+@pytest.mark.asyncio
+async def test_edit_path_escape_is_rejected(ctx):
+    edit = EditFileTool()
+    with pytest.raises(ValueError, match="escapes workdir"):
+        await edit.run({"path": "../../etc/passwd", "old_string": "x", "new_string": "y"}, ctx)
 
 
 @pytest.mark.asyncio

@@ -10446,3 +10446,77 @@ dependency decision the author should weigh in on rather than being
 guessed at silently. The three infra-blocked items remain deferred
 (Tauri `csp: null`, RL harness sandboxing, inference batching); the
 quantization/`Budget` NaN-validation gaps remain real-but-unreachable.
+
+
+## EditFileTool: the last of the design doc's "file read/write/edit" trio, closed after two named memory tools
+
+Continuing the same completeness-audit backlog (TypeScript SDK,
+code-execution sandbox, web-search tool, image generation,
+`EditFileTool`) after long-term markdown memory closed the design
+doc's third memory tier. Picked `EditFileTool` next: smallest,
+lowest-risk, no new external dependency, and the most cleanly-named
+gap remaining -- §3.5 names "file read/write/edit" as one built-in
+trio, and only "edit" was missing (`ReadFileTool`/`WriteFileTool`
+already existed).
+
+Deliberately mirrors a well-proven, already-familiar contract rather
+than inventing a new one: exact-string-match replacement, requiring
+`old_string` to appear in the file exactly once (refusing with a clean
+error asking for more surrounding context otherwise) unless
+`replace_all=true` is explicitly passed -- the identical shape this
+project's own coding assistant tool uses to edit source throughout
+this codebase's entire development. Reusing a proven design instead of
+guessing at a new one is itself a deliberate choice, not laziness: a
+find-and-replace edit tool has a well-understood correctness bar (never
+guess which occurrence was meant) that's easy to get subtly wrong from
+scratch.
+
+File-not-found/permission errors are deliberately NOT caught inside
+the tool itself -- matches the exact convention `ReadFileTool`/
+`WriteFileTool` already establish (letting those propagate to the
+loop's own generic tool-dispatch exception handler); only genuinely
+tool-specific validation (empty `old_string`, identical
+`old_string`/`new_string`, zero matches, ambiguous matches) gets an
+explicit `is_error` result here, keeping this tool consistent with its
+two siblings rather than adding redundant handling.
+
+Reuses `sarva.atomic_write` for the actual file write, the same
+crash-safety guarantee `WriteFileTool` already has -- verified the
+identical way that tool's own test does: making `os.replace()` raise
+mid-commit and confirming the file still holds its last good, complete
+content afterward, not a truncated one.
+
+**Verified end to end, not just unit-level:** a real 1000-line file
+edited in the middle leaves every OTHER line provably untouched (the
+actual reason this tool exists distinct from `WriteFileTool`'s
+always-rewrite-everything contract) -- checked line 499/501 stayed
+exactly `"line 499"`/`"line 501"` and the file kept exactly 1000 lines
+after editing line 500. A live smoke test through the real tool objects
+(not mocked) confirmed the whole write -> edit -> read round trip
+produces the expected final content.
+
+9 new tests, 680 -> 689 Python tests. Reverting produced `ImportError:
+cannot import name 'EditFileTool'` -- the strongest possible
+confirmation, a genuinely new symbol. `ruff check`/`format --check`
+clean. `docs/agent-loop.md`'s tool-count line (already stale at "seven"
+since the memory-tools milestone landed two more without updating it --
+caught and fixed in the same pass) now correctly says ten and names
+all of them, plus a new paragraph describing `EditFileTool`'s own
+contract and verification.
+
+**Next:** the completeness-audit backlog is down to three items, all
+needing a real external-dependency or scope decision rather than being
+buildable blind the way the last three rounds' features were: a
+TypeScript SDK (`sdks/typescript/`, no API key needed but a
+sizable, self-contained separate package), a code-execution sandbox
+tool (distinct from `RunShellTool` -- real design question about how
+"sandboxed" it needs to be beyond what a subprocess already gives),
+web search and image generation (both need picking a real external
+API/service this project has so far deliberately avoided depending on
+without live credentials to verify against, the same reasoning
+`sarva.memory.vector`'s own docstring gives for using TF-IDF instead of
+neural embeddings). Worth checking in on scope/direction for these
+three before guessing, rather than building blind. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gaps remain real-but-unreachable.
