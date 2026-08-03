@@ -1,0 +1,23 @@
+{
+  "name": "sarva-sdk",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Thin TypeScript client for the Sarva REST + WebSocket API (core/sarva/server/app.py) -- the design doc's own repo-structure diagram names this exact path (sdks/typescript/, 'thin REST/WS client').",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10",
+    "ws": "^8.21.1"
+  }
+}

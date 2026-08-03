@@ -1,0 +1,190 @@
+import type {
+  AgentEvent,
+  ChatRequest,
+  ChatResponse,
+  DoctorCheck,
+  ModelInfo,
+  SaveConfigRequest,
+  WsChatRequest,
+} from "./types.js";
+
+export interface SarvaClientOptions {
+  /** Default: "http://localhost:8000" (`sarva serve`'s own default bind). */
+  baseUrl?: string;
+  /** Override for environments with no global `fetch` (older Node). */
+  fetchImpl?: typeof fetch;
+  /** Override for environments with no global `WebSocket` (Node < 22). */
+  webSocketImpl?: typeof WebSocket;
+}
+
+export class SarvaApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly body: unknown,
+  ) {
+    super(`Sarva API request failed with status ${status}: ${JSON.stringify(body)}`);
+    this.name = "SarvaApiError";
+  }
+}
+
+export interface ChatStreamHandlers {
+  onEvent?: (event: AgentEvent) => void;
+  /** A malformed frame or a real transport-level error -- the stream
+   * cannot usefully continue past this. */
+  onError?: (error: Error) => void;
+  onClose?: () => void;
+}
+
+/**
+ * One `/ws/chat` connection: single turn per connection, exactly matching
+ * the server's own documented contract (see `ws_chat`'s docstring in
+ * core/sarva/server/app.py). Send the initial request once at
+ * construction (handled internally, on open); if a `needs_confirmation`
+ * event arrives and `auto` was not set, the *next* thing sent on this
+ * socket must be a confirmation reply -- call `respondToConfirmation()`.
+ */
+export class SarvaChatStream {
+  private ws: WebSocket;
+
+  constructor(
+    url: string,
+    WebSocketImpl: typeof WebSocket,
+    request: WsChatRequest,
+    handlers: ChatStreamHandlers,
+  ) {
+    this.ws = new WebSocketImpl(url);
+    this.ws.onopen = () => {
+      this.ws.send(JSON.stringify(request));
+    };
+    this.ws.onmessage = (ev: MessageEvent) => {
+      let parsed: AgentEvent;
+      try {
+        const raw = typeof ev.data === "string" ? ev.data : String(ev.data);
+        parsed = JSON.parse(raw) as AgentEvent;
+      } catch (e) {
+        handlers.onError?.(
+          new Error(`received a malformed (non-JSON) frame: ${e instanceof Error ? e.message : e}`),
+        );
+        return;
+      }
+      handlers.onEvent?.(parsed);
+    };
+    this.ws.onerror = () => {
+      handlers.onError?.(new Error("WebSocket transport error"));
+    };
+    this.ws.onclose = () => {
+      handlers.onClose?.();
+    };
+  }
+
+  /** Reply to a `needs_confirmation` event. Do NOT call this if the
+   * request set `auto: true` -- per the server's own contract, nothing
+   * is waiting to consume a reply in that mode, and sending one risks
+   * being read as the answer to a later, unrelated prompt. */
+  respondToConfirmation(approved: boolean): void {
+    this.ws.send(JSON.stringify({ approved }));
+  }
+
+  close(): void {
+    this.ws.close();
+  }
+}
+
+/** A thin client for the Sarva REST + WebSocket API. Every method maps
+ * directly to one real endpoint in core/sarva/server/app.py -- no
+ * client-side retry/caching/state beyond what's documented here. */
+export class SarvaClient {
+  private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
+  private readonly webSocketImpl?: typeof WebSocket;
+
+  constructor(options: SarvaClientOptions = {}) {
+    this.baseUrl = (options.baseUrl ?? "http://localhost:8000").replace(/\/+$/, "");
+    const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    if (!fetchImpl) {
+      throw new Error(
+        "no fetch implementation available -- pass options.fetchImpl in an environment with no global fetch",
+      );
+    }
+    this.fetchImpl = fetchImpl;
+    // Node's own built-in global WebSocket (undici) does NOT default here
+    // the way fetch does -- confirmed live against a real `sarva serve`
+    // process: Node's native WebSocket silently fails the handshake
+    // against uvicorn's `websockets`-based ASGI implementation (opens,
+    // sends the initial frame, then the connection drops with close code
+    // 1006 before any server response ever arrives), while the same
+    // request through the mature `ws` npm package, and through Python's
+    // own `websockets` client, both work correctly -- this is a real,
+    // narrow interop gap in Node's own implementation, not a bug in this
+    // SDK or in Sarva's server. Rather than silently handing back a
+    // WebSocket that will hang forever on every real request, Node
+    // callers must explicitly opt in via `webSocketImpl` (`ws` is the
+    // proven-working choice) -- "reject, don't guess" for a known-broken
+    // default, the same discipline this project applies to malformed
+    // CLI input elsewhere. Browsers are unaffected (a different,
+    // long-established implementation) and keep defaulting to the global.
+    const isNode =
+      typeof process !== "undefined" && typeof process.versions?.node === "string";
+    if (options.webSocketImpl) {
+      this.webSocketImpl = options.webSocketImpl;
+    } else if (!isNode) {
+      this.webSocketImpl = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
+    }
+  }
+
+  private async requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    });
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      throw new SarvaApiError(response.status, body);
+    }
+    return body as T;
+  }
+
+  async health(): Promise<{ status: string }> {
+    return this.requestJson("/health");
+  }
+
+  async models(): Promise<ModelInfo[]> {
+    return this.requestJson("/models");
+  }
+
+  async doctor(): Promise<DoctorCheck[]> {
+    return this.requestJson("/doctor");
+  }
+
+  async saveConfig(req: SaveConfigRequest): Promise<DoctorCheck[]> {
+    return this.requestJson("/config", { method: "POST", body: JSON.stringify(req) });
+  }
+
+  /** Single-turn, non-streaming, tool-free -- mirrors `sarva chat`
+   * exactly (see ChatRequest/ChatResponse's own docstrings). For tool
+   * use and streaming, use `chatStream()`. */
+  async chat(req: ChatRequest): Promise<ChatResponse> {
+    return this.requestJson("/chat", { method: "POST", body: JSON.stringify(req) });
+  }
+
+  /** Opens one `/ws/chat` connection for a single tool-using,
+   * streaming turn -- mirrors `sarva run` (see `SarvaChatStream`'s own
+   * docstring for the confirmation-reply protocol). */
+  chatStream(request: WsChatRequest, handlers: ChatStreamHandlers = {}): SarvaChatStream {
+    if (!this.webSocketImpl) {
+      const isNode = typeof process !== "undefined" && typeof process.versions?.node === "string";
+      throw new Error(
+        isNode
+          ? "no options.webSocketImpl was provided. Node's own built-in global " +
+            "WebSocket does not interoperate correctly with Sarva's server " +
+            "(confirmed live: the connection silently drops before any response " +
+            "arrives) -- install the `ws` package and pass it explicitly: " +
+            "new SarvaClient({ webSocketImpl: (await import('ws')).default })"
+          : "no WebSocket implementation available -- pass options.webSocketImpl " +
+            "in an environment with no global WebSocket",
+      );
+    }
+    const wsUrl = `${this.baseUrl.replace(/^http/, "ws")}/ws/chat`;
+    return new SarvaChatStream(wsUrl, this.webSocketImpl, request, handlers);
+  }
+}

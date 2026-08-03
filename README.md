@@ -127,6 +127,7 @@ picture.
 ```
 core/sarva/       # the reference implementation — providers, agent loop, tools, memory, server, CLI
 apps/desktop/      # the web UI (React + TypeScript + Vite) + src-tauri/ (native desktop wrapper, early)
+sdks/typescript/  # thin TypeScript client for the REST/WS API (sarva-sdk)
 foundry/          # from-scratch model training code (tokenizer, transformer, pretraining, RL)
 tests/            # conformance suites — the definition of done for each component
 examples/         # small, runnable, graded examples

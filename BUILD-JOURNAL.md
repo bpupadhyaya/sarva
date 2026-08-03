@@ -10520,3 +10520,101 @@ three before guessing, rather than building blind. The three
 infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gaps remain real-but-unreachable.
+
+
+## sarva-sdk: the design doc's named TypeScript SDK, and a real, confirmed Node/WebSocket interop bug found while verifying it live
+
+The last item from the completeness-audit backlog buildable without an
+external-dependency decision (the other three -- web search, image
+generation, a code-execution sandbox -- either need picking a real
+external API/service, or a real scoping decision, flagged for the
+author rather than guessed at). The design doc's own repo-structure
+diagram names `sdks/typescript/ # thin REST/WS client` and its
+tech-stack table says "Python (the core itself) + thin TypeScript
+client for the REST/WS API" -- both directly confirmed, via `ls
+sdks/`, to not exist anywhere in the repo before this.
+
+Built `sarva-sdk`: a `SarvaClient` class wrapping every real server
+endpoint (`/health`, `/models`, `/doctor`, `/config`, `/chat`,
+`/ws/chat`) with zero runtime dependencies, and a full set of wire
+types verified against the actual Python source rather than guessed --
+`ChatRequest`/`ChatResponse`/`Spend`/`ModelInfo`/`DoctorCheck` against
+`core/sarva/server/schemas.py`, the full `AgentEvent`/`ProviderEvent`
+union against `core/sarva/agent/events.py` and `core/sarva/providers/
+base.py`. `apps/desktop/src/events.ts` already had a minimal, hand-
+mirrored subset of these exact types with its own comment naming this
+package's future existence as the reason to eventually consolidate --
+confirms this is the gap that comment was pointing at, not a
+coincidence. Consolidating the desktop app onto this new package is
+named as a deliberate follow-up, not done in this same change (a real
+scope boundary: refactoring already-shipped, tested UI code is a
+separate risk from adding a new, independent package).
+
+**A real, confirmed bug found while doing the live end-to-end
+verification this project's own discipline requires, not left
+unverified:** running a real `sarva serve` process and connecting with
+Node's own built-in global `WebSocket` (available natively since Node
+22) opened the connection, sent the initial request frame
+successfully, then the connection silently dropped (close code 1006)
+before any server response ever arrived -- confirmed reproducible, not
+a fluke. Bisected methodically rather than guessed at: added temporary
+debug prints to the server's own `ws_chat` handler (removed before
+committing), confirmed the origin check passes (`origin=None`, the
+documented non-browser-caller case), confirmed the payload is received
+correctly server-side (`{'message': 'hi', 'auto': True}`), and found
+no exception anywhere in the server's logs. Then isolated the variable
+that actually mattered: the identical request through Python's own
+`websockets` client library succeeded completely (full event stream,
+clean close code 1000), and the identical request through the
+well-established `ws` npm package ALSO succeeded completely --
+proving conclusively that Sarva's server is correct and the bug is
+specific to Node's own native WebSocket implementation (built on
+`undici`), not this SDK's application logic and not the Python server.
+
+**This real finding changed the SDK's actual runtime behavior, not
+just its documentation:** `SarvaClient` no longer defaults to the
+global `WebSocket` when running under Node (detected via
+`process.versions.node`), even though Node 22+ genuinely has one --
+silently handing back an implementation now KNOWN not to work would
+violate the same "reject, don't guess" discipline this project applies
+to malformed CLI input elsewhere. `chatStream()` throws immediately
+with an actionable message under Node with no explicit
+`webSocketImpl`, naming the `ws` package as the proven-working choice
+-- verified live, not just asserted: passing `ws` explicitly reproduced
+the full real streaming turn (state_changed -> model_stream deltas ->
+run_done) against the actual running server. Browsers are unaffected
+(a different, long-established implementation) and keep the sensible
+default.
+
+**Verified thoroughly, both at the unit level and live:** 15 unit
+tests (mocked fetch/WebSocket, matching the exact testing shape
+`apps/desktop`'s own `App.test.tsx` already established for this
+protocol) covering every REST method, WS event dispatch, the
+confirmation-reply protocol, the `textFromContent` helper, and the new
+Node-specific WebSocket-availability behavior (including a regression
+guard proving the client does NOT silently pick the global even when
+one exists). Two one-off live-smoke scripts (`test/live-smoke.mjs`,
+`test/live-smoke-ws.mjs`, checked into the repo and documented in the
+package's own README, not thrown away) hit a real running `sarva
+serve` process for both REST and WebSocket paths and both passed
+cleanly with the `ws` package. `tsc -p tsconfig.json` builds clean
+with real `.d.ts` declarations, `vitest run` passes all 15 tests.
+
+No `docs/` book chapter changes needed this round -- instead
+`README.md`'s own repository-layout diagram gained the new
+`sdks/typescript/` line, and the new package's own `README.md` is the
+primary documentation, including the Node/WebSocket finding front and
+center (marked with a warning header) rather than buried in a caveats
+section, since it's the single most important thing a Node-based
+consumer of this SDK needs to know before their first real request
+silently hangs.
+
+**Next:** three completeness-audit items remain, all genuinely needing
+external-dependency or scope decisions from the author rather than
+guessed at blind: a code-execution sandbox tool distinct from
+`RunShellTool`, web search, and image generation. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gaps remain real-but-unreachable. Also worth a future
+look: consolidating `apps/desktop/src/events.ts` onto this new SDK
+package, now that it exists.
