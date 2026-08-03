@@ -218,6 +218,28 @@ async def test_edit_does_not_destroy_the_file_if_interrupted_mid_write(ctx, monk
 
 
 @pytest.mark.asyncio
+async def test_edit_preserves_crlf_line_endings_on_every_untouched_line(ctx, tmp_path):
+    # A real bug found by actually editing one line of a real CRLF file:
+    # Path.read_text() does universal-newlines translation on read (\r\n
+    # silently becomes \n) with nothing on the write side translating
+    # back, so every OTHER line's ending silently flipped to LF too --
+    # directly contradicting this tool's own "without rewriting the rest
+    # of the file" contract. Written directly as raw bytes (not via
+    # WriteFileTool, which doesn't round-trip through read_text() at
+    # all and so wouldn't reproduce the bug) to construct a genuine CRLF
+    # file the way a real Windows-authored or .gitattributes-enforced
+    # file would look on disk.
+    path = tmp_path / "file.txt"
+    path.write_bytes(b"line1\r\nline2\r\nline3\r\n")
+    edit = EditFileTool()
+
+    result = await edit.run({"path": "file.txt", "old_string": "line2", "new_string": "LINE2"}, ctx)
+
+    assert not result.is_error
+    assert path.read_bytes() == b"line1\r\nLINE2\r\nline3\r\n"
+
+
+@pytest.mark.asyncio
 async def test_edit_path_escape_is_rejected(ctx):
     edit = EditFileTool()
     with pytest.raises(ValueError, match="escapes workdir"):
@@ -532,6 +554,23 @@ async def test_note_rejects_an_unusable_topic_name_cleanly(ctx, tmp_path):
     result = await note.run({"topic": "!!!", "content": "some content"}, ctx)
     assert result.is_error is True
     assert "invalid topic name" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_note_rejects_an_overlong_topic_name_cleanly_not_a_raw_oserror(ctx, tmp_path):
+    # A real bug found by actually writing a 500-character topic name:
+    # with no length cap on the slugified topic, _path_for() built a
+    # filename long enough that the OS itself rejected it --
+    # LongTermMemoryStore.write() raised a raw OSError (carrying a real
+    # local filesystem path in its message) instead of this module's
+    # own documented LongTermMemoryError, and NoteTool only ever caught
+    # the latter, so the raw OS error surfaced straight through to the
+    # tool result text a model/user sees.
+    note = NoteTool(store=LongTermMemoryStore(tmp_path / "memory"))
+    result = await note.run({"topic": "a" * 500, "content": "some content"}, ctx)
+    assert result.is_error is True
+    assert "invalid topic name" in result.content[0].text
+    assert "Errno" not in result.content[0].text  # not a leaked raw OSError
 
 
 @pytest.mark.asyncio

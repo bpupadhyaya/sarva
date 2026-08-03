@@ -206,7 +206,20 @@ class EditFileTool:
                 ],
                 is_error=True,
             )
-        text = p.read_text()
+        # p.read_text() -- NOT used here on purpose: Python's text-mode
+        # file reading does universal-newlines translation by default
+        # (\r\n and \r both silently become \n), and nothing on the write
+        # side translates back. A real bug found by actually editing one
+        # line of a real CRLF file: every OTHER line's ending silently
+        # flipped to LF too, directly contradicting this tool's own
+        # "without rewriting the rest of the file" contract -- confirmed
+        # live, `line1\r\nline2\r\nline3\r\n` with only "line2" changed
+        # came back as `line1\nLINE2\nline3\n`, every line ending
+        # rewritten. Reading raw bytes and decoding directly (bytes.decode()
+        # does no newline translation at all) preserves whatever the file
+        # actually had, byte for byte, for every line this edit doesn't
+        # touch.
+        text = p.read_bytes().decode("utf-8")
         count = text.count(old_string)
         if count == 0:
             return ToolResultBlock(

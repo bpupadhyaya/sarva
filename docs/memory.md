@@ -429,6 +429,23 @@ reason this tier exists; verified directly with two different
 `ToolContext`s carrying different `session_id`s, confirming a note
 written under one is found by a search under the other.
 
+### A real bug found by a later fresh-eyes sweep: an overlong topic name leaked a raw OS error, path and all
+
+`_slugify()` had no length cap on the resulting filename. Confirmed
+live: a 500-character topic name produced a slug long enough that the
+filesystem itself rejected it —
+`LongTermMemoryStore.write()` raised a raw `OSError` (carrying a real
+local filesystem path in its own message) instead of this module's
+documented `LongTermMemoryError`, and `NoteTool.run()` only ever
+catches the latter, so the raw OS error surfaced straight through to
+the tool result text a model or user actually sees. Fixed with
+`_MAX_TOPIC_SLUG_LENGTH` (200 characters — safely under every
+mainstream filesystem's ~255-byte filename-component limit, with room
+for the `.md`/`.md.lock` suffix), raising the same clean, documented
+`LongTermMemoryError` every other invalid-topic case already does.
+Verified live that the identical 500-character topic now produces a
+clean validation error with no local path anywhere in it.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools

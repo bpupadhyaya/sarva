@@ -10723,3 +10723,96 @@ round's "fresh eyes on recently-shipped code" lens on
 `sdks/typescript`'s other untested edge cases, or `subagents.py`/
 `file_lock.py`/`longterm.py`, which this round checked carefully but
 found genuinely clean.
+
+
+## Two real bugs in the last two rounds' own newly-shipped tools -- confirming "give freshly-shipped code a dedicated sweep" continues to pay off, round after round
+
+Round 47, applying a genuinely fresh angle (encoding/round-trip
+correctness, boundary conditions in the newest tools) rather than
+re-treading round 46's own already-swept ground
+(`sdks/typescript/`, `subagents.py`, `spawn_subagent`/`verify=True`,
+`file_lock.py`). Found two real, concretely-demonstrated bugs in
+`EditFileTool` and `NoteTool` -- the exact two tools that shipped only
+one round ago, extending this project's now-well-established pattern
+(atomic_write's three bugs across three sweeps, the cross-process
+lock's Windows bug, `SarvaChatStream`'s hang last round) that freshly-
+shipped code reliably rewards a dedicated second look.
+
+**1. `EditFileTool` silently rewrote a CRLF file's ENTIRE line-ending
+style on any edit, not just the edited line -- the more severe of the
+two, and a direct contradiction of the tool's own documented
+contract.** `Path.read_text()` does universal-newlines translation on
+read (`\r\n`/`\r` silently become `\n`), and nothing on the write side
+translates back. Confirmed live: editing one line of a genuine CRLF
+file (`line1\r\nline2\r\nline3\r\n`, changing only `line2`) produced
+`line1\nLINE2\nline3\n` -- every line's ending flipped, not just the
+one that changed. Reachable through completely ordinary use, no
+adversarial input needed: any Windows-authored file, or any file a
+real `.gitattributes` `text eol=crlf` rule enforces, triggers this on
+the very first edit, producing a whole-file git diff for what should
+have been a one-line change, and potentially breaking `.bat`/`.cmd`/CI
+tooling that genuinely requires CRLF. Fixed by reading raw bytes and
+decoding directly (`p.read_bytes().decode("utf-8")`) instead of
+`p.read_text()` -- `bytes.decode()` does no newline translation at
+all, so every untouched line's original ending survives byte-for-byte;
+the write side already just re-encodes whatever string results.
+Verified live the identical repro now produces
+`line1\r\nLINE2\r\nline3\r\n`.
+
+**2. `NoteTool` leaked a raw `OSError` (with a real local filesystem
+path inside it) instead of its own documented clean validation error,
+on an overlong topic name.** `_slugify()` had no length cap. Confirmed
+live: a 500-character topic name produced a slug long enough that the
+filesystem itself rejected the resulting filename --
+`LongTermMemoryStore.write()` raised a raw `OSError: [Errno 63] File
+name too long: '/private/var/.../aaaa....md.lock'` instead of the
+module's own `LongTermMemoryError`, and `NoteTool.run()` only ever
+catches the latter, so the raw error (path and all) surfaced straight
+through to the tool result text a model/user actually sees. Lower
+severity than #1 -- doesn't crash the loop, the generic tool-dispatch
+exception handler still catches it -- but a real, reachable path-info
+leak and a genuinely worse error message any time an agent-generated
+topic string runs long. Fixed with `_MAX_TOPIC_SLUG_LENGTH = 200`
+(safely under every mainstream filesystem's ~255-byte filename-
+component limit, with room for the `.md`/`.md.lock` suffix), raising
+the same documented `LongTermMemoryError` every other invalid-topic
+case already does. Verified live the identical 500-character topic now
+produces a clean validation error with no local path anywhere in it.
+
+**A real editing mistake caught immediately while writing the second
+fix, not shipped:** the first version of the `NoteTool` edit
+accidentally dropped the `LongTermMemoryError` class definition
+entirely while inserting the new length-cap constant next to it --
+caught instantly by re-reading the file's actual resulting content
+before running anything, matching this project's own established
+"read back what you just wrote, don't assume the edit landed the way
+you intended" discipline.
+
+**Verified both by reverting together and watching the new tests fail
+for the exact right reason:** the CRLF test failed with the literal
+old, wrong bytes (`b'line1\nLINE2\nline3\n'`) reproducing themselves in
+the assertion diff -- the strongest form of confirmation, the actual
+old bug's output appearing directly; the overlong-topic test failed
+with the real raw `OSError`/local path propagating uncaught, exactly
+the leak being closed. All 691 pre-existing tests pass unchanged. 2
+new tests, 691 -> 693 Python tests. `ruff check`/`format --check`
+clean. `docs/agent-loop.md` and `docs/memory.md` each gained a new
+section documenting their respective fix.
+
+**Checked and came back clean this round:** `NoteTool` topic-
+slugification path-traversal (the slug regex structurally can't
+produce a traversal sequence), BOM round-tripping through
+`EditFileTool` (preserved correctly), and the `_MAX_FETCH_CHARS`/
+`_MAX_TRANSCRIBE_SECONDS` truncation boundary constants in `tools.py`/
+`audio.py` (both correctly off-by-zero on inspection).
+
+**Next:** the three completeness-audit feature items remain deferred,
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gaps remain real-but-unreachable. Two consecutive rounds
+now (46, 47) have found real bugs specifically by sweeping the most
+recently-shipped code rather than older, already-hardened surfaces --
+worth treating as a standing first move for future rounds: check
+whatever shipped in the last 1-2 milestones before looking elsewhere.

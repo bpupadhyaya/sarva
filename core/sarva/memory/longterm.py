@@ -41,7 +41,20 @@ class LongTermMemoryError(Exception):
     `sarva.memory.session.SessionStore`'s own name validation already
     applies, so a caller gets one clean, documented failure instead of
     a raw OSError from an unusable path (e.g. a topic that slugifies to
-    an empty string)."""
+    an empty string, or one long enough to exceed the filesystem's own
+    filename-length limit)."""
+
+
+# Safely under every mainstream filesystem's max filename-component length
+# (typically 255 bytes) even after the ".md"/".md.lock" suffix. A real bug
+# found by actually writing a 500-character topic name: with no cap here,
+# _path_for() built a filename long enough to make the OS itself reject
+# it -- LongTermMemoryStore.write() raised a raw OSError (with a real
+# local filesystem path in the message) instead of this module's own
+# documented LongTermMemoryError, and NoteTool only catches the latter,
+# so the raw OS error (and the local path inside it) surfaced straight
+# through to the tool result text a model/user sees.
+_MAX_TOPIC_SLUG_LENGTH = 200
 
 
 def _slugify(topic: str) -> str:
@@ -49,6 +62,11 @@ def _slugify(topic: str) -> str:
     if not slug:
         raise LongTermMemoryError(
             f"invalid topic name: {topic!r} -- must contain at least one alphanumeric character"
+        )
+    if len(slug) > _MAX_TOPIC_SLUG_LENGTH:
+        raise LongTermMemoryError(
+            f"invalid topic name: {len(slug)} characters after slugifying, "
+            f"must be at most {_MAX_TOPIC_SLUG_LENGTH}"
         )
     return slug
 

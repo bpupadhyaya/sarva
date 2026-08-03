@@ -98,6 +98,33 @@ every other line provably untouched. Same atomic-write guarantee
 last good, complete content, never truncated) — verified the identical
 way, by making `os.replace()` raise mid-edit.
 
+### A real bug found by giving this newly-shipped tool its own fresh-eyes sweep: CRLF files got their WHOLE line-ending style silently rewritten
+
+A later round applied this project's own "give freshly-shipped code a
+dedicated bug-hunting pass" pattern to `EditFileTool`, and found a real
+one: `Path.read_text()` does universal-newlines translation on read
+(`\r\n` and `\r` both silently become `\n`), and nothing on the write
+side translates back. Confirmed live: editing one line of a real,
+genuine CRLF file (`line1\r\nline2\r\nline3\r\n`) changed every OTHER
+line's ending to LF too — `line1\nLINE2\nline3\n` — directly
+contradicting this tool's own "without rewriting the rest of the file"
+contract from the very paragraph above. A completely ordinary, non-
+adversarial file (any Windows-authored file, anything a real
+`.gitattributes` `text eol=crlf` rule enforces) triggers this on the
+very first edit, producing a whole-file git diff for what should have
+been a one-line change, and potentially breaking `.bat`/`.cmd`/CI
+tooling that requires CRLF.
+
+Fixed by reading raw bytes and decoding directly
+(`p.read_bytes().decode("utf-8")`) instead of `p.read_text()` —
+`bytes.decode()` does no newline translation at all, so every
+untouched line's original ending survives byte-for-byte; only the
+write side's own `content.encode()` (already used by `atomic_write_text`)
+re-encodes whatever the resulting string actually contains. Verified
+live that the identical repro now produces
+`line1\r\nLINE2\r\nline3\r\n` — only the edited line's content
+changed, every CRLF preserved exactly.
+
 When a model turn ends in `TOOL_USE`, every requested call runs
 concurrently via `asyncio.gather` — not sequentially, and not with the
 model waiting on one before deciding about the next. **Whether a tool
