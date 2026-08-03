@@ -45,6 +45,7 @@ export interface ChatStreamHandlers {
  */
 export class SarvaChatStream {
   private ws: WebSocket;
+  private sawRunDone = false;
 
   constructor(
     url: string,
@@ -67,12 +68,38 @@ export class SarvaChatStream {
         );
         return;
       }
+      if (parsed.type === "run_done") {
+        this.sawRunDone = true;
+      }
       handlers.onEvent?.(parsed);
     };
     this.ws.onerror = () => {
       handlers.onError?.(new Error("WebSocket transport error"));
     };
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev?: CloseEvent) => {
+      // A real bug found by actually simulating a server-crash-mid-turn
+      // (a state_changed frame arrives, then the connection drops
+      // uncleanly with no run_done ever sent): the SDK's own documented
+      // "resolve on run_done" consumer pattern hung forever with zero
+      // signal that anything had gone wrong, since onclose carried no
+      // information and nothing rejected the in-flight turn. Any
+      // dropped connection, server restart, or reverse-proxy idle
+      // timeout mid-turn would hang a real caller indefinitely -- this
+      // is the one, narrow signal actually missing (not a speculative
+      // timeout feature): if the socket closes and a terminal run_done
+      // was never seen, that's unambiguously an error, surfaced via
+      // onError before onClose fires. `ev` is read defensively (every
+      // real WebSocket implementation passes a real CloseEvent, but
+      // this must not itself become a new way to crash if some
+      // WebSocketImpl doesn't).
+      if (!this.sawRunDone) {
+        handlers.onError?.(
+          new Error(
+            `WebSocket closed before a run_done event arrived (code=${ev?.code ?? "unknown"}, ` +
+              `reason=${ev?.reason || "none"}) -- the turn did not complete`,
+          ),
+        );
+      }
       handlers.onClose?.();
     };
   }

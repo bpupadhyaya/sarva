@@ -83,7 +83,7 @@ class MockWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((ev: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((ev?: { code: number; reason: string }) => void) | null = null;
 
   constructor(public url: string) {
     MockWebSocket.instances.push(this);
@@ -96,6 +96,15 @@ class MockWebSocket {
   close() {
     this.closed = true;
     this.onclose?.();
+  }
+
+  /** Simulates the transport itself dropping the connection (server
+   * crash, network blip, proxy timeout) -- as opposed to `close()`,
+   * which mirrors the client calling the real WebSocket.close() (no
+   * event argument, matching that API's own signature). */
+  dropUncleanly(code: number, reason = "") {
+    this.closed = true;
+    this.onclose?.({ code, reason });
   }
 
   open() {
@@ -191,6 +200,76 @@ describe("SarvaClient.chatStream", () => {
     stream.close();
 
     expect(MockWebSocket.instances.at(-1)!.closed).toBe(true);
+  });
+
+  it("reports an error via onError if the connection drops before run_done arrives", () => {
+    // A real bug found by actually simulating a server-crash-mid-turn:
+    // the SDK's own documented "resolve on run_done" consumer pattern
+    // hung forever with zero signal that anything had gone wrong, since
+    // onclose carried no information and nothing rejected the in-flight
+    // turn. Any dropped connection, server restart, or reverse-proxy
+    // idle timeout mid-turn would hang a real caller indefinitely.
+    MockWebSocket.instances = [];
+    const client = new SarvaClient({
+      baseUrl: "http://example.com",
+      fetchImpl: fakeFetch(200, {}),
+      webSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    const errors: Error[] = [];
+    const closes: number[] = [];
+
+    client.chatStream(
+      { message: "hi" },
+      { onError: (e) => errors.push(e), onClose: () => closes.push(1) },
+    );
+    const ws = MockWebSocket.instances.at(-1)!;
+    ws.open();
+    ws.emit({ type: "state_changed", state: "calling_model" });
+    ws.dropUncleanly(1006, "");
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/closed before a run_done event arrived/);
+    expect(errors[0].message).toMatch(/code=1006/);
+    expect(closes).toHaveLength(1); // onClose still fires too, in addition to onError
+  });
+
+  it("does NOT report an error when the connection closes cleanly after run_done", () => {
+    MockWebSocket.instances = [];
+    const client = new SarvaClient({
+      baseUrl: "http://example.com",
+      fetchImpl: fakeFetch(200, {}),
+      webSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    const errors: Error[] = [];
+
+    const stream = client.chatStream({ message: "hi" }, { onError: (e) => errors.push(e) });
+    const ws = MockWebSocket.instances.at(-1)!;
+    ws.open();
+    ws.emit({ type: "run_done", state: "done", final_message: null, spend: {} });
+    stream.close();
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it("handles a WebSocketImpl that calls onclose with no event argument at all", () => {
+    // Defensive: every real WebSocket implementation passes a real
+    // CloseEvent, but reading it must not itself become a new way to
+    // crash if some WebSocketImpl doesn't provide one.
+    MockWebSocket.instances = [];
+    const client = new SarvaClient({
+      baseUrl: "http://example.com",
+      fetchImpl: fakeFetch(200, {}),
+      webSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    const errors: Error[] = [];
+
+    client.chatStream({ message: "hi" }, { onError: (e) => errors.push(e) });
+    const ws = MockWebSocket.instances.at(-1)!;
+    ws.open();
+    expect(() => ws.close()).not.toThrow();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/code=unknown/);
   });
 
   it("throws a Node-specific, actionable error when running under Node with no explicit webSocketImpl", () => {

@@ -42,9 +42,25 @@ const stream = client.chatStream(
         stream.close();
       }
     },
+    // Always wire onError — see "A dropped connection is reported, not
+    // silently hung" below for why this matters even in the happy path.
+    onError: (err) => console.error("chat stream error:", err.message),
   },
 );
 ```
+
+## A dropped connection is reported, not silently hung
+
+If the WebSocket closes for any reason (server crash, network blip,
+proxy idle timeout) *before* a `run_done` event has arrived,
+`onError` fires with a clear message naming the close code — the turn
+never silently hangs waiting for a `run_done` that will never come.
+Confirmed live: reproduced a server-crash-mid-turn (a `state_changed`
+frame arrives, then the connection drops uncleanly with no `run_done`
+ever sent) against the real built client, and the fix turns an
+indefinite hang into an immediate, actionable rejection. `onClose`
+still fires too, in addition to `onError`, for callers that only care
+about "the connection is gone" without distinguishing why.
 
 ## ⚠️ Node.js: you must provide a WebSocket implementation
 

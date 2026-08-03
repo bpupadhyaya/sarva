@@ -10645,3 +10645,81 @@ CI will run actually succeed: install, `npm run build` (typecheck +
 a real parser before committing, not just eyeballed.
 
 Commit `8b42705`.
+
+
+## `SarvaChatStream` hung forever on a dropped connection -- a real bug found by giving the just-shipped SDK its own fresh-eyes sweep
+
+Round 46, following this project's own repeatedly-proven pattern
+(atomic_write's three bugs across three sweeps, the cross-process
+lock's Windows bug found by a later round re-examining it): freshly-
+shipped code gets a dedicated close read from a sweep round, since
+"verified live and tested at ship time" has never been the same
+guarantee as "swept for bugs afterward" in this project's own history.
+Targeted the last ~8-10 commits (subagent fan-out, verifier subagent,
+long-term memory, `EditFileTool`, `sarva-sdk`) specifically, since none
+of it had had this treatment yet.
+
+Found a real one in `sarva-sdk` itself: `SarvaChatStream`'s `onclose`
+handler discarded the close event entirely and never signaled the
+consumer that a turn had failed to complete. The SDK's own documented
+"resolve a promise on `run_done`" usage pattern (from its own README)
+hangs forever if the connection drops for any reason before that event
+arrives -- a server crash, a network blip, a reverse-proxy idle
+timeout, or the server process simply being restarted mid-turn, all
+completely ordinary production failure modes, not contrived edge
+cases.
+
+Confirmed live with a fake `WebSocketImpl` that opens, sends one real
+`state_changed` event, then closes uncleanly (no `run_done`, mirroring
+a real server-crash-mid-turn) against the actual built `dist/client.js`
+using the README's own recommended consumer pattern: the promise never
+settled, confirmed still hanging after a 3-second guard timer with no
+rejection and no error surfaced anywhere.
+
+**Fixed by tracking whether a terminal `run_done` was ever actually
+seen**, and firing `onError` with the real close code/reason if the
+socket closes without one -- deliberately the one, narrow signal that
+was genuinely missing, not a speculative timeout feature bolted on
+(a hung TCP connection that never closes at all is a different,
+unaddressed problem; this fixes "the transport told us it's gone and
+we ignored that"). Verified live that the exact same repro now rejects
+immediately with a clear, actionable message instead of hanging.
+
+**A second, smaller bug caught while fixing the first, not shipped and
+found later:** the initial fix read `ev.code`/`ev.reason` directly off
+the close event with no defensive check. None of the 15 pre-existing
+tests happened to exercise "an `onError` handler is registered AND
+`onclose` fires with no event argument" together (JS optional-chaining
+short-circuit means `handlers.onError?.(...)`'s argument expression is
+never even evaluated when no handler is registered, which is why the
+pre-existing tests' bare `onclose?.()` calls with no payload never
+actually exercised this path) -- but a real `WebSocketImpl` that calls
+`onclose` with no argument, combined with a caller that DOES register
+`onError`, would have thrown a fresh `TypeError` reading `.code` off
+`undefined`, defeating the very fix meant to make failures more
+graceful. Made defensive (`ev?.code ?? "unknown"`) and added a
+dedicated regression test proving no throw.
+
+**Verified by reverting the fix and watching the new regression test
+fail for the exact right reason:** `expected [] to have a length of 1
+but got +0` -- zero errors reported without the fix, exactly the
+silent-hang behavior being closed. 3 new tests (the dropped-connection
+case, a clean-completion case proving no spurious error fires after a
+real `run_done`, and the defensive no-argument case), 18 total in the
+SDK's suite, all passing. Re-ran both live-smoke scripts against a
+real running `sarva serve` process afterward to confirm zero regression
+in the ordinary, successful path. `tsc` builds clean.
+`sdks/typescript/README.md` gained a new section and an updated usage
+example wiring `onError`, since the OLD example was the exact pattern
+that hangs without this fix.
+
+**Next:** the three completeness-audit feature items remain deferred,
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gaps remain real-but-unreachable. Worth continuing this
+round's "fresh eyes on recently-shipped code" lens on
+`sdks/typescript`'s other untested edge cases, or `subagents.py`/
+`file_lock.py`/`longterm.py`, which this round checked carefully but
+found genuinely clean.
