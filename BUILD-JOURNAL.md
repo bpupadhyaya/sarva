@@ -9759,3 +9759,79 @@ possibly applying this round's "push each individually-valid-looking
 numerical parameter to its extreme" lens to other hyperparameter-
 validation surfaces in `sarva_foundry` (MoE config, quantization
 parameters) that haven't had this specific treatment yet.
+
+
+## A non-finite `bias_update_speed` permanently and silently collapsed MoE routing, with zero validation to catch it
+
+Round 42, following up directly on round 41's own suggestion: apply the
+"push individually-valid-looking numerical parameters to their extreme"
+lens to `sarva_foundry`'s MoE config and quantization parameters, which
+hadn't had this specific treatment yet. `MoEConfig.__post_init__` only
+checked `n_experts_per_tok > n_experts` -- `bias_update_speed` (the
+DeepSeek-V3 aux-loss-free routing bias's per-step nudge amount) had
+**zero validation, not even a sign check**, unlike every other numeric
+config field touched by this project's last several rounds.
+
+Confirmed live through the module's own documented public API, not a
+contrived direct-buffer-mutation trick: construct `MoEFeedForward`, run
+one `forward`, call `update_expert_bias()` once -- exactly the "call
+once per training step" usage the docstring describes.
+`bias_update_speed=float("inf")` turned `expert_bias` into `[inf, inf,
+-inf, -inf]` after a single update. On a **completely fresh, unrelated
+batch of 500 random tokens with no relation to the biased batch**, the
+two `+inf`-biased experts captured all 500 selections and the `-inf`
+ones captured zero, regardless of what the actual gate logits said --
+routing became permanently disconnected from input content, and this
+state is unrecoverable (`inf -= speed` stays `inf` forever every future
+update). `bias_update_speed=float("nan")` produced the identical
+collapse, since `torch.topk` treats NaN as always-largest. In both
+cases the forward pass's actual output tensor stayed fully finite and
+raised no exception anywhere -- a completely silent defeat of
+"aux-loss-free load balancing," this module's entire documented
+purpose, that would pass any "check for NaN output" or "check for
+exceptions" test.
+
+**Fixed the same way as the RoPE-scaling precedent this lens came
+from:** `MoEConfig.__post_init__` now checks
+`math.isfinite(self.bias_update_speed) and self.bias_update_speed > 0`,
+rejecting NaN/Inf/zero/negative in one check, at the cheapest and
+earliest possible rejection point -- before the value ever reaches
+`update_expert_bias`'s buffer arithmetic.
+
+**Verified by reverting and watching the new tests fail for the exact
+right reason:** both new validation tests failed with `Failed: DID NOT
+RAISE ValueError` against the reverted code -- the strongest possible
+confirmation for a silent-corruption bug, the absence of an error IS
+the demonstrated bad behavior. A third new test additionally
+demonstrates the actual routing collapse directly (bypassing
+`MoEConfig`'s validation on purpose, since the point is showing what
+the validation prevents): 500/500 unrelated tokens land on exactly 2
+of 4 experts once `expert_bias` is forced to `+-inf`, with the output
+tensor still fully finite. All 11 pre-existing MoE tests pass
+unchanged. 3 new tests, 638 -> 641 Python tests. `ruff check`/`format
+--check` clean. `docs/foundry/transformer.md` updated with the finding
+right after the existing "why aux-loss-free" section.
+
+**Quantization (`sarva_foundry/quantization.py`) and `sarva.agent.
+budget.Budget` were also checked with the same lens** and have real but
+much lower-severity versions of the same gap (an already-Inf weight row
+dequantizes to NaN with no error; `Budget(max_cost_usd=nan)` silently
+never trips its own check) -- both currently unreachable through any
+real, non-synthetic path in this repo (`QuantizedLinear` isn't wired
+into any checkpoint save/load path, and `Budget` has no CLI/config-file
+wiring anywhere in `core/` yet), so left undocumented-but-not-forgotten
+rather than fixed this round: worth a fixed-parameter validation pass
+once either module actually gets wired into a real input-facing path.
+
+**Next:** the same three previously-identified items remain genuinely
+deferred (Tauri `csp: null` needs a GUI/Windows machine; RL harness
+container/VM sandboxing needs infrastructure; inference-request
+batching is a confirmed throughput feature, not a hidden bug). The
+quantization and `Budget` NaN-validation gaps noted above are candidates
+for a future round if either module gains a real input-facing wiring
+path before then. Otherwise, a fresh, genuinely open-ended sweep is
+warranted next -- four consecutive rounds have now mined the "numerical
+extreme" and "resource cost under ordinary input" lenses fairly
+thoroughly across the surfaces that had them; worth looking for a third,
+different lens entirely next time rather than re-running these two
+again.

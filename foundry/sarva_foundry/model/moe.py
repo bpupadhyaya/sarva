@@ -34,6 +34,7 @@ CUDA kernel).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -56,6 +57,13 @@ class MoEConfig:
             raise ValueError(
                 f"n_experts_per_tok ({self.n_experts_per_tok}) can't exceed "
                 f"n_experts ({self.n_experts})"
+            )
+        if not math.isfinite(self.bias_update_speed) or self.bias_update_speed <= 0:
+            raise ValueError(
+                "bias_update_speed must be a finite positive number, got "
+                f"{self.bias_update_speed} -- a non-finite value permanently and "
+                "silently collapses routing to a fixed, content-independent pattern "
+                "once it reaches expert_bias via update_expert_bias()"
             )
 
 

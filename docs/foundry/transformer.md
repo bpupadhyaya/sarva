@@ -113,6 +113,30 @@ pins it directly — a large enough bias forces a different expert to be
 selected, and the weight that expert's output receives is still
 identical to what an *unbiased* selection of it would have produced.
 
+### A validation gap: `bias_update_speed` had no check at all
+
+A round-42 sweep applying the same "push individually-valid-looking
+numerical parameters to their extreme" lens used for RoPE scaling
+(below) to `MoEConfig` found `bias_update_speed` had zero validation —
+not even a sign check, unlike every other numeric field in this
+project. Confirmed live: constructing `MoEFeedForward` with
+`bias_update_speed=float("inf")` and calling `update_expert_bias()`
+once — exactly the module's own documented "call once per training
+step" usage — turned `expert_bias` into `[inf, inf, -inf, -inf]`. On a
+**completely fresh, unrelated batch of 500 random tokens**, the two
+`+inf`-biased experts captured all 500 selections and the `-inf` ones
+captured zero, regardless of what the actual gate logits said —
+routing became permanently disconnected from input content, since
+`inf -= speed` stays `inf` forever. `bias_update_speed=float("nan")`
+produced the same collapse (`torch.topk` treats NaN as always-largest).
+In both cases the forward pass's actual output tensor stayed fully
+finite and raised no exception — a completely silent defeat of the
+"aux-loss-free load balancing" mechanism that is this module's entire
+documented purpose. Fixed with `math.isfinite(self.bias_update_speed)
+and self.bias_update_speed > 0` in `MoEConfig.__post_init__`, the same
+pattern as `RopeScalingConfig`'s fix. Verified by reverting and
+confirming the new tests fail with `DID NOT RAISE ValueError`.
+
 ### A real test-construction mistake, caught by running it, not shipped
 
 The first draft of the load-balancing convergence test used an

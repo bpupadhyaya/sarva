@@ -214,3 +214,53 @@ def test_moe_config_rejects_top_k_larger_than_n_experts():
 
     with pytest.raises(ValueError, match="n_experts_per_tok"):
         MoEConfig(n_experts=4, n_experts_per_tok=5)
+
+
+def test_moe_config_rejects_non_finite_bias_update_speed():
+    import pytest
+
+    for speed in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="bias_update_speed"):
+            MoEConfig(n_experts=4, n_experts_per_tok=2, bias_update_speed=speed)
+
+
+def test_moe_config_rejects_non_positive_bias_update_speed():
+    import pytest
+
+    for speed in (0.0, -0.01):
+        with pytest.raises(ValueError, match="bias_update_speed"):
+            MoEConfig(n_experts=4, n_experts_per_tok=2, bias_update_speed=speed)
+
+
+def test_a_non_finite_bias_update_speed_would_permanently_collapse_routing():
+    # Regression proof for why the __post_init__ check above matters: this
+    # is what happens if a non-finite bias_update_speed reaches
+    # update_expert_bias unchecked -- confirmed by constructing the buffer
+    # update directly (bypassing MoEConfig's validation) rather than
+    # relying on the validation itself, since the whole point is showing
+    # what the validation prevents. expert_bias becomes +-inf/nan after a
+    # single update, and torch.topk treats +inf/nan as always-largest, so
+    # routing on a completely unrelated fresh batch is dictated entirely
+    # by which experts happened to be over/under the mean load on the
+    # very first update -- never again touched by the actual input.
+    torch.manual_seed(0)
+    config = MoEConfig(n_experts=4, n_experts_per_tok=2)
+    moe = MoEFeedForward(dim=16, config=config)
+    moe(torch.randn(8, 16))
+
+    avg_load = moe._last_load.mean()
+    with torch.no_grad():
+        moe.expert_bias[moe._last_load > avg_load] = float("inf")
+        moe.expert_bias[moe._last_load <= avg_load] = float("-inf")
+
+    x2 = torch.randn(500, 16)
+    out = moe(x2)
+    gate_logits = moe.gate(x2)
+    _, top_idx = (gate_logits + moe.expert_bias).topk(2, dim=-1)
+    counts = torch.bincount(top_idx.flatten().long(), minlength=4)
+
+    # Every one of the 500 unrelated tokens routes to the same two
+    # +inf-biased experts, and zero tokens ever reach the -inf ones --
+    # routing has become completely disconnected from the input.
+    assert (counts > 0).sum().item() == 2
+    assert torch.isfinite(out).all()  # silent: the forward pass never errors
