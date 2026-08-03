@@ -10618,3 +10618,30 @@ sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gaps remain real-but-unreachable. Also worth a future
 look: consolidating `apps/desktop/src/events.ts` onto this new SDK
 package, now that it exists.
+
+
+## sarva-sdk had zero CI coverage -- caught and closed in the same round, not left for later
+
+A direct follow-up to shipping `sarva-sdk` immediately above: its 15
+real tests (mocked fetch/WebSocket, matching `apps/desktop`'s own
+established testing shape) had no CI job exercising them at all --
+every other component in this repo gets real CI coverage, and leaving
+a brand-new package as the one silent exception would have been
+exactly the kind of gap this project's own history has repeatedly
+found and closed elsewhere (most recently: the packaging chapter's
+`web` job itself, added specifically because nothing had ever run a
+real build against the desktop app before it existed).
+
+Added a `typescript-sdk` job to `.github/workflows/ci.yml`, mirroring
+the existing `web` job's shape (checkout, setup-node, `npm ci`,
+typecheck/build, test) minus the static-bundle-freshness check, which
+doesn't apply here -- `sarva-sdk` is a library with no build artifact
+committed anywhere else in the repo for a build to go stale against.
+
+Verified with a clean `npm ci` (not the already-populated local
+`node_modules` from earlier manual testing) that the exact commands
+CI will run actually succeed: install, `npm run build` (typecheck +
+`tsc` emit), `npm run test` (all 15 tests). YAML syntax validated with
+a real parser before committing, not just eyeballed.
+
+Commit `8b42705`.
