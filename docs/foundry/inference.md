@@ -55,6 +55,45 @@ before either was wired in: a legacy `config.json` simply has no
 `"moe"`/`"rope_scaling"` keys at all, and reloads as the same
 dense/unscaled config it always did.
 
+### Every checkpoint used to reload from disk on every single request in a long-running server
+
+A round-44 sweep, looking specifically for "expensive work redone on
+every ordinary call over the life of a long-running process" (the same
+lens that found `AgentLoop`'s leaking run directories the round
+before), found `load_checkpoint_bundle` had no caching at all.
+`sarva.server.app`'s `/chat` and `/ws/chat` handlers build a fresh
+`AgentLoop` — and therefore a fresh `FoundryProvider` — on **every
+request**, deliberately, so a saved `config.json` API-key change takes
+effect without restarting the server. But `FoundryProvider.__init__`
+eagerly calls `load_checkpoint_bundle` for every discovered bundle, and
+that function did a real `torch.load()` from disk every single time it
+ran. Confirmed live: 5 simulated requests against a real toy checkpoint
+fired `torch.load()` 5/5 times, with zero reuse — and this happened for
+**every** request through a `sarva serve` process with any foundry
+checkpoint configured, including requests that ended up routed to a
+completely different provider (Claude/GPT/Ollama), not just ones that
+actually used the foundry model. With a realistic (hundreds of MB to
+multi-GB) checkpoint this is real added latency and memory/GC churn on
+every request, not milliseconds.
+
+Fixed with a module-level cache in `load_checkpoint_bundle`, keyed on
+the resolved bundle directory path **and** `model.pt`'s own mtime — not
+path alone, the same "mtime distinguishes touched from untouched"
+technique already used to fix the cross-process lock's Windows bug (see
+the packaging chapter) — so a checkpoint retrained and re-saved in
+place is picked up on its very next load instead of silently serving
+stale weights forever. Confirmed live both ways: 5 requests against an
+unchanged checkpoint now trigger exactly 1 real `torch.load()`, and
+reloading after retraining-in-place (a new `model.pt` written to the
+same path) produces genuinely different weights, not a stale cached
+copy. Sharing the returned model instance across concurrent requests is
+safe: `generate_with_cache` (`sarva_foundry.inference`) allocates a
+fresh `KVCache` per call and never mutates persistent model state, and
+this adapter never trains through a loaded model. Verified by reverting
+and watching the new test fail with the exact wrong count (5 calls
+instead of 1) before re-applying. 2 new tests, all 19 pre-existing
+foundry-provider tests pass unchanged.
+
 ## Wiring a bundle into the CLI
 
 Point `SARVA_FOUNDRY_CHECKPOINTS` at a directory of bundles (one

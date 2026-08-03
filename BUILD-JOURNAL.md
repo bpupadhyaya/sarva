@@ -9913,3 +9913,80 @@ process state has the same unbounded-accumulation shape as this
 round's finding -- `VectorMemoryStore`'s in-memory TF-IDF index and any
 other server-side in-memory caches haven't been checked with this
 specific lens yet.
+
+
+## Every foundry checkpoint reloaded its full weights from disk on every single request in a long-running server -- the same "expensive work redone on every ordinary call" lens as the round before, found in a different module
+
+Round 44, directly following round 43's own closing suggestion: check
+whether other long-running-process state has the same unbounded-
+accumulation-or-repeated-cost shape as the just-fixed `AgentLoop`
+run-directory leak. `VectorMemoryStore` (the specifically-named
+candidate) came back genuinely clean -- no in-memory index at all,
+`add()`/`search()` both go straight to SQLite, growth is on-disk and
+proportional to what the user actually asked to remember, exactly the
+by-design shape `SessionStore`'s JSON files already have. But
+broadening the same lens to provider construction found a real one:
+`sarva.server.app`'s `/chat` and `/ws/chat` handlers build a fresh
+`AgentLoop` -- and therefore a fresh `FoundryProvider` -- on every
+single request, deliberately, so a saved `config.json` API-key change
+takes effect without a server restart. `FoundryProvider.__init__`
+eagerly calls `load_checkpoint_bundle()` for every discovered bundle,
+and that function did a real `torch.load()` from disk on every call,
+with zero caching anywhere.
+
+Confirmed live: constructed a real toy checkpoint via `sarva_foundry`'s
+own `Trainer`/`ByteLevelBPETokenizer`/`save_checkpoint_bundle`,
+monkeypatched `torch.load` to count invocations, then called
+`FoundryProvider(checkpoints_dir)` 5 times in a row exactly as
+`/chat`/`/ws/chat` do per-request. Result: 5/5 real `torch.load()`
+calls, zero reuse. **Blast radius wider than "the foundry model is
+slow":** this happens on *every* request through a `sarva serve`
+process with any foundry checkpoint configured, including requests
+that end up routed to a completely different provider entirely
+(Claude/GPT/Ollama) -- routing hasn't even decided which provider a
+request needs yet by the time `build_providers()` runs. With a
+realistic (hundreds of MB to multi-GB) checkpoint this is real added
+latency and memory/GC churn on every single request, not a one-shot
+cost.
+
+**Fixed with a module-level cache in `load_checkpoint_bundle`,** keyed
+on the resolved bundle directory path AND `model.pt`'s own mtime -- not
+path alone, reusing the exact "mtime distinguishes touched from
+untouched" technique already proven fixing the cross-process lock's
+Windows bug several rounds back -- so a checkpoint retrained and
+re-saved in place is picked up on its very next load rather than
+silently serving stale weights forever. Confirmed live both directions:
+5 requests against an unchanged checkpoint now trigger exactly 1 real
+`torch.load()`; reloading after writing a genuinely new `model.pt` to
+the same path produces measurably different weights, not a stale
+cached copy. Sharing the cached model instance across concurrent
+requests is safe by construction: `generate_with_cache` allocates a
+fresh `KVCache` per call and never mutates persistent model state, and
+this adapter never trains through a loaded model -- checked directly
+before relying on it, not assumed.
+
+**Verified by reverting and watching the new test fail for the exact
+right reason:** `assert calls["n"] == 1` failed with `5 == 1` against
+the reverted code -- the literal old-behavior call count reproducing
+itself, the same strength of confirmation as the video-degrader RSS
+regression a few rounds back. All 17 pre-existing foundry-provider
+tests pass unchanged. 2 new tests, 642 -> 644 Python tests. `ruff
+check`/`format --check` clean. `docs/foundry/inference.md` updated
+right after the checkpoint-bundles section it directly concerns.
+
+**Confirms round 43's new lens generalizes:** this is the second
+finding in the "expensive/leaky work repeated on every ordinary call
+over the life of a long-running process" shape, in a completely
+different module (provider construction, not the agent loop's own
+transcript writing) -- worth treating as a standing checklist item for
+future rounds, not a one-off.
+
+**Next:** the same three previously-identified items remain genuinely
+deferred (Tauri `csp: null`, RL harness container/VM sandboxing,
+inference-request batching -- notably, the *lack* of request batching
+is the named, deferred reason this fix doesn't also address
+per-request generation latency, only the redundant weight-loading).
+The quantization and `Budget` NaN-validation gaps remain real-but-
+unreachable, unchanged. `VectorMemoryStore` and general server-side
+state are now confirmed clean under this lens -- no further candidates
+identified for the same specific check without a fresh angle.

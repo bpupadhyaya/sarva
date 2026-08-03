@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -192,6 +193,54 @@ def test_loading_a_bundle_saved_before_moe_rope_scaling_existed_still_works(tmp_
 
     assert loaded_config.moe is None
     assert loaded_config.rope_scaling is None
+
+
+def test_load_checkpoint_bundle_is_cached_across_calls(tmp_path: Path, monkeypatch):
+    # A real bug found by actually running FoundryProvider() in a loop
+    # the way sarva.server.app's /chat and /ws/chat handlers do it (a
+    # fresh FoundryProvider per request, so a saved config.json change
+    # takes effect without a server restart): every request re-did a
+    # full torch.load() of every configured checkpoint, forever, even
+    # requests that ended up routed to a completely different provider.
+    bundle_dir = tmp_path / "toy"
+    _make_bundle(bundle_dir)
+
+    calls = {"n": 0}
+    real_torch_load = torch.load
+
+    def counting_load(*args, **kwargs):
+        calls["n"] += 1
+        return real_torch_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", counting_load)
+
+    for _ in range(5):
+        FoundryProvider(tmp_path)
+
+    assert calls["n"] == 1
+
+
+def test_load_checkpoint_bundle_cache_invalidates_on_a_retrained_checkpoint(tmp_path: Path):
+    # The cache is keyed on model.pt's own mtime, not just the directory
+    # path -- a checkpoint retrained and re-saved in place must be
+    # picked up on its very next load, not silently serve stale weights
+    # forever just because a FoundryProvider once loaded that path.
+    bundle_dir = tmp_path / "toy"
+    _make_bundle(bundle_dir)
+    first_model, _tokenizer, _config = load_checkpoint_bundle(bundle_dir)
+    first_weight = next(iter(first_model.state_dict().values())).clone()
+
+    model_pt = bundle_dir / "model.pt"
+    os.utime(model_pt, (time.time() + 5, time.time() + 5))  # force a distinguishable mtime
+    torch.manual_seed(999)
+    retrained = DecoderOnlyTransformer(_config)
+    retrained_trainer = Trainer(retrained)
+    retrained_trainer.save_checkpoint(model_pt)
+
+    second_model, _tokenizer, _config = load_checkpoint_bundle(bundle_dir)
+    second_weight = next(iter(second_model.state_dict().values())).clone()
+
+    assert not torch.equal(first_weight, second_weight)
 
 
 def test_discover_checkpoint_bundles_finds_only_complete_bundles(tmp_path: Path):

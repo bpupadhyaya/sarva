@@ -171,6 +171,28 @@ def save_checkpoint_bundle(directory: Path, trainer: Any, tokenizer: Any, config
     atomic_write_text(directory / "config.json", json.dumps(config_data, indent=2))
 
 
+# A real bug found by actually running build_providers() in a loop the
+# way sarva.server.app's /chat and /ws/chat handlers do it (a fresh
+# AgentLoop -- and therefore a fresh FoundryProvider -- per request, so
+# a saved config.json change takes effect without a server restart):
+# every request re-did a full torch.load() of every configured
+# checkpoint's weights, even requests that ended up routed to a
+# completely different provider (Claude/GPT/Ollama), and even though
+# nothing about the checkpoint had changed between requests. Confirmed
+# live: 5 simulated requests against a real toy checkpoint fired
+# load_checkpoint_bundle 5/5 times with zero reuse. Cached here, keyed
+# by the resolved directory path AND model.pt's own mtime (not path
+# alone) -- the same "mtime distinguishes touched from untouched"
+# technique already used to fix the cross-process lock's Windows bug --
+# so a checkpoint retrained and re-saved in place is picked up on its
+# very next load instead of silently serving stale weights forever.
+# Safe to share the returned model instance across concurrent requests:
+# generate_with_cache (sarva_foundry.inference.generate_with_cache)
+# allocates a fresh KVCache per call and never mutates persistent model
+# state, and this adapter never trains through the loaded model.
+_bundle_cache: dict[tuple[str, float], tuple[Any, Any, Any]] = {}
+
+
 def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:
     """Returns `(model, tokenizer, config)`, the model in `.eval()` mode
     with real trained weights loaded — not just a freshly-initialized
@@ -180,8 +202,16 @@ def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:
     were wired into the save format: `.get(...)` defaults both to `None`
     (a bundle from before this change simply never had those keys at
     all), reconstructing exactly the dense/unscaled config it would have
-    loaded as previously."""
+    loaded as previously.
+
+    Cached across calls -- see `_bundle_cache`'s own comment above."""
     mods = _lazy_imports()
+    model_pt_path = directory / "model.pt"
+    cache_key = (str(directory.resolve()), model_pt_path.stat().st_mtime)
+    cached = _bundle_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     config_data = json.loads((directory / "config.json").read_text())
     moe_data = config_data.pop("moe", None)
     rope_scaling_data = config_data.pop("rope_scaling", None)
@@ -197,7 +227,9 @@ def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:
     state = mods.torch.load(directory / "model.pt", map_location="cpu", weights_only=True)
     model.load_state_dict(state["model_state"])
     model.eval()
-    return model, tokenizer, config
+    result = (model, tokenizer, config)
+    _bundle_cache[cache_key] = result
+    return result
 
 
 def discover_checkpoint_bundles(checkpoints_dir: Path) -> dict[str, Path]:
