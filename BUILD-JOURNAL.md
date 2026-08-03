@@ -10816,3 +10816,100 @@ now (46, 47) have found real bugs specifically by sweeping the most
 recently-shipped code rather than older, already-hardened surfaces --
 worth treating as a standing first move for future rounds: check
 whatever shipped in the last 1-2 milestones before looking elsewhere.
+
+
+## `verify=True` could push a run's real spend past its declared Budget while still reporting DONE -- a real cost-safety gap, found round 48
+
+A third consecutive round finding real bugs specifically in recently-
+shipped code, extending round 46/47's now-explicitly-named pattern.
+This time the target wasn't a single tool but the INTERACTION between
+two features that shipped in the same milestone two rounds back:
+`verify=True` (the verifier subagent) and the pre-existing `Budget`/
+`spend.exceeded()` cost-safety mechanism.
+
+The bug: `AgentLoop.run()`'s `END_TURN` handling checks
+`spend.exceeded(self._budget)` exactly once, immediately after the
+main turn's own `DoneEvent` arrives -- but that check runs BEFORE the
+`verify=True` block, and `spawn_subagent()` (already-shipped code, used
+by both `delegate_task` and the verifier) unconditionally merges the
+verifier subagent's own real `Spend` into the parent's live `spend`
+object AFTER that point. Nothing re-checks the budget against the
+now-larger, merged total before the loop transitions to `DONE` or
+`FAILED`.
+
+Confirmed live: an identical `Budget(max_total_tokens=60)` correctly
+reported `DONE` (spend genuinely under budget, 30 tokens) with
+`verify=False`. With the SAME budget and `verify=True`, the merged
+spend reached 126 tokens -- genuinely, unambiguously over budget by
+more than double -- yet `RunDoneEvent.state` still reported `"done"`.
+
+**Traced through to real, concrete consequences before treating this
+as more than a theoretical gap:** both `core/sarva/cli.py` and
+`core/sarva/server/app.py` gate two separate real behaviors on
+`state == DONE` alone -- whether the run is reported as a failure
+(exit code, `_print_run_failure`) and whether the session gets saved
+(`store.save(session, transcript)`). So a `verify=True` run that
+genuinely exceeded its own configured cost/token ceiling was reported
+as an ordinary success everywhere a real caller could observe it:
+clean exit code, session persisted, nothing distinguishing it from a
+normal completion. This silently defeats the entire purpose `Budget`
+exists to serve, specifically and only in the one new code path
+`verify=True` added two rounds ago -- every pre-existing path through
+this loop was already correctly bounded.
+
+**Fixed by re-checking `spend.exceeded(self._budget)` a second time**,
+right after the verify block (the only other thing in this branch that
+can change `spend`), and giving `BUDGET_EXCEEDED` priority over both an
+ordinary `DONE` and a `REJECTED` verdict -- matching the budget check's
+own established priority everywhere else in this loop (a resource
+limit is a harder stop than a quality judgment). Verified live: the
+identical repro now correctly reports `BUDGET_EXCEEDED` (with
+`detail="tokens"`, naming the specific dimension) for the `verify=True`
+case, with the `verify=False` control run correctly unaffected by the
+same fix.
+
+**Verified by reverting and watching the new test fail with the exact
+literal old bug reproducing itself:** `AssertionError: assert
+<AgentState.DONE> == <AgentState.BUDGET_EXCEEDED>` -- the real,
+over-budget spend already attached to the wrongly-`DONE` event, the
+strongest form of confirmation for a silent-correctness bug (the
+absence of the expected failure state IS the demonstrated bad
+behavior, the same shape as several of this project's earlier silent-
+corruption findings). All 691 pre-existing tests pass unchanged. 1 new
+test (with an explicit `verify=False` control run built into the same
+test, proving the fix doesn't touch the unaffected path), 691 -> 692
+Python tests (double-checked against the real pytest output rather
+than assumed, given this project's own prior self-caught arithmetic
+mistakes in this exact kind of count claim).
+
+`ruff check`/`format --check` clean. `docs/agent-loop.md` gained a new
+section documenting the fix directly under the verifier subagent's own
+existing section.
+
+**Checked and came back clean this round** (per the sub-agent's
+report, verified independently): `sdks/typescript/src/types.ts` against
+the real Python source (all fields/optionality genuinely match);
+`.github/workflows/ci.yml`'s `typescript-sdk` job (working directory,
+caching path, trigger conditions all correct); `sdks/typescript/
+README.md`'s own code examples (match the current, fixed API); the
+`NoteTool`/`EditFileTool` path-resolution interaction (no traversal
+risk, `_within_workdir` already covers it).
+
+**Next:** the three completeness-audit feature items remain deferred,
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gaps remain real-but-unreachable. Three consecutive
+rounds (46, 47, 48) have now found real bugs specifically in recently-
+shipped code or its interaction with existing mechanisms -- firmly
+established as a standing first move, not a one-off streak. Worth
+considering next: are there other NEW-feature-meets-EXISTING-mechanism
+interactions from the last several milestones that haven't had this
+same "does the new code correctly re-derive state the old code already
+computed" scrutiny? `delegate_task`'s own budget-merge path already got
+this exact treatment when it first shipped; `verify=True`'s just got it
+now, two rounds later than it should have -- worth checking whether any
+OTHER recently-shipped feature has a similar "merges into shared state
+but doesn't re-validate an invariant that state is supposed to
+guarantee" shape.

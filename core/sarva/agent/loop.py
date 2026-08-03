@@ -552,7 +552,32 @@ class AgentLoop:
                     ):
                         reject_detail = f"verifier rejected the final answer: {verify_text}"
 
-                if reject_detail is not None:
+                # A real bug found by actually running verify=True against a
+                # tight Budget: spawn_subagent() (above) merges the
+                # verifier's own real Spend into this run's live `spend`
+                # object, but the ONLY spend.exceeded() check in this
+                # function runs once, at line ~502 -- BEFORE this verify
+                # block ever executes. Confirmed live: an identical Budget
+                # that correctly reported DONE with verify=False reported
+                # DONE again with verify=True even though the verifier's
+                # own cost pushed the merged spend genuinely over budget
+                # (total_tokens=478 against max_total_tokens=40). Every real
+                # caller (cli.py, server/app.py) gates both "was this run a
+                # failure" and "should the session be saved" on state ==
+                # DONE alone, so an over-budget verify=True run was
+                # reported as ordinary success everywhere -- silently
+                # defeating the one purpose Budget/spend.exceeded exists to
+                # serve. Re-checked here, after the only other thing in
+                # this branch that can change `spend`, rather than folding
+                # into the earlier check (which runs before verification
+                # even starts and so can't see its cost yet). Given
+                # priority over a REJECTED verdict, matching the budget
+                # check's own priority everywhere else in this loop.
+                budget_reason = spend.exceeded(self._budget)
+                if budget_reason:
+                    transition(AgentState.BUDGET_EXCEEDED)
+                    yield await emit(StateChangedEvent(state=state, detail=budget_reason))
+                elif reject_detail is not None:
                     transition(AgentState.FAILED)
                     yield await emit(StateChangedEvent(state=state, detail=reject_detail))
                 else:

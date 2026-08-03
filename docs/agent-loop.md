@@ -641,6 +641,40 @@ new server tests (REST + WebSocket wiring, proving the request field
 genuinely reaches `AgentLoop`, not just that it's accepted as valid
 JSON), every pre-existing test unaffected.
 
+### A real bug found later: the verifier's own real cost could push a run over `Budget` while it still reported `DONE`
+
+A later round applied this project's own "give freshly-shipped code a
+dedicated bug-hunting pass" pattern to the interaction between
+`verify=True` and `Budget`, and found a real gap: the one
+`spend.exceeded(self._budget)` check in this loop's `END_TURN` handling
+runs *before* the verify block above ever executes, but `spawn_subagent()`
+unconditionally merges the verifier's own real `Spend` into this run's
+live `spend` afterward — so a verifier expensive enough to push the
+merged total over budget was never caught. Confirmed live: an identical
+`Budget(max_total_tokens=60)` correctly reported `DONE` with
+`verify=False` (spend stayed at 30 tokens); with `verify=True` against
+the exact same budget, the merged spend reached 126 tokens — genuinely
+over budget — yet `RunDoneEvent.state` still reported `"done"`. Traced
+through to real consequences, not just a theoretical gap: both
+`cli.py` and `server/app.py` gate "was this run a failure" (exit code,
+`_print_run_failure`) *and* "should the session be saved" on
+`state == DONE` alone, so an over-budget `verify=True` run was reported
+as an ordinary success everywhere — silently defeating the one purpose
+`Budget` exists to serve, specifically whenever verification itself was
+what tipped spend over the line.
+
+Fixed by re-checking `spend.exceeded(self._budget)` a second time,
+after the verify block (the only other thing in this branch that can
+change `spend`), and giving `BUDGET_EXCEEDED` priority over both a
+`REJECTED` verdict and an ordinary `DONE` — matching the budget check's
+own priority everywhere else in this loop. Verified live: the identical
+repro above now correctly reports `BUDGET_EXCEEDED` (with `detail`
+naming which dimension — `"tokens"`) for the `verify=True` case, while
+the `verify=False` control run is unaffected. Reverting reproduced the
+exact old bug in the new test's own assertion failure: `DONE` where
+`BUDGET_EXCEEDED` was expected, the real over-budget spend already
+attached to the event. 1 new test, every pre-existing test unaffected.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_agent.py` — `MockProvider` scripts let

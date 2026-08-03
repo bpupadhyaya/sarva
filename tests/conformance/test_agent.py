@@ -1189,3 +1189,54 @@ async def test_verify_defaults_to_off(run_root):
     run_done = [e for e in events if e.type == "run_done"]
     assert run_done[-1].state == AgentState.DONE
     assert run_done[-1].spend.model_calls == 1  # no verifier call happened
+
+
+@pytest.mark.asyncio
+async def test_verify_true_reports_budget_exceeded_when_the_verifier_tips_it_over(run_root):
+    # A real bug found by actually running verify=True against a tight
+    # Budget: spawn_subagent() merges the verifier's own real Spend into
+    # this run's live spend, but the only spend.exceeded() check in the
+    # END_TURN branch runs BEFORE verification ever starts, so it can't
+    # see the verifier's cost. An identical Budget that correctly reports
+    # DONE with verify=False reported DONE again with verify=True even
+    # though the merged spend was genuinely over budget -- and every real
+    # caller (cli.py, server/app.py) gates both "was this a failure" and
+    # "should the session be saved" on state == DONE alone, so this
+    # silently defeated Budget's entire purpose whenever verification
+    # itself was what pushed spend over the line.
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(text="the real final answer"),
+            ScriptedTurn(text="VERIFIED: looks correct to me"),
+        ]
+    )
+    budget = Budget(max_total_tokens=60)
+
+    # Control: the identical budget without verification stays under it.
+    control_loop = AgentLoop(
+        router=_router(),
+        providers={"mock": MockProvider(script=[ScriptedTurn(text="the real final answer")])},
+        budget=budget,
+        run_root=run_root,
+    )
+    control_events = [e async for e in control_loop.run("what's the answer?")]
+    control_done = [e for e in control_events if e.type == "run_done"][-1]
+    assert control_done.state == AgentState.DONE
+
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        budget=budget,
+        run_root=run_root,
+        verify=True,
+    )
+
+    events = [e async for e in loop.run("what's the answer?")]
+
+    run_done = [e for e in events if e.type == "run_done"][-1]
+    assert run_done.state == AgentState.BUDGET_EXCEEDED
+    assert run_done.spend.total_tokens >= budget.max_total_tokens
+
+    state_events = [e for e in events if e.type == "state_changed"]
+    assert state_events[-1].state == AgentState.BUDGET_EXCEEDED
+    assert state_events[-1].detail == "tokens"
