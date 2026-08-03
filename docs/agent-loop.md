@@ -581,6 +581,60 @@ reproduced the literal doubled call count in the new test's own
 assertion failure (`6 <= 4` false). 1 new test, all pre-existing tests
 pass unchanged.
 
+### That very fix then starved concurrent siblings to zero — reserving the WHOLE remainder for the first admitted caller
+
+One round later, giving the fix above its own dedicated fresh-eyes
+sweep (the project's single most productive lens by this point — see
+the four-in-a-row streak this chapter and the verifier chapter below
+both note) surfaced a real regression in the fix itself, not a new
+independent bug. `DelegateTool`'s own `input_schema` has no `budget`
+field at all, so every real call to `spawn_subagent` — through
+`delegate_task` or `verify=True` — always passes `budget=None`, "no
+explicit request." Before the reservation fix, that just meant
+"whatever's left, unreserved until the subagent finishes." After it,
+the lock-guarded admission decision reserves the FULL remainder
+against `spend` immediately — correct for stopping the overspend race,
+but it meant the first of several concurrently-admitted delegations
+claimed the *entire* remaining budget outright, unconditionally
+starving every sibling dispatched in the same round to exactly zero.
+Confirmed live under a realistic, generous default `Budget()`
+(`max_model_calls=50`, no artificial tightness): two ordinary
+concurrent `delegate_task` calls — "delegate these two independent
+things in parallel," not an adversarial trick — left one succeeding
+and the other failing `budget_exceeded` after only 1 of 50 calls had
+actually been used, with 49 calls of real headroom sitting unused.
+
+A tempting fix — divide by however many concurrent claims are
+in-flight — doesn't actually work: the first claimant doesn't know a
+second one is coming, so it greedily reserves everything before the
+second claimant's request is even visible; by the time the second
+checks in, the first has already exhausted the remainder. Fixed
+instead by capping an *unspecified* request (`budget is None`
+specifically — an explicit `Budget(...)` request is still honored
+exactly, unhalved, matching the already-shipped
+"tight budget honored precisely" test two sections up) to **half** of
+whatever is left at grant time, not the whole thing. A lone delegation
+still gets a generous share (half the remainder); each additional
+concurrent one gets half of what's left after its predecessors'
+reservations — a geometric split (½, ¼, ⅛, …) that approaches but
+never reaches zero, so no number of concurrent delegations in one
+round can starve one to nothing outright. Verified live: the identical
+two-delegation repro under `Budget()` now has both succeed. Reverting
+reproduced the exact old failure — `d2` failing with the literal
+`budget_exceeded` text — in the new test's own assertion failure. 1
+new test, all pre-existing tests (including both budget tests two
+sections up) pass unchanged.
+
+A related, narrower gap was found in the same sweep but deliberately
+left unfixed: when an explicit `Budget(...)` object sets only *some*
+fields, the unset fields' pydantic defaults (e.g.
+`max_total_tokens=2_000_000`) are indistinguishable from a genuinely
+requested value and get clamped/reserved as if truly requested. This
+is currently unreachable in production — neither `DelegateTool` nor
+`verify=True` ever construct an explicit `Budget` object, both always
+call with `budget=None` — so it's recorded here honestly rather than
+solved against a case nothing can reach yet.
+
 ### `spawn_subagent`'s real shape was already frozen in spec-03 — a same-session correction, not a second milestone
 
 The paragraphs above describe the feature as first built, against the

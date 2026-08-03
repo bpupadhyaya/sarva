@@ -383,30 +383,66 @@ class AgentLoop:
             # not what was available at the very start. Matches spec-03's
             # own conformance invariant #8 verbatim: "its budget slice
             # cannot exceed the parent's remainder."
+            #
+            # A real bug found by actually dispatching two ordinary
+            # concurrent `delegate_task` calls under a realistic, generous
+            # default `Budget()` (50 calls, plenty of headroom): the FIRST
+            # admitted call was granted (and immediately reserved) the
+            # ENTIRE remainder -- correct in isolation, but `DelegateTool`
+            # never passes an explicit `budget`, so this happened on
+            # *every* call, unconditionally starving every sibling in the
+            # same round to exactly zero regardless of how much headroom
+            # actually existed, and reporting a factually misleading
+            # "budget_exceeded" for the starved one. Fixed by capping an
+            # UNSPECIFIED request (no explicit `budget` argument at all)
+            # to half of whatever is currently left, rather than all of
+            # it: a lone delegation still gets a generous share (half the
+            # remainder), and each additional concurrent one gets half of
+            # what's left AFTER its predecessors' reservations -- a
+            # geometric split that approaches, but mathematically never
+            # reaches, zero, so no ordinary number of concurrent
+            # delegations can ever starve one to nothing outright.
+            # Deliberately scoped to the `budget is None` case only: an
+            # EXPLICIT `Budget(...)` request (no real caller makes one
+            # today -- `DelegateTool` has no budget field in its own
+            # schema, and `verify=True`'s own call never runs concurrently
+            # with anything else) is still honored exactly, unhalved,
+            # matching this file's own pre-existing, already-tested
+            # "explicit tight budget honored precisely" contract.
             def _clamp(requested: float | None, remaining: float) -> float:
                 return max(0.0, min(requested, remaining) if requested is not None else remaining)
 
+            _UNSPECIFIED_SHARE = 0.5
+
             async with spend_lock:
+                remaining_calls = self._budget.max_model_calls - spend.model_calls
+                remaining_tokens = self._budget.max_total_tokens - spend.total_tokens
+                remaining_wall = self._budget.max_wall_seconds - spend.wall_seconds
+                remaining_cost = self._budget.max_cost_usd - spend.cost_usd
                 sub_budget = Budget(
                     max_model_calls=int(
                         _clamp(
-                            budget.max_model_calls if budget else None,
-                            self._budget.max_model_calls - spend.model_calls,
+                            budget.max_model_calls
+                            if budget
+                            else remaining_calls * _UNSPECIFIED_SHARE,
+                            remaining_calls,
                         )
                     ),
                     max_total_tokens=int(
                         _clamp(
-                            budget.max_total_tokens if budget else None,
-                            self._budget.max_total_tokens - spend.total_tokens,
+                            budget.max_total_tokens
+                            if budget
+                            else remaining_tokens * _UNSPECIFIED_SHARE,
+                            remaining_tokens,
                         )
                     ),
                     max_wall_seconds=_clamp(
-                        budget.max_wall_seconds if budget else None,
-                        self._budget.max_wall_seconds - spend.wall_seconds,
+                        budget.max_wall_seconds if budget else remaining_wall * _UNSPECIFIED_SHARE,
+                        remaining_wall,
                     ),
                     max_cost_usd=_clamp(
-                        budget.max_cost_usd if budget else None,
-                        self._budget.max_cost_usd - spend.cost_usd,
+                        budget.max_cost_usd if budget else remaining_cost * _UNSPECIFIED_SHARE,
+                        remaining_cost,
                     ),
                 )
                 if sub_budget.max_model_calls <= 0 or sub_budget.max_wall_seconds <= 0:

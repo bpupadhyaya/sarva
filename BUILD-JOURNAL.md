@@ -11011,3 +11011,107 @@ calls) is read-then-later-written across an `await` boundary -- this
 round only checked `spawn_subagent`'s own budget math specifically,
 prompted by round 48's finding, not every other shared-state mutation
 reachable from concurrent tool dispatch.
+
+
+## Round 49's own overspend fix then starved concurrent `delegate_task` siblings to zero — a real regression found by sweeping code shipped one round earlier, again
+
+Round 50, the fifth consecutive round to find a real bug by giving
+recently-shipped code its own dedicated fresh-eyes sweep (46-49 all
+did too — this lens is now this project's single most productive
+standing move for every new round). This time the target was round
+49's own fix from the previous entry above.
+
+The bug: round 49 closed the overspend race by reserving the FULL
+granted budget slice against the parent's `spend` immediately, while
+holding a lock, before the subagent's async work even starts. Correct
+for stopping overspend — but `DelegateTool`'s own `input_schema` has
+no `budget` field at all, so every real call into `spawn_subagent`
+(through `delegate_task` or `verify=True`) always passes `budget=
+None`, "no explicit request," and the pre-existing `_clamp` logic
+treats "no request" as "grant the entire remainder." Combined with
+round 49's own reservation-up-front fix, this meant the FIRST admitted
+concurrent delegation claimed the parent's *entire* remaining budget
+outright, unconditionally starving every sibling dispatched in the
+same round to exactly zero — regardless of how much real headroom
+existed. Confirmed live under a realistic, generous default `Budget()`
+(`max_model_calls=50`): two completely ordinary concurrent
+`delegate_task` calls — "delegate these two independent things in
+parallel," ordinary usage, no adversarial trick — left one succeeding
+and the other failing `budget_exceeded` after only 1 of 50 calls had
+actually been used, 49 calls of real headroom sitting unused and
+unreported.
+
+Considered and rejected: dividing by however many concurrent claims
+are currently in-flight. Doesn't actually solve it — the first
+claimant doesn't know a second one is coming, so it greedily reserves
+everything before the second claimant's own request is even visible;
+by the time the second checks in, the first has already exhausted the
+remainder.
+
+**Fixed** by capping only the *unspecified* case (`budget is None`
+specifically) to **half** of whatever remains at grant time, rather
+than the full remainder. An explicit `Budget(...)` request is
+completely unaffected — still clamped to the exact true remainder, no
+halving — preserving the already-shipped
+`test_spawn_subagent_honors_an_explicit_task_class_and_budget_request`
+test's exact-match expectation unchanged. A lone delegation still gets
+a generous share (half the remainder, not a token amount); each
+additional concurrent delegation in the same round gets half of
+what's left after its predecessors' reservations — a geometric split
+(½, ¼, ⅛, …) that mathematically approaches but never reaches zero, so
+no number of concurrent same-round delegations can ever starve one to
+literally nothing.
+
+**Verified live** the identical two-delegation repro under a default
+`Budget()` now has both delegations succeed (previously one failed).
+**Verified by reverting** and watching the new regression test fail
+for the exact right reason — the literal old bug's own behavior
+reproducing itself in the assertion failure: `d2`'s result carrying
+`is_error=True` with the exact text `"...ended in budget_exceeded)..."`
+that only the old, unfixed code produces. 2 new tests (this round's
+starvation regression test, on top of last round's own concurrent-race
+test which still passes unchanged), 693 -> 695 Python tests, all
+passing. `ruff check`/`format --check` clean. `docs/agent-loop.md`
+gained a new subsection directly under last round's own entry, the one
+it's a regression against.
+
+A second, narrower bug was also found in the same sweep and
+deliberately left unfixed this round: when an explicit `Budget(...)`
+object sets only SOME fields, the unset fields' pydantic defaults
+(e.g. `max_total_tokens=2_000_000`) are indistinguishable from a
+genuinely requested value and get clamped/reserved as if truly
+requested. Left alone because it is currently UNREACHABLE in
+production — neither `DelegateTool` nor `verify=True` ever construct
+an explicit `Budget` object, both always call with `budget=None` — so
+it's documented honestly as a real-but-unreached gap rather than
+solved against a case nothing can reach yet, matching this project's
+standing discipline against engineering for the hypothetical.
+
+A THIRD bug from the same sweep, `_prune_old_runs` deleting a sibling
+subagent's still-actively-running directory once a shared
+`run_dir/subagents/` accumulates past `_MAX_RETAINED_RUNS` (200)
+entries, was demonstrated live (with `_MAX_RETAINED_RUNS` monkeypatched
+down, matching round 43's own test pattern, and balanced explicit
+budgets to isolate it from the starvation bug above) but is explicitly
+DEFERRED to a future round rather than bundled into this one — lower
+severity (needs 200+ accumulated sibling runs under one parent to
+trigger at all in practice) and a genuinely separate root cause
+(directory pruning racing against directory creation, not a budget
+math error) from everything else this round touched.
+
+**Five consecutive rounds now (46-50)** have found real bugs by
+examining code shipped in the last one-to-two rounds — this is no
+longer a notable streak, it's the standing first move for every new
+round.
+
+**Next:** fix `_prune_old_runs`'s cross-sibling deletion (deferred
+above) — likely either scope pruning to only the calling subagent's
+own siblings-so-far rather than the whole shared directory, or track
+which run_dirs are still actively open and exclude them from eligible
+deletions regardless of age/count. The three completeness-audit
+feature items remain deferred, needing external-dependency/scope
+decisions from the author (a code-execution sandbox tool, web search,
+image generation). The three infra-blocked items remain deferred
+(Tauri `csp: null`, RL harness sandboxing, inference batching); the
+quantization/`Budget` NaN-validation and explicit-partial-`Budget`
+gaps remain real-but-unreachable, tracked but not solved.

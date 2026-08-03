@@ -1051,6 +1051,84 @@ async def test_concurrent_delegate_task_calls_do_not_let_real_spend_exceed_budge
     assert provider.n <= budget.max_model_calls + 1
 
 
+class _TwoDelegatesProvider:
+    """Same first-round shape as _ConcurrentDelegateRaceProvider (two
+    concurrent delegate_task calls in one TOOL_USE round), but every
+    subsequent call — the parent's own follow-up and each subagent's
+    single turn alike — finishes immediately with END_TURN, so this
+    exercises a realistic, generous default Budget() rather than an
+    artificially tight one."""
+
+    name = "mock"
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    async def generate(self, request):
+        self.n += 1
+        await asyncio.sleep(0.01)
+        if self.n == 1:
+            calls = [
+                ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "subtask A"}),
+                ToolCallBlock(id="d2", name="delegate_task", arguments={"task": "subtask B"}),
+            ]
+            for c in calls:
+                yield ToolCallEvent(call=c)
+            yield DoneEvent(
+                stop_reason=StopReason.TOOL_USE,
+                message=Message(role="assistant", content=calls),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+            return
+        text = TextBlock(text=f"answer from call {self.n}")
+        yield DoneEvent(
+            stop_reason=StopReason.END_TURN,
+            message=Message(role="assistant", content=[text]),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_delegate_task_calls_do_not_starve_each_other_under_a_default_budget(
+    run_root,
+):
+    # A real regression in the fix directly above this test: reserving
+    # the FULL granted slice up front (to close the overspend race)
+    # meant the FIRST admitted delegate_task call — with no explicit
+    # budget field to request anything narrower (DelegateTool's own
+    # input_schema has no budget field at all, so budget is always
+    # None) — was granted the entire remainder, unconditionally
+    # starving every concurrent sibling in the same round to exactly
+    # zero. Confirmed live before this fix: under a realistic default
+    # Budget() (max_model_calls=50, plenty of headroom), one of two
+    # ordinary concurrent delegations failed with budget_exceeded after
+    # only 1 of 50 calls had actually been used. Fixed by capping an
+    # unspecified request to half of what's currently left rather than
+    # all of it, so both concurrent siblings get a real, nonzero share.
+    provider = _TwoDelegatesProvider()
+    budget = Budget()
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[DelegateTool()],
+        budget=budget,
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("please delegate to two subagents concurrently")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 2
+    for f in finished:
+        assert f.result.is_error is False, f.result.content[0].text
+
+    run_done = [e for e in events if e.type == "run_done"][-1]
+    assert run_done.state == AgentState.DONE
+
+
 @pytest.mark.asyncio
 async def test_delegate_task_rejects_an_empty_task_string(run_root):
     call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "   "})
