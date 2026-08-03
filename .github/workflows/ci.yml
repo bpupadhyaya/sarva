@@ -156,6 +156,35 @@ jobs:
             exit 1
           fi
 
+  typescript-sdk:
+    # sarva-sdk (sdks/typescript/) -- a genuinely separate package from
+    # apps/desktop's own web UI, added later, so it needs its own job
+    # rather than folding into `web` above. Mirrors that job's shape
+    # (install, typecheck/build, test) minus the static-bundle-freshness
+    # check, which doesn't apply to a library with no build artifact
+    # committed anywhere else in the repo.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: sdks/typescript/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and build
+        run: npm run build
+
+      - name: Test
+        run: npm run test
+
   docs:
     # Every "book" chapter is real Markdown reviewed and edited by hand,
     # but nothing had ever actually run `mkdocs build` against it -- a
