@@ -11115,3 +11115,78 @@ image generation). The three infra-blocked items remain deferred
 (Tauri `csp: null`, RL harness sandboxing, inference batching); the
 quantization/`Budget` NaN-validation and explicit-partial-`Budget`
 gaps remain real-but-unreachable, tracked but not solved.
+
+
+## `_prune_old_runs` deleted a still-running subagent sibling's directory out from under it — the deferred Finding 2 from last round, picked up now
+
+Round 51, continuing directly from round 50's own explicit deferral:
+`_prune_old_runs` (shipped round 43, to bound unbounded transcript-
+directory growth) prunes purely by mtime, with zero concept of "still
+running." Concurrent subagents spawned from one parent share a single
+`run_root/subagents/` directory, and each subagent's own `run()`
+independently calls `_prune_old_runs` on that SHARED directory right
+after creating its own run_dir. Confirmed live with `_MAX_RETAINED_RUNS`
+lowered (matching this project's own retention-cap test, so no need for
+200+ real subagents to trigger it) and a slow/fast timing split between
+two sibling subagents: the slower sibling's still-in-flight run_dir got
+deleted by the faster sibling's own prune call moments later — WORSE
+than the clean `budget_exceeded` shape round 49/50 dealt with, this
+crashed the slower subagent with a raw, uncaught `FileNotFoundError`
+trying to append to a transcript file whose parent directory no longer
+existed.
+
+**Fixed with a `.active` marker file**, not an in-memory registry —
+`AgentLoop.run()` is now a thin wrapper (the ~580-line generator body
+renamed `_run_impl`) that creates the marker in the run's own directory
+before `_run_impl` starts and removes it in a `finally` block however
+the run ends (success, exception, or the caller closing the generator
+early via `GeneratorExit`). `_prune_old_runs` now excludes any marked
+directory from its removal candidates, regardless of level (top-level
+run or nested subagent) or how many siblings share the directory.
+
+**A real off-by-one bug in this very fix was caught immediately by this
+project's own pre-existing retention-cap test**, not a fresh sweep: the
+first version compared `keep` against only the non-active directory
+count, which made the currently-being-created directory (always active
+at that exact instant, since the wrapper marks it before calling in)
+invisible to its own retention math — silently growing steady-state
+disk usage to `keep + 1` forever instead of `keep`. The existing test
+(`test_run_directories_are_pruned_beyond_the_retention_cap`, unchanged
+since round 43) caught this immediately: `assert 4 == 3`. Fixed by
+keeping `keep` compared against the TOTAL directory count (active +
+finished) exactly as it always was, while still only ever *removing*
+from the non-active pool — if too few finished directories exist to
+reach `keep`, active ones are left alone and retention temporarily
+exceeds `keep` rather than ever deleting something in use.
+
+**Verified live** the fix turns the crash into both subagents completing
+cleanly. **Verified by reverting** and watching the new test fail with
+the literal old bug's own text reproducing itself in the assertion
+failure: `FileNotFoundError: [Errno 2] No such file or directory:
+'.../transcript.jsonl'`. 2 new tests, 694 -> 696 Python tests, all
+passing (including the retention-cap test this fix's own off-by-one
+nearly broke). `ruff check`/`format --check` clean. `docs/agent-loop.md`
+gained a new subsection directly under the original transcript-leak
+fix, the one this is a much-later sweep of.
+
+**Six consecutive rounds now (46-51)** have found real bugs by
+examining code shipped in the last one-to-several rounds — including,
+this round, a bug in the fix for the previous round's bug, caught by
+this project's own existing test suite rather than a fresh Explore
+sweep. Worth naming explicitly: this is the second time in two rounds
+that revert-and-verify / the existing suite caught a real regression in
+a fix-in-progress before it ever shipped (round 50 didn't have this
+shape, but round 51's own off-by-one is a clean instance) — the
+project's testing discipline is pulling weight here, not just finding
+bugs but catching bugs IN the bug fixes themselves.
+
+**Next:** the completeness-audit backlog remains at three items needing
+external-dependency/scope decisions from the author (a code-execution
+sandbox tool, web search, image generation). The three infra-blocked
+items remain deferred (Tauri `csp: null`, RL harness sandboxing,
+inference batching); the quantization/`Budget` NaN-validation and
+explicit-partial-`Budget` gaps remain real-but-unreachable. No further
+deferred findings remain open from rounds 49-50's sweeps — the next
+round should give the `.active`-marker mechanism itself (and
+`spawn_subagent`'s broader concurrency surface) a dedicated fresh-eyes
+sweep, per this project's own now-standing first move.

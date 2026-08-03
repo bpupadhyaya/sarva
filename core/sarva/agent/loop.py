@@ -133,8 +133,24 @@ def _prune_old_runs(run_root: Path, keep: int) -> None:
         return
     if len(run_dirs) <= keep:
         return
-    run_dirs.sort(key=lambda p: p.stat().st_mtime)
-    for old_dir in run_dirs[: len(run_dirs) - keep]:
+    # Never prune a directory whose run is still genuinely in flight --
+    # see `AgentLoop.run`'s own `.active` marker above for the real bug
+    # this guards against. `keep` still bounds the TOTAL directory count
+    # (active + finished) the same as before -- a first attempt at this
+    # fix compared `keep` against only the non-active count, which made
+    # the currently-being-created directory (always active at this exact
+    # point, since the wrapper marks it before calling in here) invisible
+    # to its own retention math, silently growing steady-state disk usage
+    # to keep+1 instead of keep (caught immediately by this file's own
+    # pre-existing retention-cap test going from 3 to 4). Only the actual
+    # REMOVAL set is restricted to finished (non-active) directories --
+    # if too few of those exist to reach `keep`, the active ones are left
+    # alone and total retention temporarily exceeds `keep` rather than
+    # ever deleting something still in use; it self-corrects once they
+    # finish.
+    prunable = [p for p in run_dirs if not (p / ".active").exists()]
+    prunable.sort(key=lambda p: p.stat().st_mtime)
+    for old_dir in prunable[: len(run_dirs) - keep]:
         shutil.rmtree(old_dir, ignore_errors=True)
 
 
@@ -198,6 +214,56 @@ class AgentLoop:
         return [t.spec for t in self._tools.values()]
 
     async def run(
+        self,
+        task: str,
+        history: list[Message] | None = None,
+        model_override: str | None = None,
+        extra_content: list[ContentBlock] | None = None,
+        transcript_out: list[Message] | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Thin wrapper around `_run_impl` that marks this run's directory
+        "active" for the wrapper's entire lifetime -- a real bug found by
+        giving `_prune_old_runs` (above) its own fresh-eyes sweep one round
+        later: concurrent subagents spawned from the same parent share one
+        `run_root/subagents/` directory (see `spawn_subagent` below), and
+        each subagent's own `run()` independently prunes THAT shared
+        directory right after creating its own run_dir -- purely by mtime,
+        with no concept of "still running." Confirmed live with
+        `_MAX_RETAINED_RUNS` lowered the same way this project's own retention
+        test already does: a second, still-in-flight sibling subagent's run_dir
+        (older by mtime, since it started first but was doing more real work)
+        got deleted out from under it while its own transcript was still being
+        written. A `.active` marker file, created here before `_run_impl` ever
+        starts and removed in `finally` however the run ends (success,
+        exception, or the caller closing the generator early), lets pruning
+        skip any directory genuinely still in use -- regardless of which
+        level (a top-level run or a nested subagent) created it, and
+        regardless of how many concurrent siblings share the directory.
+        `_prune_old_runs` still bounds unbounded growth of directories no
+        one is using; it just no longer treats "hasn't been touched
+        recently" as synonymous with "safe to delete." """
+        run_id = run_id or uuid.uuid4().hex[:12]
+        run_dir = Path(self._run_root) / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        active_marker = run_dir / ".active"
+        active_marker.touch()
+        try:
+            async for event in self._run_impl(
+                task,
+                history=history,
+                model_override=model_override,
+                extra_content=extra_content,
+                transcript_out=transcript_out,
+                session_id=session_id,
+                run_id=run_id,
+            ):
+                yield event
+        finally:
+            active_marker.unlink(missing_ok=True)
+
+    async def _run_impl(
         self,
         task: str,
         history: list[Message] | None = None,

@@ -63,6 +63,53 @@ Verified by reverting and watching the new test fail with
 so it doesn't need to actually run 200+ turns to prove pruning happens.
 All 30 pre-existing agent-loop tests pass unchanged.
 
+### Much later, that same pruning logic deleted a still-running subagent's directory out from under it
+
+Several rounds later, once subagent fan-out existed (see the chapter
+below), giving `_prune_old_runs` its own fresh-eyes sweep — the same
+lens that had just found a budget-starvation regression in the
+concurrent `delegate_task` fix immediately above this one in the
+project's own history — surfaced a genuinely separate bug with the
+same root shape: concurrent subagents spawned from one parent share a
+single `run_root/subagents/` directory (`spawn_subagent`'s own
+`sub_run_root`, below), and each subagent's own `run()` independently
+called `_prune_old_runs` on that *shared* directory right after
+creating its own run_dir — purely by mtime, with zero concept of
+"still running." Confirmed live with `_MAX_RETAINED_RUNS` lowered
+(matching this file's own retention-cap test above, so this doesn't
+need 200+ real subagents to trigger): a slower sibling's still-in-flight
+run_dir got deleted by a faster sibling's own prune call moments later
+— worse than a clean error, the slower subagent then crashed with a
+raw, uncaught `FileNotFoundError` trying to append to a transcript file
+whose parent directory no longer existed.
+
+Fixed with a `.active` marker file: `AgentLoop.run()` is now a thin
+wrapper around the actual generator body (renamed `_run_impl`) that
+creates the marker in the run's own directory before `_run_impl` ever
+starts and removes it in a `finally` block however the run ends —
+success, an exception, or the caller closing the generator early.
+`_prune_old_runs` now excludes any directory carrying that marker from
+its removal candidates, regardless of level (a top-level run or a
+nested subagent) or how many concurrent siblings share the directory —
+while `keep` still bounds the *total* directory count the same way it
+always did, so the retention window's steady-state size is unchanged.
+**A real off-by-one was caught by the project's own pre-existing
+retention-cap test immediately after the first version of this fix**:
+comparing `keep` against only the *non-active* count made the
+currently-being-created directory (always active at that exact instant,
+since the wrapper marks it before calling in) invisible to its own
+retention math, silently growing steady-state disk usage to `keep + 1`
+instead of `keep` — caught by that pre-existing test going from 3 to 4,
+fixed by keeping `keep` compared against the total count while still
+only ever *removing* from the non-active pool. Verified live the fix
+turns the crash into two subagents completing cleanly under a slow/fast
+timing split designed to trigger exactly this interleaving. Verified by
+reverting and watching the new test fail with the literal old bug's own
+`FileNotFoundError` text reproducing itself in the assertion failure.
+2 new tests, 696 total, all pre-existing tests (including the
+retention-cap test this fix's own off-by-one nearly broke) pass
+unchanged.
+
 ## Tool use: concurrent, typed, gated by one policy
 
 A `Tool` is a small, explicit contract:

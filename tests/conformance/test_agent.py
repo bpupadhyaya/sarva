@@ -1129,6 +1129,113 @@ async def test_concurrent_delegate_task_calls_do_not_starve_each_other_under_a_d
     assert run_done.state == AgentState.DONE
 
 
+class _TwoSpawnWithExplicitBudgetsTool:
+    """Calls ctx.spawn_subagent TWICE concurrently, each with an explicit
+    small budget — isolates the run_dir-pruning question below from the
+    default-budget starvation fix verified above."""
+
+    spec = ToolSpec(
+        name="two_spawn",
+        description="spawn two subagents concurrently with explicit budgets",
+        input_schema={"type": "object", "properties": {}},
+        destructive=False,
+    )
+
+    async def run(self, args, ctx):
+        results = await asyncio.gather(
+            ctx.spawn_subagent(
+                "subtask A",
+                budget=Budget(
+                    max_model_calls=5, max_total_tokens=100, max_wall_seconds=5.0, max_cost_usd=1.0
+                ),
+            ),
+            ctx.spawn_subagent(
+                "subtask B",
+                budget=Budget(
+                    max_model_calls=5, max_total_tokens=100, max_wall_seconds=5.0, max_cost_usd=1.0
+                ),
+            ),
+        )
+        ok = all(r.state == AgentState.DONE for r in results)
+        return ToolResultBlock(
+            tool_call_id="",
+            content=[TextBlock(text=f"ok={ok} A={results[0].state} B={results[1].state}")],
+        )
+
+
+class _SlowThenFastSubtaskProvider:
+    """First real call spawns two concurrent subagents. Subtask A's own
+    turn deliberately takes much longer than subtask B's — A is still
+    mid-run (its own run_dir not yet cleaned up) when B's run() creates
+    its own sibling run_dir and prunes the shared subagents/ directory,
+    the exact interleaving needed to trigger cross-sibling deletion."""
+
+    name = "mock"
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    async def generate(self, request):
+        self.n += 1
+        text_blob = " ".join(getattr(b, "text", "") for m in request.messages for b in m.content)
+        if self.n == 1:
+            call = ToolCallBlock(id="t1", name="two_spawn", arguments={})
+            yield ToolCallEvent(call=call)
+            yield DoneEvent(
+                stop_reason=StopReason.TOOL_USE,
+                message=Message(role="assistant", content=[call]),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+            return
+        await asyncio.sleep(0.2 if "subtask A" in text_blob else 0.01)
+        yield DoneEvent(
+            stop_reason=StopReason.END_TURN,
+            message=Message(role="assistant", content=[TextBlock(text="done")]),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_pruning_never_deletes_a_still_running_siblings_run_dir(run_root, monkeypatch):
+    # A real bug found by giving _prune_old_runs its own fresh-eyes sweep
+    # one round after it shipped: concurrent subagents spawned from the
+    # same parent share one run_root/subagents/ directory, and each
+    # subagent's own run() independently prunes that SHARED directory
+    # right after creating its own run_dir -- purely by mtime, with no
+    # concept of "still running." Confirmed live before the fix: with
+    # _MAX_RETAINED_RUNS lowered (so this test doesn't need 200+ real
+    # runs), a slower sibling's still-in-flight run_dir got deleted by a
+    # faster sibling's own prune call, and the slower one then crashed
+    # with a raw, uncaught FileNotFoundError trying to append to a
+    # transcript file whose parent directory no longer existed.
+    import sarva.agent.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "_MAX_RETAINED_RUNS", 1)
+
+    provider = _SlowThenFastSubtaskProvider()
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_TwoSpawnWithExplicitBudgetsTool()],
+        budget=Budget(
+            max_model_calls=1000,
+            max_total_tokens=2_000_000,
+            max_wall_seconds=3600.0,
+            max_cost_usd=100.0,
+        ),
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("spawn two subagents")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert finished[0].result.is_error is False, finished[0].result.content[0].text
+    assert "ok=True" in finished[0].result.content[0].text
+
+
 @pytest.mark.asyncio
 async def test_delegate_task_rejects_an_empty_task_string(run_root):
     call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "   "})
