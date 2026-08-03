@@ -83,6 +83,59 @@ async def test_connect_stdio_mcp_server_with_no_env_leaves_the_var_unset(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_every_mcp_tool_is_marked_destructive_regardless_of_what_it_does():
+    # A real bug found by giving this module its own fresh-eyes sweep:
+    # ToolSpec.destructive defaults to False, and McpToolAdapter never
+    # set it, so every MCP-provided tool -- arbitrary, remote, unaudited
+    # code -- silently bypassed AgentLoop's own confirm-before-
+    # destructive-action gate. Every tool here (echo/fail/env_var) is
+    # genuinely non-destructive in this fixture server's own
+    # implementation, which is exactly the point: MCP's own
+    # `destructiveHint` annotation is explicitly documented as untrusted
+    # ("clients should never make tool use decisions based on
+    # ToolAnnotations received from untrusted servers"), so this
+    # deliberately does NOT read that hint -- every MCP tool is
+    # destructive unconditionally, regardless of what it claims or
+    # actually does.
+    async with _connect() as session:
+        tools = await list_mcp_tools(session)
+    assert tools  # sanity: the fixture server really did report tools
+    for tool in tools:
+        assert tool.spec.destructive is True, tool.spec.name
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_goes_through_the_destructive_confirmation_gate(tmp_path):
+    # The real, end-to-end proof the flag above actually does something:
+    # a confirm policy that refuses everything must be consulted before
+    # an MCP tool call runs, and the loop must honor a refusal exactly
+    # as it would for any other destructive builtin.
+    run_root = tmp_path / "runs"
+    call = ToolCallBlock(id="a", name="echo", arguments={"text": "should be blocked"})
+    provider = MockProvider(script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="done")])
+
+    async def refuse_everything(call):
+        return False
+
+    async with _connect() as session:
+        tools = await list_mcp_tools(session)
+        loop = AgentLoop(
+            router=_text_only_router(),
+            providers={"mock": provider},
+            tools=tools,
+            confirm=refuse_everything,
+            run_root=str(run_root),
+        )
+        events = [e async for e in loop.run("echo something through MCP")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0].result.is_error is True
+    assert "declined" in finished[0].result.content[0].text.lower()
+    shutil.rmtree(run_root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_call_tool_error_propagates(tmp_path):
     async with _connect() as session:
         tools = await list_mcp_tools(session)

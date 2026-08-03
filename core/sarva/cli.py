@@ -460,6 +460,44 @@ async def _run(
                             f"{escape(repr(server_cmd))}: {escape(str(detail))}[/red]"
                         )
                         raise typer.Exit(1) from e
+                    # A real bug found by actually connecting a real,
+                    # official, unmodified MCP server (the filesystem
+                    # server the --mcp-server help text itself names as
+                    # an example) and confirming this exact scenario
+                    # live: `AgentLoop.__init__` builds its tool dispatch
+                    # table as `{t.spec.name: t for t in tools}` -- a
+                    # LATER tool with the same name silently replaces an
+                    # earlier one. That server exports tools literally
+                    # named `read_file`/`write_file`/`edit_file`, colliding
+                    # with Sarva's own builtins of the same name -- and
+                    # since `write_file`/`edit_file` are the two builtins
+                    # marked `destructive=True` specifically so the
+                    # confirm-gate asks before running them, a colliding
+                    # MCP tool silently took over the name and the
+                    # confirmation prompt never fired again for the rest
+                    # of the run, confirmed live with a `confirm` callback
+                    # that asserts if it's ever invoked -- it wasn't,
+                    # and the (fake, in the repro) MCP server's own write
+                    # ran unconfirmed. Refusing outright rather than
+                    # silently keeping the first-registered tool: which
+                    # of the two a user actually wanted is genuinely
+                    # ambiguous, and guessing wrong in either direction
+                    # is the wrong failure mode for a security-relevant
+                    # gate -- the same "reject, don't guess" discipline
+                    # every other validation in this file already follows.
+                    existing_names = {t.spec.name for t in tools}
+                    colliding = sorted({t.spec.name for t in mcp_tools} & existing_names)
+                    if colliding:
+                        console.print(
+                            f"[red]MCP server {escape(repr(server_cmd))} exports "
+                            f"tool name(s) {escape(', '.join(colliding))} that "
+                            "collide with an already-registered tool (a builtin, "
+                            "or an earlier --mcp-server) -- refusing to silently "
+                            "let one replace the other, since that could bypass "
+                            "a destructive-tool confirmation prompt the original "
+                            "was relying on.[/red]"
+                        )
+                        raise typer.Exit(1)
                     # escape(): tool names come from the connected MCP
                     # server's own response -- for an http(s):// server
                     # that's a remote, untrusted source (a malicious/buggy

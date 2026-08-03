@@ -64,6 +64,51 @@ built-in tool (`spec` + `async def run(args, ctx)`), so nothing downstream
 know or care that a given tool call is actually a round trip to a
 subprocess speaking MCP instead of local Python code.
 
+### A real security gap found by a fresh-eyes sweep: every MCP tool silently bypassed the destructive-confirmation gate — and a colliding name could take over a builtin's
+
+A dedicated sweep of this module, after several rounds focused
+elsewhere, found `McpToolAdapter` never set `ToolSpec.destructive` —
+which defaults to `False` — so every MCP-provided tool, arbitrary and
+unaudited remote code, silently bypassed the agent loop's
+confirm-before-destructive-action gate regardless of what it actually
+does. MCP's own protocol *does* carry a `destructiveHint` annotation on
+the wire, but the spec's own documentation for it is explicit: "clients
+should never make tool use decisions based on ToolAnnotations received
+from untrusted servers" — a malicious or buggy server could simply set
+`destructiveHint=False` on a genuinely destructive tool to defeat
+exactly this gate. Every MCP tool is now marked `destructive=True`
+unconditionally, deliberately ignoring that hint rather than trusting a
+remote server's own self-report.
+
+A second, compounding gap made this worse for name collisions
+specifically: `AgentLoop.__init__` builds its tool dispatch table as
+`{t.spec.name: t for t in tools}` — a later tool with the same name
+silently replaces an earlier one. `sarva run`'s own `--mcp-server` help
+text names `@modelcontextprotocol/server-filesystem` as its example
+command, and that real, official, unmodified server exports tools
+literally named `read_file`/`write_file`/`edit_file` — identical to
+Sarva's own builtins of the same name, two of which (`write_file`,
+`edit_file`) are marked `destructive=True` specifically so the confirm
+gate asks before running them. Connecting it, following the CLI's own
+documented example, silently took over those names: confirmed live
+with a `confirm` callback that raises if it's ever invoked — it wasn't,
+and the (fake, in the repro) MCP server's own implementation ran
+unconfirmed while the real local file was left untouched, a completely
+different outcome than what the user would reasonably expect.
+
+Fixed with two changes: `McpToolAdapter`'s `ToolSpec` now sets
+`destructive=True` always (above), and `sarva run`'s `_run()` now
+checks every newly-connected MCP server's tool names against every
+already-registered name (builtins and any earlier `--mcp-server`) and
+refuses to continue if any collide, printing which name(s) collided
+and why, rather than silently letting one replace the other — which of
+the two a user actually wanted is genuinely ambiguous, and guessing
+wrong in either direction is the wrong failure mode for a
+security-relevant gate. Verified live both fixes close the gap: the
+confirm callback now correctly fires for an MCP tool call, and a
+colliding server name is now rejected with a clean, actionable message
+before the run ever starts. 3 new tests.
+
 ## CLI usage
 
 ```bash

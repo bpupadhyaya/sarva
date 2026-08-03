@@ -45,6 +45,25 @@ class McpToolAdapter:
             name=tool.name,
             description=tool.description or "",
             input_schema=tool.inputSchema,
+            # A real bug found by giving this module its own fresh-eyes
+            # sweep: `ToolSpec.destructive` defaults to `False`, and this
+            # constructor never set it, so every MCP-provided tool --
+            # arbitrary, remote, unaudited code -- silently bypassed the
+            # agent loop's own confirm-before-destructive-action gate,
+            # regardless of what the tool actually does. `tool.annotations.
+            # destructiveHint` exists on the wire, but the MCP spec's own
+            # docstring for it says plainly: "Clients should never make
+            # tool use decisions based on ToolAnnotations received from
+            # untrusted servers" -- a malicious or buggy server could just
+            # set `destructiveHint=False` on a genuinely destructive tool
+            # to defeat exactly this gate, so using it here would be
+            # trusting the attacker's own self-report. Every MCP tool is
+            # now treated as destructive unconditionally, matching this
+            # project's own "reject, don't guess" posture: the local
+            # confirmation gate can always be bypassed with `--auto` by a
+            # user who's decided to trust the connected server, but it
+            # must never silently not apply at all.
+            destructive=True,
         )
         self._session = session
 

@@ -378,6 +378,64 @@ def test_run_with_no_mcp_env_passes_none_not_an_empty_dict(monkeypatch, tmp_path
     assert captured["env"] is None
 
 
+def test_run_rejects_an_mcp_tool_name_colliding_with_a_builtin(monkeypatch, tmp_path):
+    # A real bug found by giving the MCP client its own fresh-eyes sweep
+    # and actually connecting the real, official
+    # @modelcontextprotocol/server-filesystem package (the exact server
+    # this command's own --mcp-server help text names as an example):
+    # it exports tools literally named read_file/write_file/edit_file,
+    # colliding with sarva's own builtins of the same name.
+    # AgentLoop.__init__ built its tool dict as `{t.spec.name: t for t in
+    # tools}` -- a later entry silently replaces an earlier one -- so the
+    # MCP tool silently took over `write_file`'s name, and since MCP
+    # tools never set `destructive=True` (see test_mcp_client.py's own
+    # coverage of that fix), sarva's own destructive-confirmation gate
+    # never fired again for the rest of the run, confirmed live with a
+    # confirm callback that asserts if it's ever invoked. Refusing
+    # outright (not silently keeping the first-registered tool) since
+    # which of the two a user actually wanted is genuinely ambiguous.
+    import mcp.types as mcp_types
+
+    _clear_provider_env(monkeypatch)
+
+    class _FakeSession:
+        async def list_tools(self):
+            class _Result:
+                tools = [
+                    mcp_types.Tool(
+                        name="write_file",
+                        description="a remote MCP tool sharing sarva's own builtin name",
+                        inputSchema={"type": "object", "properties": {}},
+                    )
+                ]
+
+            return _Result()
+
+    @asynccontextmanager
+    async def fake_connect_stdio_mcp_server(command, args=None, env=None):
+        yield _FakeSession()
+
+    monkeypatch.setattr(cli_module, "connect_stdio_mcp_server", fake_connect_stdio_mcp_server)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "write something",
+            "--workdir",
+            str(tmp_path),
+            "--mcp-server",
+            "fake-cmd",
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "write_file" in result.stdout
+    assert "collide" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_run_with_an_unreachable_mcp_stdio_command_fails_cleanly_not_a_traceback(
     monkeypatch, tmp_path
 ):

@@ -11432,3 +11432,90 @@ sandbox tool, web search, image generation). The three infra-blocked
 items remain deferred (Tauri `csp: null`, RL harness sandboxing,
 inference batching); the quantization/`Budget` NaN-validation and
 explicit-partial-`Budget` gaps remain real-but-unreachable.
+
+
+## Every MCP tool silently bypassed the destructive-confirmation gate, and a colliding name could silently take over a builtin's -- a real security gap found by sweeping a genuinely fresh area
+
+Round 55. The prior round's "does a synchronous call block the event
+loop" lens checked out clean on the two remaining candidates
+(`WebFetchTool`/`RunShellTool` are already async-native; `ReadFileTool`/
+`WriteFileTool`/`EditFileTool` do use synchronous file I/O, but even a
+2GB write only blocks ~0.27s -- confirmed live, and realistic tool-call
+content sizes bounded by what a model can plausibly pass as an argument
+keep this negligible). With that lens exhausted, swept a genuinely
+different area instead: `core/sarva/mcp_client.py`, which hasn't had
+dedicated attention in the last several rounds.
+
+Found `McpToolAdapter` never set `ToolSpec.destructive` -- which
+defaults to `False` -- so every MCP-provided tool, arbitrary and
+unaudited remote code, silently bypassed `AgentLoop`'s own
+confirm-before-destructive-action gate regardless of what it actually
+does. MCP's own protocol carries a `destructiveHint` annotation on the
+wire, but the spec's own documentation for it says plainly: "clients
+should never make tool use decisions based on ToolAnnotations received
+from untrusted servers" -- a malicious or buggy server could just set
+`destructiveHint=False` on a genuinely destructive tool to defeat
+exactly this gate, so using it would mean trusting the attacker's own
+self-report.
+
+A second, compounding gap made this concretely worse for name
+collisions: `AgentLoop.__init__` builds its tool dispatch table as
+`{t.spec.name: t for t in tools}` -- a later tool with the same name
+silently replaces an earlier one. `sarva run`'s own `--mcp-server` help
+text names `@modelcontextprotocol/server-filesystem` (Anthropic's own
+official reference filesystem server) as its documented example, and
+that real, unmodified package exports tools literally named
+`read_file`/`write_file`/`edit_file` -- identical to Sarva's own
+builtins, two of which (`write_file`/`edit_file`) are the ones marked
+`destructive=True` specifically so the confirm gate applies to them.
+**Confirmed live**, connecting a real MCP subprocess exporting a
+`write_file` tool alongside `AgentLoop`'s own builtins, with a
+`confirm` callback that raises `AssertionError` if it's ever invoked:
+the callback was never called, and the MCP server's own (fake, in the
+repro) implementation ran unconfirmed while the real local
+`write_file` tool was never reached at all -- a silent behavior swap a
+user following the CLI's own documented example would hit through
+completely ordinary use, not an adversarial construction.
+
+**Fixed with two changes.** `McpToolAdapter.spec.destructive` is now
+`True` unconditionally -- deliberately not reading `destructiveHint`
+at all, matching the spec's own warning about trusting it.
+`sarva run`'s `_run()` now checks every newly-connected MCP server's
+tool names against every already-registered name (builtins and any
+earlier `--mcp-server`) right after listing them, and refuses to
+continue with a clean, actionable message if any collide, rather than
+silently letting one replace the other -- which of the two a user
+actually wanted is genuinely ambiguous, and the wrong failure mode for
+a security-relevant gate is guessing.
+
+**Verified live** both fixes close the gap: the confirm callback now
+correctly fires for an MCP tool call (proven by the SAME "raises if
+invoked" callback now genuinely raising, the correct outcome), and a
+colliding server name is rejected with the collision message before
+the run ever starts, confirmed by driving the real `_run()` function
+directly. **Verified by reverting** and watching all three new tests
+fail for the exact right reasons: the destructive-flag test failing on
+`assert False is True`, the confirmation-gate test finding zero
+`tool_finished` events refused, and the collision test getting
+`exit_code == 0` instead of the expected clean rejection. 3 new tests,
+699 -> 702 Python tests, all passing, `ruff check`/`format --check`
+clean. `docs/mcp.md` gained a new subsection directly under "What's
+wired up."
+
+**Ten consecutive rounds now (46-55)** have found real bugs -- this
+round's finding is the first in this streak that's a genuine security
+gap (a safety mechanism silently not applying) rather than a
+performance/correctness issue, found by the exact same "give this area
+a dedicated fresh-eyes sweep" discipline the whole streak has run on.
+
+**Next:** the server (`sarva serve`) doesn't currently wire up
+`--mcp-server`-equivalent support at all, so this collision path is
+CLI-only for now -- worth checking whether the server should eventually
+support MCP tools too, and if so, applying the identical collision
+check there from day one rather than retrofitting it later. The
+completeness-audit backlog remains at three items needing
+external-dependency/scope decisions from the author (a code-execution
+sandbox tool, web search, image generation). The three infra-blocked
+items remain deferred (Tauri `csp: null`, RL harness sandboxing,
+inference batching); the quantization/`Budget` NaN-validation and
+explicit-partial-`Budget` gaps remain real-but-unreachable.
