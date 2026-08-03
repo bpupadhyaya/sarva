@@ -492,12 +492,9 @@ named 'sarva.agent.subagents'`) — the strongest possible confirmation
 that this is genuinely new code, not a config flip. 5 new tests, all
 pre-existing agent-loop tests pass unchanged.
 
-**Still honestly not built:** the "verifier subagent" pattern — a
-second agent whose job is specifically to critique/check the first
-one's work — is a separate, bigger design decision (what triggers it,
-what "verified" means, how a rejection feeds back) left for a future
-milestone rather than bolted on as a variant of fan-out just because
-the mechanics are related.
+The design doc's second named pattern, "verifier subagent," is closed
+further down this chapter, once the interface correction below is
+covered first.
 
 ### `spawn_subagent`'s real shape was already frozen in spec-03 — a same-session correction, not a second milestone
 
@@ -550,6 +547,55 @@ feature) and watching both new tests fail with the exact right reason:
 'task_class'` — the old closure genuinely couldn't accept what the
 frozen spec requires. 2 more new tests, all pre-existing tests
 (including the original 5 subagent tests) pass unchanged.
+
+## Verifier subagent: `verify=True`, an advisory check, not a hard gate
+
+The design doc's second named agent-orchestration pattern, closed in
+the same milestone as the correction above. Unlike `delegate_task`,
+verification isn't something a model chooses to invoke — it's a
+loop-level opt-in (`AgentLoop(..., verify=True)`, the same posture as
+`degraders`), reachable from `sarva chat --verify`, `sarva run
+--verify`, and both `/chat`/`/ws/chat`'s new `verify` request field.
+
+When the main loop reaches a candidate `END_TURN` with `verify=True`,
+it calls the SAME `spawn_subagent` primitive `delegate_task` uses
+(`task_class=TaskClass.SUBTASK`, no special tool restriction — the
+verifier gets the same tools any subagent does, since the existing
+confirm-gating discipline already covers destructive calls it might
+make) with a prompt asking it to judge the candidate answer against the
+original task, prefixing its response with `VERIFIED` or `REJECTED`.
+This decision has to happen BEFORE `transition(AgentState.DONE)`, not
+after: `DONE` has no legal outgoing transition in the frozen `LEGAL`
+table (it's terminal), so rejecting after already transitioning there
+would trip `transition()`'s own legality assertion — the check runs
+while `state` is still `CALLING_MODEL`, which legally transitions to
+either `DONE` or `FAILED`.
+
+**Deliberately advisory, not a hard gate, for this first slice:** only
+an unambiguous `REJECTED` verdict turns the run into `FAILED` (with the
+verifier's own reason in `StateChangedEvent.detail`, the same "give the
+real reason" pattern every other clean-failure path in this loop
+already uses). Every other outcome — the verifier subagent itself
+fails/refuses/runs out of budget, or its response doesn't
+unambiguously start with `REJECTED` — is treated as a pass-through: the
+original candidate answer stands, completely unchanged. A flaky or
+unavailable verifier can never take down an otherwise-working run. A
+stricter mode (ambiguous = reject) is a real, legitimate alternative
+design, not implemented here — named as a possible future refinement,
+not silently assumed unnecessary.
+
+**Verified end to end with `MockProvider`, covering both outcomes and
+the fail-open cases:** an approving verifier leaves the original answer
+and the reported spend correctly includes the verifier's own real
+model call; an unambiguous rejection produces `FAILED` with the
+verifier's reason in `detail` and `final_message=None` (matching the
+existing convention every other `FAILED` path already uses); a refused
+or ambiguous verifier never blocks completion. Reverting produced
+`TypeError: AgentLoop.__init__() got an unexpected keyword argument
+'verify'` on every test that passed it. 5 new agent-loop tests plus 3
+new server tests (REST + WebSocket wiring, proving the request field
+genuinely reaches `AgentLoop`, not just that it's accepted as valid
+JSON), every pre-existing test unaffected.
 
 ## Build it yourself
 

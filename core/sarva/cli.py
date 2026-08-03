@@ -206,12 +206,22 @@ def chat(
         help="Remember this conversation under a name (loads prior history, "
         "saves after the turn). Omit for a one-shot, unremembered chat.",
     ),
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help="Spawn a subagent to check the final answer against the task before "
+        "accepting it; an unambiguous rejection turns the run into a clean "
+        "failure instead of a wrong-but-confident answer. Advisory, not a hard "
+        "gate -- a verifier that can't run at all never blocks a real answer.",
+    ),
 ) -> None:
     """One-shot chat — no tools, single turn."""
-    asyncio.run(_chat(message, image, model, session))
+    asyncio.run(_chat(message, image, model, session, verify))
 
 
-async def _chat(message: str, image: Path | None, model: str | None, session: str | None) -> None:
+async def _chat(
+    message: str, image: Path | None, model: str | None, session: str | None, verify: bool
+) -> None:
     store = SessionStore()
     final_state = None
     # The whole load-through-save span of the turn is inside the session
@@ -234,6 +244,7 @@ async def _chat(message: str, image: Path | None, model: str | None, session: st
                 tools=[],
                 confirm=always_allow,
                 degraders=default_degraders(),
+                verify=verify,
             )
             last_detail: str | None = None
             transcript: list[Message] = []
@@ -329,9 +340,19 @@ def run(
         "replacement of it. Applies to every stdio server in this invocation "
         "alike, the same named per-run (not per-server) limit --mcp-header has.",
     ),
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help="Spawn a subagent to check the final answer against the task before "
+        "accepting it; an unambiguous rejection turns the run into a clean "
+        "failure instead of a wrong-but-confident answer. Advisory, not a hard "
+        "gate -- a verifier that can't run at all never blocks a real answer.",
+    ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
-    asyncio.run(_run(task, workdir, image, model, auto, session, mcp_server, mcp_header, mcp_env))
+    asyncio.run(
+        _run(task, workdir, image, model, auto, session, mcp_server, mcp_header, mcp_env, verify)
+    )
 
 
 async def _confirm_prompt(call: Any) -> bool:
@@ -364,6 +385,7 @@ async def _run(
     mcp_servers: list[str],
     mcp_headers: list[str],
     mcp_envs: list[str],
+    verify: bool,
 ) -> None:
     store = SessionStore()
     final_state = None
@@ -456,6 +478,7 @@ async def _run(
                     confirm=confirm,
                     workdir=workdir,
                     degraders=default_degraders(),
+                    verify=verify,
                 )
                 last_detail: str | None = None
                 transcript: list[Message] = []

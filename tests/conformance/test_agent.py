@@ -1080,3 +1080,112 @@ async def test_subagent_transcript_is_nested_under_the_parents_own_run_dir(run_r
     assert sub_run_dir.is_relative_to(parent_run_dir)
     assert sub_run_dir.parent.name == "subagents"
     assert (sub_run_dir / "transcript.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_verify_passes_through_an_approved_final_answer_unchanged(run_root):
+    # The design doc's second named-but-long-unbuilt agent-orchestration
+    # pattern: opt-in (verify=True) automatic verification of a candidate
+    # final answer before the run actually completes. A verifier that
+    # approves must leave the original candidate answer completely
+    # untouched -- the run still ends DONE with the SAME text the main
+    # loop actually produced, not the verifier's own commentary.
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(text="the real final answer"),
+            ScriptedTurn(text="VERIFIED: this genuinely answers the question"),
+        ]
+    )
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root, verify=True)
+
+    events = [e async for e in loop.run("what's the answer?")]
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.DONE
+    assert run_done[-1].final_message.text() == "the real final answer"
+    # The verifier's own real model call is genuinely counted, not free.
+    assert run_done[-1].spend.model_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_a_final_answer_the_verifier_disagrees_with(run_root):
+    # The one case that actually changes the outcome: an unambiguous
+    # REJECTED verdict turns a candidate END_TURN success into a real
+    # FAILED terminal state, with the verifier's own reason surfaced in
+    # StateChangedEvent.detail -- the same "give the real reason" pattern
+    # every other clean-failure path in this loop already uses.
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(text="a wrong or incomplete answer"),
+            ScriptedTurn(text="REJECTED: this does not actually answer what was asked"),
+        ]
+    )
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root, verify=True)
+
+    events = [e async for e in loop.run("what's the answer?")]
+
+    state_events = [e for e in events if e.type == "state_changed"]
+    assert state_events[-1].state == AgentState.FAILED
+    assert "REJECTED" in state_events[-1].detail
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.FAILED
+    assert run_done[-1].final_message is None
+
+
+@pytest.mark.asyncio
+async def test_verify_is_advisory_and_never_blocks_completion_when_the_verifier_itself_fails(
+    run_root,
+):
+    # A verifier that can't produce a real verdict at all (refused,
+    # crashed, ran out of budget -- anything other than a real DONE with
+    # an unambiguous REJECTED) must never block a real completed answer.
+    # This is a deliberate v1 scoping choice: verification is advisory,
+    # not a hard gate, so a flaky verifier can never take down an
+    # otherwise-working run.
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(text="the real final answer"),
+            ScriptedTurn(refuse=True),  # the verifier subagent itself fails
+        ]
+    )
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root, verify=True)
+
+    events = [e async for e in loop.run("what's the answer?")]
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.DONE
+    assert run_done[-1].final_message.text() == "the real final answer"
+
+
+@pytest.mark.asyncio
+async def test_verify_ambiguous_verdict_does_not_block_completion(run_root):
+    # Neither VERIFIED nor REJECTED as a prefix -- the same advisory,
+    # fail-open posture as a verifier that can't run at all.
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(text="the real final answer"),
+            ScriptedTurn(text="Looks fine to me, I guess."),
+        ]
+    )
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root, verify=True)
+
+    events = [e async for e in loop.run("what's the answer?")]
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.DONE
+    assert run_done[-1].final_message.text() == "the real final answer"
+
+
+@pytest.mark.asyncio
+async def test_verify_defaults_to_off(run_root):
+    # Every existing call site that doesn't pass verify=True must be
+    # completely unaffected -- no extra model call, no behavior change.
+    provider = MockProvider(script=[ScriptedTurn(text="the real final answer")])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+
+    events = [e async for e in loop.run("what's the answer?")]
+
+    run_done = [e for e in events if e.type == "run_done"]
+    assert run_done[-1].state == AgentState.DONE
+    assert run_done[-1].spend.model_calls == 1  # no verifier call happened

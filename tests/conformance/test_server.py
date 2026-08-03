@@ -248,6 +248,41 @@ def test_chat_with_an_unknown_model_fails_cleanly_with_a_detail_message(monkeypa
     assert "not-a-real-model" in body["detail"]
 
 
+def test_chat_with_verify_true_rejects_a_verifier_flagged_answer(monkeypatch):
+    # The REST counterpart to the CLI's --verify flag reaching AgentLoop's
+    # own verify=True constructor argument -- proves the request field
+    # genuinely threads through, not just that it's accepted as valid JSON.
+    _use_scripted_mock(
+        monkeypatch,
+        [
+            ScriptedTurn(text="a wrong or incomplete answer"),
+            ScriptedTurn(text="REJECTED: this does not actually answer what was asked"),
+        ],
+    )
+
+    resp = _client().post("/chat", json={"message": "hi", "verify": True})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert body["message"] is None
+    assert "REJECTED" in body["detail"]
+
+
+def test_chat_without_verify_never_spawns_a_verifier(monkeypatch):
+    # Default False: an ordinary chat must cost exactly one real model
+    # call, not two -- the same "existing behavior stays unaffected"
+    # guarantee the AgentLoop-level tests already establish, checked here
+    # too since this is a separate wiring path.
+    _use_capturing_mock(monkeypatch)
+
+    resp = _client().post("/chat", json={"message": "hi"})
+
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "done"
+    assert resp.json()["spend"]["model_calls"] == 1
+
+
 def test_chat_with_an_invalid_session_name_fails_cleanly_not_a_500(monkeypatch):
     # A real bug found by actually POSTing {"session": "bad name!"}:
     # SessionStore._sanitize() raises a plain ValueError, and nothing
@@ -457,6 +492,31 @@ def test_websocket_with_model_forces_that_exact_model(monkeypatch):
 
     assert provider.last_request is not None
     assert provider.last_request.model == "mock"
+
+
+def test_websocket_with_verify_true_rejects_a_verifier_flagged_answer(monkeypatch):
+    _use_scripted_mock(
+        monkeypatch,
+        [
+            ScriptedTurn(text="a wrong or incomplete answer"),
+            ScriptedTurn(text="REJECTED: this does not actually answer what was asked"),
+        ],
+    )
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "verify": True})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "failed"
+    state_changed_details = [
+        e["detail"] for e in events if e["type"] == "state_changed" and e.get("detail")
+    ]
+    assert any("REJECTED" in d for d in state_changed_details)
 
 
 def test_websocket_with_an_unknown_model_fails_cleanly_with_a_detail_frame(monkeypatch):

@@ -161,6 +161,7 @@ class AgentLoop:
         workdir: str = ".",
         run_root: str = ".sarva/runs",
         degraders: dict[Modality, Degrader] | None = None,
+        verify: bool = False,
     ):
         self._router = router
         self._providers: dict[str, Provider] = providers  # type: ignore[assignment]
@@ -181,6 +182,17 @@ class AgentLoop:
         # that tradeoff. See BUILD-JOURNAL.md for why this is separate
         # from T2's modality-aware *routing*.
         self._degraders = degraders or {}
+        # The design doc's second named-but-long-unbuilt agent-orchestration
+        # pattern (subagent fan-out was the first, see docs/agent-loop.md):
+        # a "verifier subagent" that checks a candidate final answer against
+        # the original task before the run actually completes. Opt-in, same
+        # posture as `degraders` -- every existing call site that doesn't
+        # pass this is completely unaffected. See the verification block
+        # inside `run()`'s END_TURN handling for the full scoping notes
+        # (advisory-only for this first slice: a verifier that can't run,
+        # times out, or gives an ambiguous verdict never blocks a real
+        # completed answer -- only an explicit REJECTED does).
+        self._verify = verify
 
     def _tool_specs(self) -> list[ToolSpec]:
         return [t.spec for t in self._tools.values()]
@@ -502,9 +514,51 @@ class AgentLoop:
             messages.append(done.message)
 
             if done.stop_reason == StopReason.END_TURN:
-                final_message = done.message
-                transition(AgentState.DONE)
-                yield await emit(StateChangedEvent(state=state))
+                # Verifier subagent (opt-in via `verify=True`), scoped
+                # deliberately narrow for a first real slice, matching this
+                # project's pattern elsewhere: ADVISORY, not a hard gate.
+                # A verifier that can't run at all (no budget left, its own
+                # FAILED/INTERRUPTED terminal state) or gives an ambiguous
+                # response (doesn't start with REJECTED) never blocks a
+                # real completed answer -- only an unambiguous REJECTED
+                # verdict does. This must run and decide BEFORE
+                # transition(DONE) below, not after: DONE has no legal
+                # outgoing transition in `LEGAL` (it's terminal), so
+                # rejecting after already transitioning there would trip
+                # `transition()`'s own legality assertion -- the decision
+                # has to happen while `state` is still CALLING_MODEL, which
+                # legally transitions to either DONE or FAILED.
+                reject_detail: str | None = None
+                if self._verify:
+                    verify_prompt = (
+                        "You are verifying whether an AI assistant's answer "
+                        "actually satisfies the user's original task. Respond "
+                        "with exactly one word first -- VERIFIED or REJECTED "
+                        "-- followed by a one-sentence reason.\n\n"
+                        f"Original task: {task}\n\n"
+                        f"Candidate answer: {done.message.text()}"
+                    )
+                    verify_result = await spawn_subagent(
+                        verify_prompt, task_class=TaskClass.SUBTASK
+                    )
+                    verify_text = (
+                        verify_result.final_message.text()
+                        if verify_result.final_message is not None
+                        else ""
+                    )
+                    if (
+                        verify_result.state == AgentState.DONE
+                        and verify_text.strip().upper().startswith("REJECTED")
+                    ):
+                        reject_detail = f"verifier rejected the final answer: {verify_text}"
+
+                if reject_detail is not None:
+                    transition(AgentState.FAILED)
+                    yield await emit(StateChangedEvent(state=state, detail=reject_detail))
+                else:
+                    final_message = done.message
+                    transition(AgentState.DONE)
+                    yield await emit(StateChangedEvent(state=state))
                 break
 
             if done.stop_reason == StopReason.MAX_TOKENS:

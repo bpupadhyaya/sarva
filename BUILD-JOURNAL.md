@@ -10264,3 +10264,100 @@ text again for anything else relevant before designing it fresh). The
 three infra-blocked items remain deferred (Tauri `csp: null`, RL
 harness sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gaps remain real-but-unreachable.
+
+
+## Verifier subagent: `verify=True`, the design doc's second named agent-orchestration pattern, closed as an advisory check
+
+Following the previous entry's own "Next" note (check spec-03 again
+before designing the verifier subagent -- done; spec-03 says nothing
+more specific about it than the design doc's own one-line "verifier
+subagent" mention, so this feature had real design latitude, unlike
+`spawn_subagent`'s interface). Built as a loop-level opt-in
+(`AgentLoop(..., verify=True)`), not a tool -- unlike `delegate_task`,
+verification isn't something a model chooses to invoke, it's automatic
+once opted into, so it doesn't fit the `Tool` protocol at all.
+
+When the main loop reaches a candidate `END_TURN`, `verify=True` calls
+the exact same `spawn_subagent` primitive `delegate_task` already uses
+(`task_class=TaskClass.SUBTASK`, the verifier gets the same tools any
+subagent does -- the existing confirm-gating discipline already covers
+anything destructive it might do, so there's no meaningful safety
+reason to curate a separate restricted tool subset) with a prompt
+asking it to judge the candidate answer against the original task,
+prefixed with `VERIFIED`/`REJECTED`. **A real state-machine
+correctness catch found while writing this, not shipped and found
+later:** the decision has to happen BEFORE `transition(AgentState.
+DONE)`, not after -- `DONE` has no legal outgoing transition in the
+frozen `LEGAL` table (terminal states have none), so rejecting after
+already transitioning there would trip `transition()`'s own legality
+assertion. Restructured so the branch decides FIRST (while `state` is
+still `CALLING_MODEL`, which legally transitions to either `DONE` or
+`FAILED`) and only calls `transition()` once, with the right target.
+
+**Deliberately advisory, not a hard gate, for this first slice:** only
+an unambiguous `REJECTED` verdict turns the run into `FAILED` (reason
+surfaced in `StateChangedEvent.detail`, the same pattern every other
+clean-failure path in this loop already uses). Every other outcome --
+the verifier subagent itself fails, refuses, runs out of budget, or
+gives an ambiguous response that doesn't start with `REJECTED` -- is a
+pass-through: the original candidate answer stands unchanged. Named
+directly as a real, considered trade-off: a stricter mode (ambiguous =
+reject) is a legitimate alternative design, not implemented here, not
+silently assumed unnecessary either.
+
+**Verified end to end with `MockProvider`, covering both outcomes and
+both fail-open paths:** an approving verifier leaves the original
+answer completely untouched and the reported spend correctly includes
+the verifier's own real model call (asserted as an exact total, not
+"greater than zero"); an unambiguous rejection produces `FAILED` with
+the verifier's own reason text in `detail` and `final_message=None`
+(matching the existing convention every other `FAILED` path already
+uses -- `MAX_TOKENS`/`REFUSAL` also leave `final_message` unset); a
+refused verifier subagent and an ambiguous-text verifier both correctly
+never block completion; the default (`verify=False`) leaves every
+existing call site completely unaffected, confirmed by the exact
+pre-existing spend (`model_calls == 1`, no extra call). 5 new
+agent-loop tests. Reverting produced `TypeError: AgentLoop.__init__()
+got an unexpected keyword argument 'verify'` on every test that passed
+it, and the one test that didn't pass `verify=True` correctly still
+passed either way (it's testing the always-true default-off behavior,
+not distinguishing the two code paths) -- noted honestly rather than
+treated as a gap in the revert-and-verify.
+
+**Wired into every real call site in the same milestone, not left
+stranded as a constructor-only feature** (this project's own established
+standard -- an unwired feature is treated as a real gap, e.g. `sarva
+doctor` sitting unbuilt for a while after being named in the repo
+diagram): `sarva chat --verify`, `sarva run --verify`, and both
+`/chat`/`/ws/chat` gained a `verify` field/flag threading straight to
+`AgentLoop`. 3 more tests (REST + WebSocket), genuinely proving the
+request field reaches `AgentLoop` (an unambiguous REJECTED verdict
+flows all the way through to a `failed` HTTP response / WS `run_done`
+frame), not just that the field is accepted as valid JSON. Reverting
+just the server/CLI wiring reproduced `'done' == 'failed'` assertion
+failures -- the verification never ran at all without the wiring, the
+correct failure signature.
+
+All 658 pre-existing tests plus the prior milestone's 653 pass
+unchanged throughout. 8 new tests total this milestone (5 agent-loop +
+3 server), 653 -> 661 Python tests. `ruff check`/`format --check`
+clean. `docs/agent-loop.md` gained a full new section, and the prior
+"still honestly not built" verifier-subagent paragraph was removed
+since it's no longer true.
+
+**Both of the design doc's named agent-orchestration patterns are now
+built:** subagent fan-out (`delegate_task`) and verifier subagent
+(`verify=True`), both built on the same underlying `spawn_subagent`
+primitive spec-03 had scaffolded via the previously-unused
+`AgentResult` type.
+
+**Next:** the three infra-blocked items remain genuinely deferred
+(Tauri `csp: null`, RL harness container/VM sandboxing, inference-
+request batching). The quantization and `Budget` NaN-validation gaps
+remain real-but-unreachable. With both design-doc-named agent-
+orchestration patterns now closed, the next round should either sweep
+the design doc/frozen specs once more for any other named-but-unbuilt
+surface not yet caught, or return to open-ended bug-hunting with a
+fresh lens -- the "repeated cost in a long-running process" lens from
+rounds 43-45 is fairly well-mined; a genuinely different angle is
+worth trying next.

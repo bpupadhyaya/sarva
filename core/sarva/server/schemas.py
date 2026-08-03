@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
     image_base64: str | None = None
     image_media_type: str | None = None
     model: str | None = None
+    verify: bool = False
 
 
 class ChatResponse(BaseModel):

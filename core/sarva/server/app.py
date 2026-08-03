@@ -214,6 +214,7 @@ def create_app() -> FastAPI:
                         tools=[],
                         confirm=always_allow,
                         degraders=default_degraders(),
+                        verify=req.verify,
                     )
                 except ConfigError as e:
                     # The /chat-specific counterpart to the global
@@ -369,6 +370,7 @@ def create_app() -> FastAPI:
             session = payload.get("session")
             auto = bool(payload.get("auto", False))
             model = payload.get("model")
+            verify = bool(payload.get("verify", False))
 
             async def ws_confirm(call: ToolCallBlock) -> bool:
                 # A real bug found by actually sending a malformed
@@ -456,6 +458,7 @@ def create_app() -> FastAPI:
                             tools=BUILTIN_TOOLS,
                             confirm=always_allow if auto else ws_confirm,
                             degraders=default_degraders(),
+                            verify=verify,
                         )
                     except ConfigError as e:
                         # The WS counterpart to the same real bug just fixed
