@@ -9990,3 +9990,93 @@ The quantization and `Budget` NaN-validation gaps remain real-but-
 unreachable, unchanged. `VectorMemoryStore` and general server-side
 state are now confirmed clean under this lens -- no further candidates
 identified for the same specific check without a fresh angle.
+
+
+## build_router() and build_providers() each independently re-probed Ollama over the network on every request -- a third instance of the "repeated cost in a long-running process" lens, confirming it's a real, recurring category
+
+Round 45, directly following round 44's own closing note that the
+"expensive or leaky work redone on every ordinary call over the life
+of a long-running process" lens is worth a standing checklist item, not
+a one-off. First checked the specifically-named remaining candidate
+(`VectorMemoryStore`'s in-memory index) -- confirmed clean again, no
+in-memory index, SQLite-backed. Broadened the same lens to
+`sarva.runtime`'s Ollama availability probes and found a third real
+instance: `ollama_reachable()` and `ollama_pulled_models()` each
+independently hit Ollama's real `/api/tags` endpoint, and
+`sarva.server.app`'s `/chat`/`/ws/chat` handlers call `build_router()`
+immediately followed by `build_providers()` on every request -- so one
+request made 2-3 redundant, identical network calls to the same
+endpoint (`build_router`'s own reachability check plus its
+`ollama_pulled_models()` call, then `build_providers`'s own separate
+reachability check re-deriving what `build_router` had just computed a
+moment earlier in the same call stack), for *every* request, even ones
+that never end up routed to Ollama at all -- routing hasn't been
+decided yet when these functions run.
+
+Confirmed live two ways: monkeypatching `httpx.get` to count calls and
+running `build_router()` then `build_providers()` exactly as the server
+does per request measured 2 calls with Ollama simulated unreachable and
+3 calls when reachable (the extra `ollama_pulled_models()` hit). More
+concretely, pointing `OLLAMA_HOST` at a black-holed address (a
+realistic firewalled/VPN-only/slow-starting-host scenario, not just
+"nothing listening on localhost") measured **0.61 seconds of pure
+blocking network wait added to a single request** -- real, user-visible
+latency on every chat request through any deployment where Ollama is
+merely slow or unreachable over a real network, doubled for no reason
+since the second probe just re-derives information the first one
+already computed.
+
+**Fixed with a short-TTL (2 second) cache shared by both functions,**
+keyed by host: a real network probe happens at most once per 2-second
+window rather than on every call, collapsing the redundant per-request
+pair to one real network round-trip while still noticing a server that
+comes online mid-session within a couple of requests -- the same
+"cache with a bounded invalidation window" shape as the just-shipped
+foundry-checkpoint fix, just time-based here instead of mtime-based
+since there's no file to stat. Carefully preserved both functions'
+exact independent pre-existing semantics rather than merging them
+naively: `ollama_reachable()` stays `True` whenever the TCP connection
+itself succeeds, regardless of HTTP status (a 4xx/5xx still means
+*something* answered); `ollama_pulled_models()` only returns real data
+on an actual 2xx response. Verified directly against a faked 500
+response before and after the fix to confirm this distinction survived
+caching.
+
+**Verified by reverting and watching the new test fail for the exact
+right reason:** `AttributeError: module 'sarva.runtime' has no
+attribute '_ollama_probe_cache'` -- the cache dict simply doesn't exist
+without the fix. All 5 pre-existing runtime tests (Ollama
+availability/pulled-model matching, corrupted-bundle handling,
+`/api/tags` response-shape parsing) pass unchanged. 2 new tests, 644 ->
+646 Python tests. `ruff check`/`format --check` clean.
+`docs/providers.md` updated right after the existing Ollama
+availability-bug section it directly extends.
+
+**A third confirmed instance of round 43's lens, in a third distinct
+module** (agent-loop transcript writing, then foundry provider
+construction, now Ollama availability probing) -- firmly establishing
+this as a real, recurring bug category for this codebase rather than a
+one-off or a coincidence of two similar findings.
+
+**Also checked this round, came back clean:** `Registry.load()`/
+`load_routing()` re-parsing `models.yaml`/`routing.yaml` from disk on
+every call (100 iterations measured at 0.19s total -- negligible, not
+a real cost); `_foundry_extra_installed()` (import-cached by
+`sys.modules` after the first call, not real repeated I/O); the MCP
+client (one handshake per `connect_*_mcp_server()` context, every tool
+call within a run reuses the same session, no per-call reconnection);
+`SessionStore` (already covered by existing cross-process locking
+work). A broader sweep for bare `except Exception: pass`/`return None`
+outside tests found only two, both in `multimodal/degraders/audio.py`,
+both deliberately-documented best-effort fallbacks matching this
+project's already-reviewed degrader failure posture -- not new bugs.
+
+**Next:** the same three previously-identified items remain genuinely
+deferred (Tauri `csp: null`, RL harness container/VM sandboxing,
+inference-request batching). The quantization and `Budget`
+NaN-validation gaps remain real-but-unreachable, unchanged. This
+specific lens now appears close to exhausted across the surfaces
+checked so far (`AgentLoop`, `FoundryProvider`, Ollama probing,
+`VectorMemoryStore`, YAML registry loading, MCP client, foundry-extra
+detection) -- worth a genuinely fresh angle next round rather than a
+fourth pass at the same lens.

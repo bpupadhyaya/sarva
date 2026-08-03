@@ -110,6 +110,54 @@ def test_build_router_skips_a_corrupted_foundry_checkpoint_instead_of_crashing(
     assert "foundry/missing-key" not in router.available
 
 
+def test_ollama_probe_is_cached_across_build_router_and_build_providers(monkeypatch):
+    # A real bug found by actually running build_router() immediately
+    # followed by build_providers() the way sarva.server.app's /chat and
+    # /ws/chat handlers do it on every request: ollama_reachable() and
+    # ollama_pulled_models() each independently hit Ollama's real
+    # /api/tags endpoint, so one request made 2-3 redundant network
+    # calls -- for every request, even ones never routed to Ollama at
+    # all, since routing hasn't been decided yet when these run.
+    import httpx
+    import sarva.runtime as runtime_module
+
+    _clear_frontier_keys(monkeypatch)
+    monkeypatch.delenv("SARVA_FOUNDRY_CHECKPOINTS", raising=False)
+    runtime_module._ollama_probe_cache.clear()
+
+    calls = {"n": 0}
+
+    def counting_get(*args, **kwargs):
+        calls["n"] += 1
+        raise httpx.ConnectError("simulated unreachable")
+
+    monkeypatch.setattr(httpx, "get", counting_get)
+
+    runtime.build_router()
+    runtime.build_providers()
+
+    assert calls["n"] == 1
+
+
+def test_ollama_probe_reachability_and_pulled_models_semantics_survive_caching(monkeypatch):
+    # The cache must preserve the two functions' independent pre-existing
+    # semantics: ollama_reachable() is True whenever the connection itself
+    # succeeds, regardless of HTTP status, while ollama_pulled_models()
+    # only returns real data on an actual 2xx response.
+    import httpx
+    import sarva.runtime as runtime_module
+
+    class _FakeErrorResponse:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("bad status", request=None, response=None)
+
+    runtime_module._ollama_probe_cache.clear()
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: _FakeErrorResponse())
+
+    assert runtime.ollama_reachable("http://fake-500-host") is True
+    assert runtime.ollama_pulled_models("http://fake-500-host") == set()
+
+
 def test_ollama_pulled_models_parses_the_real_api_tags_response_shape(monkeypatch):
     # Ollama's real /api/tags response nests each model under a "models"
     # list, keyed by "name" -- confirmed against a real running server

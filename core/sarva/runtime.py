@@ -9,6 +9,7 @@ of sync on availability logic.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,14 +27,58 @@ from sarva.providers.registry import Registry, Router, load_routing
 _DATA_DIR = Path(__file__).parent / "providers" / "data"
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
+# A real bug found by actually running build_router() immediately
+# followed by build_providers() the way sarva.server.app's /chat and
+# /ws/chat handlers do it on EVERY request: ollama_reachable() and
+# ollama_pulled_models() each independently hit Ollama's real
+# /api/tags endpoint, so one request made 2-3 redundant identical
+# network calls (build_router's own reachability check + its
+# ollama_pulled_models() call, then build_providers' own separate
+# reachability check re-deriving what build_router had just computed a
+# moment earlier in the same call stack) -- for EVERY request, even
+# ones that never end up routed to Ollama at all, since routing hasn't
+# been decided yet when these functions run. Confirmed live: pointing
+# OLLAMA_HOST at a black-holed address (a realistic firewalled/slow-
+# starting-host scenario, not just "nothing listening on localhost")
+# measured 0.61s of pure blocking network wait added to a single
+# request. Collapsed to one real network call per _OLLAMA_PROBE_
+# CACHE_SECONDS window -- short enough that a server actually starting
+# up mid-session is still noticed within a couple of requests, long
+# enough to absorb the microseconds between build_router() and
+# build_providers() (or run_diagnostics()'s own identical pair) within
+# one request.
+_OLLAMA_PROBE_CACHE_SECONDS = 2.0
+_ollama_probe_cache: dict[str, tuple[float, bool, set[str]]] = {}
+
+
+def _probe_ollama(host: str) -> tuple[bool, set[str]]:
+    now = time.monotonic()
+    cached = _ollama_probe_cache.get(host)
+    if cached is not None and now - cached[0] < _OLLAMA_PROBE_CACHE_SECONDS:
+        return cached[1], cached[2]
+    reachable = False
+    pulled: set[str] = set()
+    try:
+        response = httpx.get(f"{host}/api/tags", timeout=0.3)
+        # Reachability means the connection itself succeeded, independent
+        # of the response status -- matching the original ollama_reachable
+        # semantics exactly (a 4xx/5xx from Ollama still means something
+        # answered, just not usefully; only pulled stays empty in that case).
+        reachable = True
+        response.raise_for_status()
+        pulled = {m["name"] for m in response.json().get("models", [])}
+    except httpx.HTTPError:
+        pass
+    _ollama_probe_cache[host] = (now, reachable, pulled)
+    return reachable, pulled
+
 
 def ollama_reachable(host: str = OLLAMA_HOST) -> bool:
-    """Best-effort, fast probe — never blocks startup for more than a beat."""
-    try:
-        httpx.get(f"{host}/api/tags", timeout=0.3)
-        return True
-    except httpx.HTTPError:
-        return False
+    """Best-effort, fast probe — never blocks startup for more than a beat.
+
+    Cached across calls -- see `_probe_ollama`'s own comment above."""
+    reachable, _pulled = _probe_ollama(host)
+    return reachable
 
 
 def ollama_pulled_models(host: str = OLLAMA_HOST) -> set[str]:
@@ -50,13 +95,11 @@ def ollama_pulled_models(host: str = OLLAMA_HOST) -> set[str]:
     request routed straight to an unpulled model and failed outright,
     with the zero-config Mock fallback never getting a chance. This
     powers the fix: availability now means "this exact tag is really
-    there," not just "some Ollama server answered." """
-    try:
-        response = httpx.get(f"{host}/api/tags", timeout=0.3)
-        response.raise_for_status()
-        return {m["name"] for m in response.json().get("models", [])}
-    except httpx.HTTPError:
-        return set()
+    there," not just "some Ollama server answered."
+
+    Cached across calls -- see `_probe_ollama`'s own comment above."""
+    _reachable, pulled = _probe_ollama(host)
+    return pulled
 
 
 def _google_key() -> str | None:
