@@ -4,8 +4,13 @@ self-contained subtask and get back its final answer as a tool result.
 
 Named in the design doc's own architecture section since this project's
 very first agent-loop chapter (`docs/agent-loop.md`'s "What's honestly
-not built yet") and left deliberately unbuilt until now, tracked
-directly rather than silently forgotten.
+not built yet") and left deliberately unbuilt for a long time, tracked
+directly rather than silently forgotten. The exact interface this tool
+consumes (`ToolContext.spawn_subagent` returning an `AgentResult`) was
+actually already scaffolded in spec-03 (FROZEN) via the `AgentResult`
+type in `sarva.agent.events` -- unused anywhere until this module and
+`AgentLoop.run()`'s own `spawn_subagent` closure finally implemented
+the frozen contract, rather than a new one invented from scratch.
 
 The actual spawning logic lives in `AgentLoop.run()` itself
 (`core/sarva/agent/loop.py`), not here — that's the one place with a
@@ -28,14 +33,19 @@ separate, bigger design decision, still left honestly unbuilt -- see
   to keep delegating indefinitely.
 - **Subagent spend counts against the PARENT's own remaining budget,
   not a fresh independent one.** `AgentLoop.run()` builds the subagent
-  with `Budget(max_model_calls=<parent's remaining>, ...)` computed from
-  the parent's own `Budget` minus its `Spend` so far, and adds the
-  subagent's own final `Spend` back into the parent's live `Spend`
+  with a `Budget` clamped to what's actually left of the parent's own
+  `Budget` minus its `Spend` so far (spec-03's own conformance invariant
+  #8: "its budget slice cannot exceed the parent's remainder"), and adds
+  the subagent's own final `Spend` back into the parent's live `Spend`
   object once it completes -- so the very next `spend.exceeded(...)`
   check in the parent loop reflects the subagent's real cost too.
   Without this, a model could spawn subagents to bypass its own budget
   entirely; confirmed live before fixing it this way (see
   BUILD-JOURNAL.md).
+- **The subagent's transcript is nested under the parent's own run
+  dir** (`<parent_run_dir>/subagents/<sub_run_id>/`), matching spec-03's
+  design decision #7 verbatim, and reported back as `AgentResult.
+  run_dir` -- a real, inspectable path, not a placeholder.
 - **Routed via `TaskClass.SUBTASK`** -- cheap delegated work, distinct
   from the parent's own `TaskClass.MAIN`, matching that enum entry's own
   documented purpose (confirmed genuinely unused anywhere in this
@@ -54,6 +64,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from sarva.agent.events import AgentState
 from sarva.multimodal.content import TextBlock, ToolResultBlock
 from sarva.providers.base import ToolSpec
 
@@ -106,18 +117,18 @@ class DelegateTool:
                 content=[TextBlock(text="subagent delegation is not available in this context")],
                 is_error=True,
             )
-        final_message = await ctx.spawn_subagent(task)
-        if final_message is None:
+        result = await ctx.spawn_subagent(task)
+        if result.state != AgentState.DONE or result.final_message is None:
             return ToolResultBlock(
                 tool_call_id="",
                 content=[
                     TextBlock(
-                        text="the subagent did not complete successfully "
-                        "(ran out of budget, failed, or was interrupted)"
+                        text=f"the subagent did not complete successfully (ended in "
+                        f"{result.state.value}) -- ran out of budget, failed, or was interrupted"
                     )
                 ],
                 is_error=True,
             )
         return ToolResultBlock(
-            tool_call_id="", content=[TextBlock(text=final_message.text())], is_error=False
+            tool_call_id="", content=[TextBlock(text=result.final_message.text())], is_error=False
         )

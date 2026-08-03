@@ -10173,3 +10173,94 @@ the design doc -- worth either building it next, or continuing to sweep
 the codebase for other real gaps (bug or feature) with a fresh
 Explore-agent pass, since the "repeated cost in a long-running process"
 lens is now fairly well-mined across the surfaces that had it.
+
+
+## `spawn_subagent`'s real shape was already frozen in spec-03 -- reconciling a same-session gap before moving on to the next feature
+
+Immediately after shipping `delegate_task` (commit `a7bd14a`), reading
+`sarva-specs/spec-03-agent-loop.md` in full (rather than working only
+from the design doc's one-line "subagent fan-out" mention that had
+originally surfaced the gap) found the frozen spec already prescribed
+`spawn_subagent`'s exact interface: `ToolContext.spawn_subagent:
+Callable[..., Awaitable[AgentResult]]`, documented there as `(task,
+task_class, budget)`, plus design decision #7 ("subagents are just
+recursive loops with their own budget slice ... and their transcript
+nested under the parent's run dir") and conformance invariant #8 ("a
+spawned subagent gets a child run_dir ... its budget slice cannot
+exceed the parent's remainder"). The `AgentResult` type this all
+depends on already existed in `sarva.agent.events` -- scaffolded when
+spec-03 was frozen, sitting completely unused until this milestone.
+
+The just-shipped version didn't match: `spawn_subagent` took only a
+task string, returned a bare `Message | None` instead of an
+`AgentResult`, and put a subagent's run directory as a SIBLING under
+the shared `run_root` rather than nested under the parent's own run
+dir. A real process gap worth naming honestly: this feature was built
+from the design doc's brief architecture bullet without first checking
+whether the frozen spec already had a fuller answer -- it did.
+
+**Reconciled in the same session rather than left to drift, since the
+spec is marked FROZEN with an explicit "changes require escalation"
+policy and the already-committed code was the thing out of line, not
+the spec:**
+
+- `AgentLoop.run()` gained an optional `run_id` parameter so
+  `spawn_subagent` can pre-generate the subagent's UUID and know its
+  real `run_dir` path *before* awaiting the sub-run, rather than having
+  no way to report where the transcript actually landed.
+- `spawn_subagent`'s signature is now `(task, task_class=TaskClass.
+  SUBTASK, budget=None) -> AgentResult`, matching spec-03 verbatim.
+  `DelegateTool` itself still only calls it with a task string --
+  `task_class`/`budget` exist for other, possibly-future callers (a
+  verifier subagent, most obviously) that need to request something
+  different, matching spec-03's framing of `spawn_subagent` as a
+  general primitive on `ToolContext`, not something private to one
+  tool. Confirmed live via a second test tool that calls it directly
+  with `TaskClass.ESCALATION` and an explicit `Budget`.
+- A `budget` argument is a REQUEST, not a grant: every field is clamped
+  to what's actually left of the parent's own budget via a small
+  `_clamp` helper, matching conformance invariant #8's "cannot exceed
+  the parent's remainder" verbatim. Confirmed live: a tight
+  `Budget(max_model_calls=1)` request well within the parent's own
+  generous remainder is honored EXACTLY (the subagent hits its own
+  `BUDGET_EXCEEDED` after precisely 1 real call, not silently widened
+  to the ~9 calls the parent could have spared).
+- The subagent's transcript now genuinely nests at
+  `<parent_run_dir>/subagents/<sub_run_id>/`. Confirmed against the
+  real filesystem, not just the reported path string: read the
+  `AgentResult.run_dir` a test tool captured, confirmed it's
+  `is_relative_to` the parent's own run_dir, confirmed its parent
+  directory is literally named `subagents`, confirmed a real
+  `transcript.jsonl` exists there.
+
+**Verified by reverting just this correction (keeping the original
+delegate_task feature intact) and watching both new tests fail for the
+exact right reason:** `TypeError: spawn_subagent() got an unexpected
+keyword argument 'task_class'` -- the old closure genuinely couldn't
+accept what the frozen spec requires, not a cosmetic difference. All 5
+of the original subagent tests plus every other pre-existing
+agent-loop test pass unchanged. 2 more new tests, 651 -> 653 total
+Python tests. `ruff check`/`format --check` clean. `docs/agent-loop.md`
+gained a new subsection describing this correction directly, named as
+a correction rather than folded silently into the original section's
+prose.
+
+**A methodology note worth carrying into the next feature-building
+round (the verifier subagent, most likely):** when a feature is named
+in BOTH the design doc's brief architecture summary AND a frozen spec
+file, read the frozen spec in FULL before writing any code -- it may
+already answer exactly the interface questions the design doc leaves
+open, and building against the shorter summary alone risks exactly
+this kind of same-session rework. Frozen specs govern; the design doc
+is context, not the interface contract.
+
+**Next:** the "verifier subagent" pattern remains the clearest
+named-but-unbuilt feature gap. Before starting it, check whether any
+frozen spec file already scaffolds its interface too (spec-03 is now
+fully read and its `AgentResult`/`spawn_subagent` machinery is spoken
+for by fan-out; a verifier would likely reuse the same primitive with
+a different `task_class`/prompt shape, worth checking spec-03's own
+text again for anything else relevant before designing it fresh). The
+three infra-blocked items remain deferred (Tauri `csp: null`, RL
+harness sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gaps remain real-but-unreachable.

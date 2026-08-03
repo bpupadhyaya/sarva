@@ -499,6 +499,58 @@ what "verified" means, how a rejection feeds back) left for a future
 milestone rather than bolted on as a variant of fan-out just because
 the mechanics are related.
 
+### `spawn_subagent`'s real shape was already frozen in spec-03 — a same-session correction, not a second milestone
+
+The paragraphs above describe the feature as first built, against the
+design doc's brief one-line mention. **spec-03 (FROZEN) turned out to
+already prescribe `spawn_subagent`'s exact interface**, via
+`ToolContext.spawn_subagent: Callable[..., Awaitable[AgentResult]]`
+(documented there as `(task, task_class, budget)`) and design decision
+#7 ("subagents are just recursive loops with their own budget slice
+... and their transcript nested under the parent's run dir") —
+scaffolded years earlier via the `AgentResult` type in
+`sarva.agent.events`, which had sat completely unused until this
+milestone. The first version of this feature didn't match that: it
+took only a task string, returned a bare `Message | None`, and put a
+subagent's run directory as a *sibling* under the shared `run_root`
+rather than nested under the parent's own run dir.
+
+Caught by actually reading spec-03 in full before moving on to the next
+feature, not just working from the design doc's one-line summary —
+reconciled in the same session rather than left to drift:
+
+- `spawn_subagent` now takes `(task, task_class=TaskClass.SUBTASK,
+  budget=None)` and returns a real `AgentResult` (`state`,
+  `final_message`, `spend`, `run_dir`). `DelegateTool` itself still only
+  ever calls it with just a task string — the fuller signature exists
+  for other, possibly-future callers (like a verifier subagent) that
+  need to pick a different `TaskClass` or request a specific budget
+  slice, matching spec-03's own framing of `spawn_subagent` as a
+  general primitive on `ToolContext`, not something private to one
+  tool.
+- A `budget` argument is a **request, not a grant**: every field is
+  clamped to what's actually left of the parent's own budget, matching
+  spec-03's conformance invariant #8 verbatim ("its budget slice cannot
+  exceed the parent's remainder"). Verified two ways: a tight request
+  well within the parent's remainder is honored exactly (not silently
+  widened to whatever the parent could afford), and a request that
+  would exceed the remainder gets clamped down.
+- The subagent's transcript is now genuinely nested at
+  `<parent_run_dir>/subagents/<sub_run_id>/`, not a sibling under
+  `run_root` — `AgentLoop.run()` gained an optional `run_id` parameter
+  so the spawn closure can pre-compute the exact path a subagent's
+  transcript will land at *before* awaiting its run, letting
+  `AgentResult.run_dir` report a real, already-correct path rather than
+  a placeholder. Verified directly against the real filesystem layout,
+  not just the reported string.
+
+Verified by reverting just this correction (keeping the original
+feature) and watching both new tests fail with the exact right reason:
+`TypeError: spawn_subagent() got an unexpected keyword argument
+'task_class'` — the old closure genuinely couldn't accept what the
+frozen spec requires. 2 more new tests, all pre-existing tests
+(including the original 5 subagent tests) pass unchanged.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_agent.py` — `MockProvider` scripts let

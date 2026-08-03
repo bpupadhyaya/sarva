@@ -38,6 +38,7 @@ from sarva.agent.budget import Budget, Spend
 from sarva.agent.events import (
     LEGAL,
     AgentEvent,
+    AgentResult,
     AgentState,
     ModelStreamEvent,
     NeedsConfirmationEvent,
@@ -192,6 +193,7 @@ class AgentLoop:
         extra_content: list[ContentBlock] | None = None,
         transcript_out: list[Message] | None = None,
         session_id: str | None = None,
+        run_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """`extra_content` attaches non-text blocks (e.g. an ImageBlock) to
         the initiating user turn alongside `task`'s text — purely additive,
@@ -210,8 +212,15 @@ class AgentLoop:
         to the actual conversation this run belongs to — the CLI's
         `--session` value / the server's `session` request field, not a
         run-scoped identifier like `run_id` below (a fresh UUID every
-        call, unrelated to which saved conversation this is)."""
-        run_id = uuid.uuid4().hex[:12]
+        call, unrelated to which saved conversation this is).
+
+        `run_id`, if given, is used as-is instead of generating a fresh
+        UUID -- the one thing `spawn_subagent` (below) needs to compute a
+        subagent's real `run_dir` path *before* awaiting its run, so
+        `AgentResult.run_dir` reports where the transcript genuinely
+        landed rather than a placeholder. Every other caller leaves this
+        unset and gets the same fresh-UUID behavior as before."""
+        run_id = run_id or uuid.uuid4().hex[:12]
         run_root = Path(self._run_root)
         run_dir = run_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -316,42 +325,80 @@ class AgentLoop:
                 return
         provider = self._providers[model.provider]
 
-        async def spawn_subagent(subtask: str) -> Message | None:
-            # Subagent fan-out (docs/agent-loop.md's own long-named,
-            # previously-unbuilt gap). Bounded by what's actually left of
-            # THIS run's own budget, not a fresh independent one -- computed
-            # here (not once at __init__ time) because `spend` keeps
-            # changing across the parent's own model calls and tool
-            # dispatches, and a subagent spawned late in a long run must
-            # see what's genuinely left, not what was available at the
-            # very start.
-            remaining_calls = self._budget.max_model_calls - spend.model_calls
-            remaining_wall = self._budget.max_wall_seconds - spend.wall_seconds
-            if remaining_calls <= 0 or remaining_wall <= 0:
-                return None
+        async def spawn_subagent(
+            subtask: str,
+            task_class: TaskClass = TaskClass.SUBTASK,
+            budget: Budget | None = None,
+        ) -> AgentResult:
+            # Subagent fan-out -- spec-03's own frozen signature
+            # (`spawn_subagent: Callable[..., Awaitable[AgentResult]]`,
+            # documented there as `(task, task_class, budget)`) and design
+            # decision #7 ("subagents are just recursive loops with their
+            # own budget slice ... and their transcript nested under the
+            # parent's run dir"), scaffolded since Spec 03 was frozen via
+            # the unused `AgentResult` type in events.py but never actually
+            # implemented until docs/agent-loop.md's own long-named gap was
+            # finally picked up. `budget`, if given, is a REQUEST, not a
+            # grant: every field is clamped to what's actually left of
+            # THIS run's own budget -- computed fresh here (not once at
+            # __init__ time) because `spend` keeps changing across the
+            # parent's own model calls and tool dispatches, and a subagent
+            # spawned late in a long run must see what's genuinely left,
+            # not what was available at the very start. Matches spec-03's
+            # own conformance invariant #8 verbatim: "its budget slice
+            # cannot exceed the parent's remainder."
+            def _clamp(requested: float | None, remaining: float) -> float:
+                return max(0.0, min(requested, remaining) if requested is not None else remaining)
+
+            sub_budget = Budget(
+                max_model_calls=int(
+                    _clamp(
+                        budget.max_model_calls if budget else None,
+                        self._budget.max_model_calls - spend.model_calls,
+                    )
+                ),
+                max_total_tokens=int(
+                    _clamp(
+                        budget.max_total_tokens if budget else None,
+                        self._budget.max_total_tokens - spend.total_tokens,
+                    )
+                ),
+                max_wall_seconds=_clamp(
+                    budget.max_wall_seconds if budget else None,
+                    self._budget.max_wall_seconds - spend.wall_seconds,
+                ),
+                max_cost_usd=_clamp(
+                    budget.max_cost_usd if budget else None,
+                    self._budget.max_cost_usd - spend.cost_usd,
+                ),
+            )
+            if sub_budget.max_model_calls <= 0 or sub_budget.max_wall_seconds <= 0:
+                return AgentResult(
+                    state=AgentState.BUDGET_EXCEEDED, final_message=None, spend=Spend(), run_dir=""
+                )
             sub_tools = [t for t in self._tools.values() if not isinstance(t, DelegateTool)]
+            sub_run_id = uuid.uuid4().hex[:12]
+            sub_run_root = run_dir / "subagents"
+            sub_run_dir = sub_run_root / sub_run_id
             sub_loop = AgentLoop(
                 router=self._router,
                 providers=self._providers,
                 tools=sub_tools,
                 confirm=self._confirm,
-                budget=Budget(
-                    max_model_calls=remaining_calls,
-                    max_total_tokens=max(0, self._budget.max_total_tokens - spend.total_tokens),
-                    max_wall_seconds=remaining_wall,
-                    max_cost_usd=max(0.0, self._budget.max_cost_usd - spend.cost_usd),
-                ),
-                task_class=TaskClass.SUBTASK,
+                budget=sub_budget,
+                task_class=task_class,
                 workdir=self._workdir,
-                run_root=self._run_root,
+                run_root=str(sub_run_root),
                 degraders=self._degraders,
             )
             sub_final: Message | None = None
             sub_state = AgentState.FAILED
-            async for sub_event in sub_loop.run(subtask, session_id=session_id):
+            sub_spend = Spend()
+            async for sub_event in sub_loop.run(subtask, session_id=session_id, run_id=sub_run_id):
                 if sub_event.type == "run_done":
                     sub_final = sub_event.final_message
                     sub_state = sub_event.state
+                    sub_spend = sub_event.spend
                     # Merged back into the PARENT's own live spend so the
                     # very next spend.exceeded(self._budget) check below
                     # reflects the subagent's real cost too -- without this
@@ -362,7 +409,9 @@ class AgentLoop:
                     spend.total_tokens += sub_event.spend.total_tokens
                     spend.wall_seconds += sub_event.spend.wall_seconds
                     spend.cost_usd += sub_event.spend.cost_usd
-            return sub_final if sub_state == AgentState.DONE else None
+            return AgentResult(
+                state=sub_state, final_message=sub_final, spend=sub_spend, run_dir=str(sub_run_dir)
+            )
 
         ctx = ToolContext(
             workdir=self._workdir,

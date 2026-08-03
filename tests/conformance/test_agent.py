@@ -985,3 +985,98 @@ async def test_delegate_task_fails_cleanly_with_no_spawn_hook_available():
     result = await DelegateTool().run({"task": "do something"}, ctx)
     assert result.is_error is True
     assert "not available" in result.content[0].text
+
+
+class _SpawnSubagentCaptureTool:
+    """Calls ctx.spawn_subagent directly with an explicit task_class and
+    budget, rather than going through DelegateTool's own simple
+    task-only surface -- proves spec-03's full `(task, task_class,
+    budget)` signature genuinely works for a caller that isn't
+    DelegateTool, matching design decision #7's framing of
+    spawn_subagent as a general primitive, not something private to one
+    tool."""
+
+    spec = ToolSpec(
+        name="capture_spawn_result",
+        description="spawn a subagent with an explicit task_class/budget and report back",
+        input_schema={"type": "object", "properties": {}},
+        destructive=False,
+    )
+
+    async def run(self, args, ctx: ToolContext) -> ToolResultBlock:
+        result = await ctx.spawn_subagent(
+            "say something", task_class=TaskClass.ESCALATION, budget=Budget(max_model_calls=1)
+        )
+        text = (
+            f"state={result.state.value} run_dir={result.run_dir} calls={result.spend.model_calls}"
+        )
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_honors_an_explicit_task_class_and_budget_request(run_root):
+    # An explicit budget REQUEST (max_model_calls=1) that's well within
+    # the parent's own generous remainder (9 left after this turn) must
+    # be honored EXACTLY as requested, not silently widened to whatever
+    # the parent could have afforded -- the clamp only narrows, never
+    # expands. A 1-call budget can never reach DONE (the outer
+    # budget-exceeded check fires right after that one call regardless
+    # of what it says), which is itself the clean, deterministic proof
+    # the request was honored precisely: BUDGET_EXCEEDED after exactly
+    # 1 real call, not 9.
+    call = ToolCallBlock(id="c1", name="capture_spawn_result", arguments={})
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(tool_calls=[call]),
+            ScriptedTurn(text="the subagent's one allowed reply"),
+            ScriptedTurn(text="parent's final answer"),
+        ]
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_SpawnSubagentCaptureTool()],
+        budget=Budget(max_model_calls=10),
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("capture a subagent result")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert "state=budget_exceeded" in finished[0].result.content[0].text
+    assert "calls=1" in finished[0].result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_subagent_transcript_is_nested_under_the_parents_own_run_dir(run_root):
+    # spec-03 design decision #7: "their transcript nested under the
+    # parent's run dir" -- verified against the real filesystem layout
+    # AgentLoop.run() actually produces, not just the AgentResult field.
+    call = ToolCallBlock(id="c1", name="capture_spawn_result", arguments={})
+    provider = MockProvider(
+        script=[
+            ScriptedTurn(tool_calls=[call]),
+            ScriptedTurn(text="the subagent's one allowed reply"),
+            ScriptedTurn(text="parent's final answer"),
+        ]
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[_SpawnSubagentCaptureTool()],
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("capture a subagent result")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    reported_run_dir = finished[0].result.content[0].text.split("run_dir=")[1].split(" ")[0]
+
+    parent_run_dirs = list(Path(run_root).iterdir())
+    assert len(parent_run_dirs) == 1  # the parent's own run_dir, subagent nested inside it
+    parent_run_dir = parent_run_dirs[0]
+
+    sub_run_dir = Path(reported_run_dir)
+    assert sub_run_dir.is_relative_to(parent_run_dir)
+    assert sub_run_dir.parent.name == "subagents"
+    assert (sub_run_dir / "transcript.jsonl").exists()

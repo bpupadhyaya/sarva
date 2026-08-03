@@ -16,10 +16,11 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from sarva.agent.events import AgentResult
 from sarva.agent.subagents import DelegateTool
 from sarva.atomic_write import atomic_write_text
 from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
-from sarva.multimodal.content import Message, TextBlock, ToolCallBlock, ToolResultBlock
+from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.multimodal.fetch import FetchError, ensure_public_host, ssrf_safe_transport
 from sarva.providers.base import ToolSpec
 
@@ -46,7 +47,10 @@ class ToolContext:
     a test). Kept as a narrow closure rather than exposing the router/
     providers/tools themselves on ToolContext, so every OTHER tool's
     surface area stays exactly what it was before subagent fan-out
-    existed."""
+    existed. Signature matches spec-03's own frozen `ToolContext.
+    spawn_subagent: Callable[..., Awaitable[AgentResult]]` -- `(task,
+    task_class, budget)`, both keyword-defaultable so a simple caller
+    like `DelegateTool` can pass just the task string."""
 
     def __init__(
         self,
@@ -54,7 +58,7 @@ class ToolContext:
         run_dir: str,
         emit: Callable[[Any], Awaitable[None]] | None = None,
         session_id: str | None = None,
-        spawn_subagent: Callable[[str], Awaitable[Message | None]] | None = None,
+        spawn_subagent: Callable[..., Awaitable[AgentResult]] | None = None,
     ):
         self.workdir = workdir
         self.run_dir = run_dir
