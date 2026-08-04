@@ -375,6 +375,34 @@ async def test_foundry_provider_generate_produces_a_real_completion(tmp_path: Pa
     await provider.close()
 
 
+async def test_foundry_provider_generate_handles_an_empty_message_cleanly(tmp_path: Path):
+    # A real bug found by actually sending an empty message: nothing
+    # upstream validates non-empty text (`chat()`'s CLI argument and
+    # ChatRequest.message both accept ""), and ByteLevelBPETokenizer.
+    # encode("") returns [] -- an empty prompt_ids list used to sail past
+    # the budget<=0 guard (still positive with zero prompt tokens)
+    # straight into generate_with_cache, where torch.tensor([[]]) has no
+    # elements to infer a dtype from and defaults to float32 instead of
+    # int64, crashing the token embedding lookup with a raw
+    # RuntimeError ("Expected tensor for argument #1 'indices' ... Long,
+    # Int; but got torch.FloatTensor"). Confirmed live before this fix.
+    _make_bundle(tmp_path / "toy")
+    provider = FoundryProvider(tmp_path)
+    request = GenerateRequest(
+        model="foundry/toy",
+        messages=[Message(role="user", content=[TextBlock(text="")])],
+        config=GenerateConfig(max_tokens=8),
+    )
+
+    events = [event async for event in provider.generate(request)]  # must not raise
+    done = events[-1]
+
+    assert done.type == "done"
+    assert done.message.text() == ""
+    assert done.usage.input_tokens == 0
+    await provider.close()
+
+
 async def test_foundry_provider_generate_rejects_an_unknown_model_id(tmp_path: Path):
     _make_bundle(tmp_path / "toy")
     provider = FoundryProvider(tmp_path)

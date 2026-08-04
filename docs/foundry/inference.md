@@ -271,6 +271,36 @@ cached on the machine this was verified on (exact speedup varies by
 hardware; the point is a real, measured, honestly-reported number, not an
 assumed one).
 
+### An empty message crashed with a raw torch dtype error instead of a clean empty response
+
+A fresh-eyes sweep found a real gap right next to the budget guard
+above: nothing upstream of `FoundryProvider.generate()` validates
+non-empty message text (`sarva chat`'s CLI argument and the server's
+`ChatRequest.message` both accept `""`), and
+`ByteLevelBPETokenizer.encode("")` genuinely returns `[]` by design —
+correct behavior for the tokenizer itself, but `generate()` didn't
+account for what an empty `prompt_ids` list does downstream.
+`budget = config.max_seq_len - len(prompt_ids) - 1` stays positive with
+zero prompt tokens, so it sailed past the `budget <= 0` guard straight
+into `generate_with_cache`, where `torch.tensor([[]])` — no elements to
+infer a dtype from — silently defaults to `float32` instead of
+`int64`, crashing the token embedding lookup with a raw, implementation
+-leaking `RuntimeError`: `"Expected tensor for argument #1 'indices' to
+have one of the following scalar types: Long, Int; but got
+torch.FloatTensor instead"`. `AgentLoop`'s broad exception handling
+around `provider.generate()` already turns this into a clean
+`state=failed` rather than crashing the process, but with that raw
+torch/embedding string as the detail instead of a meaningful message.
+
+Even fixing just the dtype wouldn't have actually made an empty prompt
+generatable: prefilling zero token positions leaves no "last" logit for
+`next_logits = logits[0, -1]` to sample from either — an `IndexError`
+one line later. There's genuinely nothing to prefill with, the same
+"no useful work to do" shape the `budget <= 0` case already handles
+gracefully. Fixed by folding `not prompt_ids` into that same guard, so
+an empty message gets the identical clean, empty-response treatment —
+not its own special case, not a crash.
+
 ## Quantization: real int8 weight-only compression
 
 §3.6f's "inference/serving stack" names KV-cache, paged attention, and

@@ -12854,3 +12854,93 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## An empty message to a foundry checkpoint crashed with a raw torch dtype error instead of a clean empty response
+
+Round 73. Delegated a fresh-eyes sweep to a subagent, steered away from
+the tokenizer (round 70), provider registry/routing/degradation (round
+71), and `runtime.py`/server event-loop blocking (round 72). It found
+a real one in `sarva.providers.foundry_provider`/`sarva_foundry.
+inference.generate`, verified and shipped directly this round.
+
+**The bug:** nothing upstream of `FoundryProvider.generate()`
+validates non-empty message text -- `sarva chat`'s CLI `message`
+argument (`core/sarva/cli.py`) and the server's `ChatRequest.message`
+(`core/sarva/server/schemas.py`) both accept `""` with zero
+constraints. `ByteLevelBPETokenizer.encode("")` genuinely, correctly
+returns `[]` -- that's right for the tokenizer itself, just fuzzed
+thoroughly two rounds ago and still behaving exactly as designed. The
+gap was one level up: `generate()`'s `budget = config.max_seq_len -
+len(prompt_ids) - 1` stays positive even with zero prompt tokens, so
+an empty `prompt_ids` sailed straight past the existing `budget <= 0`
+guard into `generate_with_cache`. There, `torch.tensor([prompt_ids])`
+becomes `torch.tensor([[]])` -- with no elements to infer a dtype
+from, PyTorch silently defaults this to `float32` instead of `int64`,
+and that tensor crashes the token embedding lookup with a raw,
+implementation-leaking `RuntimeError`: `"Expected tensor for argument
+#1 'indices' to have one of the following scalar types: Long, Int; but
+got torch.FloatTensor instead (while checking arguments for
+embedding)"`.
+
+**Confirmed live** end to end with a real trained tiny checkpoint (the
+existing `_make_bundle` test fixture: train a real tokenizer, real
+`DecoderOnlyTransformer`, save a real bundle, load it through the real
+`FoundryProvider`) and a real `GenerateRequest` with an empty
+`TextBlock`: the exact `RuntimeError` above, reproduced verbatim.
+`AgentLoop`'s existing broad exception handling around
+`provider.generate()` (`core/sarva/agent/loop.py`) already turns this
+into a clean `state=failed` rather than crashing the whole process --
+but with that raw torch/embedding string surfaced as the failure
+detail, instead of anything meaningful to a caller who just sent an
+empty message. Reachable via `sarva chat "" --model foundry/<bundle>`
+or `POST /chat {"message": "", "model": "foundry/<bundle>"}` -- both
+flow into `AgentLoop.run(task="", model_override=...)` with zero
+validation anywhere in between, the explicit override bypassing the
+router's own modality check entirely.
+
+**Why the obvious "just fix the dtype" fix wouldn't have been enough:**
+even constructing the tensor with the correct `dtype=torch.long` from
+the start wouldn't make an empty prompt actually generatable --
+prefilling zero token positions leaves no "last" logit for
+`next_logits = logits[0, -1]` to sample from either, an `IndexError`
+one line later. There is genuinely nothing to prefill a KV-cache with
+from zero tokens; this is not a workaround-able implementation detail,
+it's the actual, correct conclusion that an empty prompt has no
+meaningful completion to generate.
+
+**Fixed** by recognizing this is the exact same "no useful work to do"
+shape the `budget <= 0` branch immediately below already handles
+gracefully (a completed run with empty text, not an error) --
+`if budget <= 0 or not prompt_ids:` folds the empty-prompt case into
+that same existing guard and its same clean-empty-response path,
+rather than adding a second special case.
+
+**Verified live** after the fix: the identical repro now yields a
+clean `DoneEvent` with empty text and `input_tokens=0`, no exception.
+
+**Verified by reverting** `foundry_provider.py` alone and watching the
+new test fail with the literal old bug reproducing itself verbatim --
+the exact same `RuntimeError` about `torch.FloatTensor` vs `Long, Int`.
+
+**1 new test, 727 -> 728 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/inference.md` gained a
+new subsection directly after the KV-cache chapter, right before
+Quantization.
+
+**Twenty-seven of the last twenty-eight rounds (46-67, 70-73) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** A third consecutive round (after 71's mock-capabilities bug
+and 72's blocking Ollama probe) where the actual defect lived one
+layer away from where a narrower fix would naturally look -- the
+tokenizer's own `encode("")` behavior is correct and well-tested; the
+gap was in a caller's guard condition not accounting for one of its
+inputs' legitimate edge values.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

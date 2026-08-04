@@ -387,8 +387,30 @@ class FoundryProvider:
         # for -- generating past it would index outside that table, so the
         # available budget is capped here rather than left to fail deep
         # inside the model on a long prompt.
+        #
+        # A real bug found by actually sending an empty message (`sarva
+        # chat "" --model foundry/<bundle>`, or an empty `--system`/
+        # history with no other content, reachable with zero validation
+        # anywhere upstream: `chat()`'s `message` CLI argument and
+        # `ChatRequest.message` both accept ""): `not prompt_ids` used to
+        # fall through this guard (budget is still positive with zero
+        # prompt tokens) straight into `generate_with_cache`, where
+        # `torch.tensor([[]])` -- no elements to infer a dtype from --
+        # defaults to float32 instead of int64, crashing the token
+        # embedding lookup with a raw, implementation-leaking
+        # RuntimeError ("Expected tensor for argument #1 'indices' to
+        # have one of the following scalar types: Long, Int; but got
+        # torch.FloatTensor instead"). Confirmed live before this fix.
+        # Even fixing just the dtype wouldn't actually make an empty
+        # prompt generatable -- prefilling zero token positions leaves
+        # no "last" logit for `next_logits = logits[0, -1]` to sample
+        # from either, an IndexError one line later. Genuinely nothing
+        # to prefill with, the same "no useful work to do" shape the
+        # budget<=0 case right below already handles gracefully, so it
+        # gets the identical clean-empty-response treatment rather than
+        # its own special case.
         budget = config.max_seq_len - len(prompt_ids) - 1
-        if budget <= 0:
+        if budget <= 0 or not prompt_ids:
             yield DoneEvent(
                 stop_reason=StopReason.MAX_TOKENS,
                 message=Message(role="assistant", content=[TextBlock(text="")]),
