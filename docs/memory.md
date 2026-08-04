@@ -467,11 +467,39 @@ class as the session-locking bug this tier's own docstring already
 names as the pattern to avoid regressing. Fixed by wrapping the call in
 `asyncio.to_thread`, moving the blocking acquire (and the write itself)
 off the event loop. `SearchNotesTool` only ever reads and never
-contends on this lock, so it's unaffected. Verified live the fix
-brings the heartbeat count back up to 52 of ~54 expected ticks across
-the same contended window. Verified by reverting and watching the new
-test fail with the literal old bug's own number — `0` ticks —
-reproducing itself in the assertion failure. 1 new test, 698 total.
+contends on this lock, so it's unaffected — reasoning that turned out
+to be half right, see below. Verified live the fix brings the
+heartbeat count back up to 52 of ~54 expected ticks across the same
+contended window. Verified by reverting and watching the new test fail
+with the literal old bug's own number — `0` ticks — reproducing itself
+in the assertion failure. 1 new test, 698 total.
+
+### The "unaffected" reasoning above conflated "no lock contention" with "no blocking I/O" — `search_notes` had the identical freeze from a completely different cause
+
+A much later fresh-eyes sweep went back to this exact file and found
+the fix above's own reasoning had a gap: "`SearchNotesTool` only ever
+reads and never contends on this lock, so it's unaffected" is true
+about the lock specifically, but `LongTermMemoryStore.search()` is
+*also* a fully synchronous method — it globs every `*.md` file under
+the notes directory and calls `path.read_text()` on each one in a
+loop — and `SearchNotesTool.run()` called it directly with no
+`asyncio.to_thread` either, freezing the event loop the identical way
+for a completely different reason (raw file I/O volume, not lock
+contention). Confirmed live: 20,000 short notes (~1.8MB total, a
+plausible amount after long-term real use of the `note` tool across
+many conversations) froze the *entire* event loop for the whole
+~360ms search — the same heartbeat methodology as the fix above, zero
+ticks across the full window instead of the ~7 expected. Fixed the
+same way, `asyncio.to_thread` wrapping the `search()` call. Verified
+live the fix brings the heartbeat count back up to 7 of 7 expected
+ticks. Verified by reverting and watching the new test fail with the
+literal old bug's own number — `0` ticks. 1 new test, 729 → 730 total.
+The lesson worth naming: "doesn't contend on THIS specific lock" is a
+narrower claim than "doesn't block the event loop," and a comment
+reasoning about the former can accidentally read as covering the
+latter too if the two aren't kept explicitly separate — worth a second
+look any time a tool's `async def run()` calls a method whose own
+implementation was never itself audited for blocking I/O.
 
 ### The identical shape, one round later, in `remember`/`recall_memory` — and a second bug hiding behind the first
 

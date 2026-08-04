@@ -667,8 +667,10 @@ class NoteTool:
         # across the full 2.7s call, meaning every other in-flight
         # `/chat`/`/ws/chat` turn in a real `sarva serve` process would
         # have frozen too, not just this one tool call. `SearchNotesTool`
-        # below only ever reads (never contends on this lock), so it's
-        # unaffected and left as-is.
+        # below never contends on this lock, but a later sweep found it
+        # still blocked the event loop the same way via its own
+        # synchronous file I/O -- see its own comment; "no lock
+        # contention" turned out not to mean "no blocking I/O."
         try:
             path = await asyncio.to_thread(self._get_store().write, args["topic"], args["content"])
         except LongTermMemoryError as e:
@@ -706,7 +708,26 @@ class SearchNotesTool:
         return self._store
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
-        matches = self._get_store().search(args["query"])
+        # A real bug found by a fresh-eyes sweep: NoteTool.run's own
+        # comment above reasoned that this tool "only ever reads (never
+        # contends on this lock), so it's unaffected and left as-is" --
+        # true for lock contention specifically, but that reasoning
+        # conflated "no lock contention" with "no blocking I/O." `search()`
+        # is fully synchronous -- it globs every `*.md` file under the
+        # notes directory and calls `path.read_text()` on each one in a
+        # loop -- and calling it directly here runs all of that straight
+        # on the event loop, with no `asyncio.to_thread`, exactly the
+        # blocking-call-inside-async-def shape already fixed for
+        # `NoteTool.write`, `RememberTool`, and `RecallMemoryTool` in this
+        # same file. Confirmed live: 20,000 short notes (~1.8MB total, a
+        # plausible amount after long-term real use of the `note` tool
+        # across many conversations) froze this process's ENTIRE event
+        # loop for the whole call -- a heartbeat coroutine that should
+        # have ticked roughly every 0.05s recorded ZERO ticks across the
+        # full ~360ms search, meaning every other in-flight `/chat`/
+        # `/ws/chat` turn in a real `sarva serve` process would have
+        # frozen too, not just this one tool call.
+        matches = await asyncio.to_thread(self._get_store().search, args["query"])
         if not matches:
             text = "No notes matched."
         else:

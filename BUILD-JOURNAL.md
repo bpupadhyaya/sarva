@@ -13046,3 +13046,89 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## "Doesn't contend on this lock" isn't the same claim as "doesn't block the event loop" — `search_notes` had the identical freeze the `note` tool fix already closed once, for a completely different reason
+
+Round 75. Delegated a fresh-eyes sweep to a subagent, steered away
+from the tokenizer (round 70), provider registry/routing/degradation
+(round 71), `runtime.py`/server event-loop blocking (round 72),
+`foundry_provider.py`/`generate.py` (round 73), and
+`openai_provider.py` (round 74). It found a real one right back in
+`core/sarva/agent/tools.py` -- the same file NoteTool's own
+event-loop-freeze fix lives in -- verified and shipped directly this
+round.
+
+**The bug:** `SearchNotesTool.run()` called `self._get_store().search
+(args["query"])` directly, with no `asyncio.to_thread` -- unlike every
+sibling memory tool in the same file (`RememberTool`,
+`RecallMemoryTool`, `NoteTool` all dispatch through
+`asyncio.to_thread`, each with its own docstring explaining why).
+`LongTermMemoryStore.search()` is fully synchronous: it globs every
+`*.md` file under the notes directory and calls `path.read_text()` on
+each one in a loop.
+
+**Why this specific gap survived a prior, closely-related fix:**
+`NoteTool.run()`'s own comment -- written when THAT tool's identical
+blocking-call bug was fixed -- explicitly reasoned "`SearchNotesTool`
+below only ever reads (never contends on this lock), so it's
+unaffected and left as-is." True about the lock specifically:
+`search()` never touches the per-topic flock `write()` blocks on. But
+that reasoning conflated "doesn't contend on THIS lock" with "doesn't
+block the event loop" -- two different claims that happened to look
+like the same claim in that sentence. `search()`'s own blocking
+mechanism has nothing to do with locks at all: it's raw synchronous
+file I/O across however many notes exist, freezing the event loop the
+identical way `write()`'s flock-wait did, for a completely unrelated
+reason.
+
+**Confirmed live**, using the exact same heartbeat methodology this
+codebase already established for this bug class (a concurrent
+coroutine ticking every 0.05s, counted during the blocking call): 20
+-000 short notes (~1.8MB total, a plausible amount after long-term
+real use of the `note` tool across many conversations) froze the
+*entire* event loop for the whole ~360ms search -- zero of ~7 expected
+heartbeat ticks landed. Reachable via `search_notes`, a real
+`BUILTIN_TOOL` `AgentLoop.run()` dispatches directly on the process's
+single event loop -- the same loop a real `sarva serve` process uses
+to serve every other concurrent `/chat`/`/ws/chat` request. Any real
+conversation where the model calls `search_notes` triggers this.
+
+**Fixed** by wrapping the call in `asyncio.to_thread`, matching every
+sibling memory tool's existing pattern exactly. Also corrected the
+misleading comment in `NoteTool.run()` that led to this gap surviving
+-- it now names the actual distinction ("no lock contention" vs. "no
+blocking I/O") instead of implying the former covers the latter.
+
+**Verified live** after the fix: the identical 20,000-note search now
+lands 7 of 7 expected heartbeat ticks, event loop fully responsive
+throughout.
+
+**Verified by reverting** `tools.py` alone and watching the new test
+fail with the literal old bug's own number reproducing itself: `0`
+ticks instead of the required minimum.
+
+**1 new test, 729 -> 730 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a follow-up
+subsection directly after the original `NoteTool` freeze-fix chapter,
+correcting its "unaffected" claim and naming the general lesson: a
+comment reasoning about one specific blocking mechanism (a lock) can
+accidentally read as covering blocking-in-general, if the two aren't
+kept explicitly separate in the writing.
+
+**Twenty-nine of the last thirty rounds (46-67, 70-75) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** A fifth
+consecutive round (after 71, 72, 73, 74) where the actual defect was
+adjacent to a prior round's own fix or its own reasoning about a
+related case -- this one is the most direct instance yet, since the
+exact comment explaining why the sibling tool WAS fixed is also the
+comment that (correctly, on its own narrow terms, but misleadingly in
+effect) explained why this one wasn't.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

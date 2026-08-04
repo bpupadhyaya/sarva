@@ -837,6 +837,52 @@ async def test_note_does_not_freeze_the_event_loop_while_waiting_on_a_contended_
     assert ticks >= 10, f"event loop only ticked {ticks} times -- looks frozen"
 
 
+async def test_search_notes_does_not_freeze_the_event_loop_on_a_large_notes_directory(tmp_path):
+    # A real bug found by a fresh-eyes sweep of this exact same file: the
+    # test above's own comment reasoned that SearchNotesTool "only ever
+    # reads (never contends on this lock), so it's unaffected and left
+    # as-is" -- true for lock contention specifically, but that
+    # conflated "no lock contention" with "no blocking I/O."
+    # LongTermMemoryStore.search() is fully synchronous -- it globs every
+    # *.md file under the notes directory and calls path.read_text() on
+    # each one in a loop -- and SearchNotesTool.run() called it directly
+    # with no asyncio.to_thread, exactly the same blocking-call-inside-
+    # async-def shape NoteTool.write already had fixed above it in this
+    # same file. Confirmed live before the fix: 20,000 short notes
+    # (~1.8MB total, a plausible amount after long-term real use of the
+    # `note` tool across many conversations) froze this process's ENTIRE
+    # event loop for the whole ~360ms search -- a heartbeat coroutine
+    # that should tick roughly every 0.05s recorded ZERO ticks across
+    # that window.
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    for i in range(20000):
+        (memory_dir / f"topic-{i}.md").write_text(f"# topic {i}\n\nsome note content here {i}\n")
+
+    store = LongTermMemoryStore(memory_dir)
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+    search = SearchNotesTool(store=store)
+    ctx_obj = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+    result = await search.run({"query": "nonexistent query xyz"}, ctx_obj)
+    hb_task.cancel()
+
+    assert not result.is_error
+    # The real, decisive assertion: while search() globbed and read
+    # 20,000 files, the event loop must have kept running other
+    # coroutines -- a near-zero tick count is the literal old bug
+    # reproducing itself (the loop frozen solid for the whole call).
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
 def test_default_longterm_memory_tools_do_not_open_the_store_until_first_run():
     # Same laziness property as the memory tools above, same reason:
     # BUILTIN_TOOLS constructs these at module import time with no store
