@@ -1034,6 +1034,62 @@ async def test_delegate_task_reports_a_clean_error_when_the_subagent_runs_out_of
     assert run_done[-1].state == AgentState.BUDGET_EXCEEDED
 
 
+async def test_delegate_task_is_rejected_upfront_when_only_token_budget_is_exhausted(run_root):
+    # A real bug found by a fresh-eyes sweep: spawn_subagent's own
+    # upfront rejection gate only ever checked 2 of Budget's 4
+    # dimensions (max_model_calls, max_wall_seconds) -- max_total_tokens
+    # and max_cost_usd are clamped exactly the same way (and can round
+    # down to 0 the identical way) but were never included. A parent
+    # with generous remaining max_model_calls/max_wall_seconds headroom
+    # but a nearly-exhausted TOKEN budget -- an ordinary, foreseeable
+    # case, not contrived -- let a subagent with a granted
+    # max_total_tokens == 0 slip straight past this gate: a full
+    # subagent AgentLoop was actually constructed and run, making one
+    # real, wasted provider.generate() call before its own post-call
+    # spend.exceeded() check caught it. Confirmed live before this fix:
+    # a CountingProvider wrapper observed 3 real calls (parent's
+    # delegate_task call, the subagent's own wasted call, parent's
+    # retry) instead of the 2 a correct upfront rejection produces.
+    call_count = 0
+
+    class _CountingProvider(MockProvider):
+        async def generate(self, request):
+            nonlocal call_count
+            call_count += 1
+            async for event in super().generate(request):
+                yield event
+
+    delegate_call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "do something"})
+    provider = _CountingProvider(
+        script=[
+            ScriptedTurn(tool_calls=[delegate_call]),
+            ScriptedTurn(text="the subagent's own answer -- should never run"),
+            ScriptedTurn(text="parent tries to continue anyway"),
+        ]
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[DelegateTool()],
+        # Generous call/wall-time headroom, but the parent's own first
+        # real call (a scripted tool_calls turn) already consumes enough
+        # of a 42-token budget that half the remainder clamps to 0.
+        budget=Budget(max_total_tokens=42, max_model_calls=50, max_wall_seconds=3600),
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("please delegate this")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0].result.is_error is True
+    assert "did not complete successfully" in finished[0].result.content[0].text
+    # The real, decisive assertion: the subagent must never have made a
+    # real provider call at all -- only the parent's own two calls
+    # (the delegate_task call, then its own continuation) should count.
+    assert call_count == 2, f"expected 2 real calls (subagent rejected upfront), got {call_count}"
+
+
 class _ConcurrentDelegateRaceProvider:
     """First real call: the parent issues TWO concurrent delegate_task
     calls in one TOOL_USE round. Every call after that (the parent's own

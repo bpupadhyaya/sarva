@@ -14202,3 +14202,88 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## spawn_subagent's own upfront rejection gate only ever checked 2 of Budget's 4 dimensions -- a subagent with zero granted token budget still made a real, wasted provider call
+
+Round 88. Delegated a fresh-eyes sweep to a subagent, offering two
+directions: continue the "unvalidated tool-call argument" checklist
+rounds 86-87 established, or pursue genuinely fresh territory. It
+found a real bug in the second direction -- `AgentLoop`'s own
+`spawn_subagent` closure, a function this codebase's own commentary
+already calls "the project's single most productive lens by this
+point" for repeated fresh-eyes sweeps -- verified and shipped directly
+this round.
+
+**The bug:** `spawn_subagent`'s upfront rejection gate --
+`if sub_budget.max_model_calls <= 0 or sub_budget.max_wall_seconds <=
+0: return BUDGET_EXCEEDED` -- only ever checked two of `Budget`'s four
+dimensions. `max_total_tokens`/`max_cost_usd` are computed and clamped
+exactly the same way just above it (and can round down to `0` via
+`int(remaining * _UNSPECIFIED_SHARE)` the identical way
+`max_model_calls` already does), but were never included in this
+upfront rejection.
+
+**Confirmed live**: a parent with generous remaining
+`max_model_calls`/`max_wall_seconds` headroom but a nearly-exhausted
+*token* budget -- an entirely ordinary, foreseeable case (a long-
+running conversation nearing its `Budget.max_total_tokens`), not a
+contrived one -- let a subagent with a granted `max_total_tokens == 0`
+slip straight past this gate. A full subagent `AgentLoop` was then
+actually constructed and run, making one real, wasted
+`provider.generate()` call before its own post-call
+`spend.exceeded()` check caught it. A counting-provider wrapper
+observed 3 real calls (the parent's `delegate_task` call, the
+subagent's own wasted call, the parent's retry) where a correct
+upfront rejection produces only 2.
+
+**Why this echoes the function's own history precisely:** this exact
+gate already exists specifically to prevent "wasted real call" cases
+-- the `max_model_calls`/`max_wall_seconds` half of it was built for
+exactly this purpose, per the function's own extensive comments on two
+earlier fixes in the same closure (the starvation-to-zero fix, then
+the cancellation-leak fix). The gate's own logic simply never got
+extended to cover the other two `Budget` dimensions when they were
+added to the clamping computation just above it.
+
+**Fixed** by checking all four dimensions, matching
+`Spend.exceeded()`'s own complete four-dimension check exactly --
+`Spend.exceeded()` already checks `model_calls`, `total_tokens`,
+`wall_seconds`, and `cost_usd` uniformly; the upfront gate was the one
+place that check wasn't mirrored.
+
+**Verified live**: the identical repro now stops at 2 real calls, the
+subagent never running at all -- the `delegate_task` call itself
+returns a clean `is_error=True` result immediately, with the exact
+same "the subagent did not complete successfully (ended in
+budget_exceeded)" message the function's existing error path already
+produces for the other rejection reasons.
+
+**Verified by reverting** `loop.py` alone and watching the new test
+fail with the literal old bug's own number: 3 real calls instead of
+the 2 a correct upfront rejection produces.
+
+**1 new test, 744 -> 745 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+subsection directly after the "starved concurrent siblings" chapter,
+in the same `spawn_subagent` fix-history chain this function has
+accumulated across multiple prior rounds.
+
+**Forty-three of the last forty-four rounds (46-67, 70-88) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.**
+Notable that this function -- `spawn_subagent` -- has now had four
+separate real bugs found and fixed across separate rounds spanning the
+project's history (starvation-to-zero, cancellation-leak, and now this
+incomplete-gate gap), each one a genuinely different mechanism, not a
+repeat of the same fix. A useful data point that "this function has
+already been fixed several times" is not itself evidence a function is
+now safe -- if anything, a function complex enough to have accumulated
+several real fixes is often complex enough to still have more.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

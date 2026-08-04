@@ -511,7 +511,34 @@ class AgentLoop:
                         remaining_cost,
                     ),
                 )
-                if sub_budget.max_model_calls <= 0 or sub_budget.max_wall_seconds <= 0:
+                # A real bug found by a fresh-eyes sweep: this gate only
+                # ever checked 2 of `Budget`'s 4 dimensions --
+                # `max_total_tokens`/`max_cost_usd` are clamped exactly
+                # the same way as the two checked here (and can round
+                # down to 0 via `int(remaining * _UNSPECIFIED_SHARE)`
+                # the identical way `max_model_calls` already does), but
+                # were never included in this upfront rejection.
+                # Confirmed live: a parent with generous remaining
+                # `max_model_calls`/`max_wall_seconds` headroom but a
+                # nearly-exhausted token budget (an entirely ordinary,
+                # foreseeable case -- a long-running conversation nearing
+                # its `Budget.max_total_tokens`) let a subagent with a
+                # granted `max_total_tokens == 0` slip straight past this
+                # gate. A full subagent `AgentLoop` was then actually
+                # constructed and run, making one real, costly
+                # `provider.generate()` call before its own post-call
+                # `spend.exceeded()` check caught it -- exactly the
+                # "wasted real call" failure mode the `max_model_calls`/
+                # `max_wall_seconds` half of this same gate already
+                # exists to prevent, just for the other two `Budget`
+                # dimensions. Fixed by checking all four, matching
+                # `Spend.exceeded()`'s own complete four-dimension check.
+                if (
+                    sub_budget.max_model_calls <= 0
+                    or sub_budget.max_wall_seconds <= 0
+                    or sub_budget.max_total_tokens <= 0
+                    or sub_budget.max_cost_usd <= 0
+                ):
                     return AgentResult(
                         state=AgentState.BUDGET_EXCEEDED,
                         final_message=None,

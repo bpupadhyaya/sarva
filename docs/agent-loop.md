@@ -831,6 +831,37 @@ is currently unreachable in production — neither `DelegateTool` nor
 call with `budget=None` — so it's recorded here honestly rather than
 solved against a case nothing can reach yet.
 
+### The upfront rejection gate itself only ever checked 2 of `Budget`'s 4 dimensions
+
+A much later fresh-eyes sweep, deliberately continuing the checklist
+this exact function's own fix history already established: the gate
+right after `sub_budget` is computed -- `if sub_budget.max_model_calls
+<= 0 or sub_budget.max_wall_seconds <= 0: return BUDGET_EXCEEDED` --
+only ever checked two of `Budget`'s four dimensions.
+`max_total_tokens`/`max_cost_usd` are clamped exactly the same way
+just above it (and can round down to `0` via `int(remaining *
+_UNSPECIFIED_SHARE)` the identical way `max_model_calls` already
+does), but were never included in this upfront rejection. Confirmed
+live: a parent with generous remaining `max_model_calls`/
+`max_wall_seconds` headroom but a nearly-exhausted *token* budget -- an
+entirely ordinary, foreseeable case (a long-running conversation
+nearing its `Budget.max_total_tokens`), not a contrived one -- let a
+subagent with a granted `max_total_tokens == 0` slip straight past
+this gate. A full subagent `AgentLoop` was then actually constructed
+and run, making one real, wasted `provider.generate()` call before its
+own post-call `spend.exceeded()` check caught it -- exactly the "wasted
+real call" failure mode the `max_model_calls`/`max_wall_seconds` half
+of this same gate already exists to prevent, just never extended to
+the other two `Budget` dimensions. A counting provider wrapper
+observed 3 real calls (the parent's `delegate_task` call, the
+subagent's own wasted call, the parent's retry) where a correct
+upfront rejection produces only 2. Fixed by checking all four
+dimensions, matching `Spend.exceeded()`'s own complete four-dimension
+check exactly. Verified live: the identical repro now stops at 2 real
+calls, the subagent never running at all. Verified by reverting and
+watching the new test fail with the literal old bug's own number -- 3
+calls instead of 2 -- reproducing itself. 1 new test, 744 â 745 total.
+
 ### A cancelled subagent left its full budget reservation stuck on the parent's spend forever
 
 A dedicated sweep of this exact reservation/reconcile mechanism —
