@@ -76,7 +76,22 @@ async def _to_ollama_message(m: Message) -> dict[str, Any]:
                 f"OllamaProvider cannot translate a {type(b).__name__!r} content block "
                 "(no wire-format mapping exists for it yet)"
             )
-    out: dict[str, Any] = {"role": m.role, "content": "".join(text_parts)}
+    # A real bug found by giving this function its own fresh-eyes sweep:
+    # `"".join(text_parts)` with NO separator between entries -- harmless
+    # for the overwhelmingly common one-TextBlock message, but AgentLoop
+    # builds a `Message(role="user", content=list(results))` with one
+    # `ToolResultBlock` per concurrently-dispatched tool call every time
+    # a model turn issues more than one (`asyncio.gather` over the whole
+    # round, see agent/loop.py), which is ordinary use, not an edge
+    # case. Confirmed live: two tool results ("4" and "2") glued into a
+    # single wire-format string "42" -- not just losing which result
+    # came from which tool (an honest, already-documented limitation of
+    # this backend having no dedicated tool-result role at all), but
+    # actively fusing two distinct values into a different, misleading
+    # one. A newline separator is a strict improvement with no
+    # regression for the common single-block case (joining a
+    # one-element list is unaffected either way).
+    out: dict[str, Any] = {"role": m.role, "content": "\n".join(text_parts)}
     if tool_calls:
         out["tool_calls"] = tool_calls
     if images:

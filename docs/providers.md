@@ -96,7 +96,10 @@ knowing if you're adding a fifth:
   `function_response` part, respectively). Ollama's chat API doesn't —
   `_to_ollama_message` renders a `ToolResultBlock`'s text as the plain
   `content` of an ordinary message instead, the honest translation for
-  a wire format with no dedicated concept for it.
+  a wire format with no dedicated concept for it. **Losing which result
+  came from which tool is an accepted limitation of that translation —
+  actively fusing two DIFFERENT results' values together was not, and
+  was a real, separate bug; see below.**
 
 None of this is exposed to callers. `AgentLoop`, `run_benchmark`, and
 `distill()` all just call `provider.generate(request)` and get back the
@@ -415,6 +418,34 @@ the signed case's test already proves. Verified by reverting and
 watching the new test fail exactly where the block should have been:
 `content[0]` was `tool_use`, not `redacted_thinking` — the block simply
 wasn't there. 1 new test, 709 → 710 Python tests.
+
+### Two concurrent tool results silently fused into one misleading value in the Ollama adapter
+
+A fresh-eyes sweep of `_to_ollama_message`'s own request-building side
+(not response parsing, which every other recent adapter fix targeted)
+found `text_parts` — accumulating a `TextBlock`'s text and, separately,
+each `ToolResultBlock`'s text as the loop walks a message's content —
+joined at the end with `"".join(text_parts)`, no separator at all.
+Harmless for the overwhelmingly common single-block message. Not
+harmless for the shape `AgentLoop` actually builds every time a model
+turn issues more than one tool call: `Message(role="user",
+content=list(results))`, one `ToolResultBlock` per concurrently-
+dispatched call (`asyncio.gather` over the whole round) — ordinary use,
+not an edge case. Confirmed live: two tool results, `"4"` and `"2"`,
+glued into the single wire-format string `"42"` — not just losing which
+result came from which tool (the accepted, already-documented
+limitation directly above, from Ollama's chat API having no dedicated
+tool-result role at all), but actively fusing two distinct values into
+a different, misleading one the model on the other end has no way to
+separate back out.
+
+Fixed with a newline separator (`"\n".join(text_parts)`) instead of the
+empty-string join — a strict improvement with zero regression for the
+common single-block case, since joining a one-element list is
+identical either way. Verified live the two results above now translate
+to `"4\n2"`, not `"42"`. Verified by reverting and watching the new
+test fail with the literal old bug's own fused value reproducing
+itself (`'42' == '4\n2'` — false). 1 new test, 710 → 711 Python tests.
 
 ## The model registry: adding a model is a YAML edit, not a code change
 

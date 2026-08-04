@@ -51,6 +51,30 @@ async def test_tool_result_renders_as_plain_text_content():
     assert out == {"role": "user", "content": "sunny, 22C"}
 
 
+async def test_multiple_tool_results_do_not_fuse_into_one_misleading_value():
+    # A real bug found by giving this function its own fresh-eyes sweep:
+    # `"".join(text_parts)` had no separator between entries -- harmless
+    # for the common one-block message, but AgentLoop builds exactly
+    # this shape (one ToolResultBlock per concurrently-dispatched tool
+    # call) every time a model turn issues more than one tool call,
+    # ordinary use, not an edge case. Confirmed live before the fix: two
+    # tool results ("4" and "2") glued into a single wire-format string
+    # "42" -- not just losing which result came from which tool (an
+    # honest, already-documented limitation of this backend having no
+    # dedicated tool-result role at all), but actively fusing two
+    # distinct values into a different, misleading one.
+    m = Message(
+        role="user",
+        content=[
+            ToolResultBlock(tool_call_id="call_1", content=[TextBlock(text="4")]),
+            ToolResultBlock(tool_call_id="call_2", content=[TextBlock(text="2")]),
+        ],
+    )
+    out = await _to_ollama_message(m)
+    assert out["content"] == "4\n2"
+    assert out["content"] != "42"
+
+
 async def test_message_with_no_tool_calls_omits_the_tool_calls_key():
     m = Message(role="user", content=[TextBlock(text="hi")])
     out = await _to_ollama_message(m)
