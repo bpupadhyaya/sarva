@@ -28,6 +28,7 @@ standing in for one that couldn't actually be produced.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import wave
 
@@ -62,8 +63,24 @@ class AudioToTextDegrader:
             # fallback below, not crash the whole agent turn -- the same
             # "never let a best-effort enrichment take down the request"
             # posture the rest of this degrader already has.
+            #
+            # A real bug found by giving this degrader the same
+            # event-loop-freeze lens that had just found NoteTool/
+            # remember/recall_memory blocking the whole process (see
+            # sarva.memory.longterm/sarva.memory.vector): `transcribe()`
+            # runs a blocking subprocess decode followed by real
+            # CPU-bound faster-whisper inference, called directly here
+            # with no `asyncio.to_thread` -- confirmed live, transcribing
+            # one ordinary ~45-word voice message froze the entire event
+            # loop for its full 9-second real transcription time (a
+            # concurrent coroutine that should tick every 0.05s made
+            # ZERO ticks of progress), meaning every OTHER user's
+            # in-flight `/chat`/`/ws/chat` turn in a real `sarva serve`
+            # process would freeze too for as long as this one
+            # transcription takes -- up to this module's own 10-minute
+            # cap for a long attachment, not milliseconds.
             try:
-                text = transcribe(raw)
+                text = await asyncio.to_thread(transcribe, raw)
                 if text:
                     return [TextBlock(text=f"[Audio transcript: {text}]")]
             except Exception:

@@ -28,6 +28,7 @@ named, deferred gap, not an implicit one.
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 from pypdf import PdfReader
@@ -93,7 +94,20 @@ class DocumentToTextDegrader:
 
         extracted: str | None = None
         if block.media_type == "application/pdf":
-            extracted = _extract_pdf_text(raw)
+            # A real bug found by giving this degrader the same
+            # event-loop-freeze lens that had just found AudioToTextDegrader
+            # blocking the whole process (see sarva.multimodal.degraders.
+            # audio): pypdf's own parsing + per-page extract_text() is
+            # synchronous, CPU-bound work called directly here with no
+            # `asyncio.to_thread`. Confirmed live: a realistic 300-page
+            # PDF (this module's own docstring above already treats 300
+            # pages as a plausible real attachment size, not an extreme)
+            # took 0.52s of real wall-clock extraction time -- during
+            # which every other concurrent request in a real `sarva
+            # serve` process would have been frozen, the same shape as
+            # the audio bug, just a smaller and more variable magnitude
+            # depending on document size.
+            extracted = await asyncio.to_thread(_extract_pdf_text, raw)
         elif block.media_type in _PLAIN_TEXT_MEDIA_TYPES:
             try:
                 extracted = raw.decode("utf-8")

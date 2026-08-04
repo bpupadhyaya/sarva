@@ -3,6 +3,7 @@ registry's concrete converters."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import random
 import struct
@@ -100,6 +101,64 @@ def _minimal_pdf_bytes(text: str) -> bytes:
         + b"\nendstream",
         b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
     ]
+    buf = io.BytesIO()
+    buf.write(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(buf.tell())
+        buf.write(f"{i} 0 obj\n".encode())
+        buf.write(obj)
+        buf.write(b"\nendobj\n")
+    xref_offset = buf.tell()
+    n = len(objects) + 1
+    buf.write(f"xref\n0 {n}\n".encode())
+    buf.write(b"0000000000 65535 f \n")
+    for off in offsets:
+        buf.write(f"{off:010d} 00000 n \n".encode())
+    buf.write(b"trailer\n")
+    buf.write(f"<</Size {n}/Root 1 0 R>>\n".encode())
+    buf.write(b"startxref\n")
+    buf.write(f"{xref_offset}\n".encode())
+    buf.write(b"%%EOF")
+    return buf.getvalue()
+
+
+def _multi_page_pdf_bytes(num_pages: int, lines_per_page: int) -> bytes:
+    """A real, hand-built, valid multi-page PDF with real body text on
+    every page -- same byte-offset-correct construction discipline as
+    `_minimal_pdf_bytes`, just with `num_pages` real pages instead of
+    one, to exercise per-page extraction cost at a realistic size (this
+    module's own comment above `_MAX_EXTRACTED_CHARS` already treats a
+    300-page attachment as a plausible real one, not an extreme)."""
+    content_stream = "\n".join(
+        f"BT /F1 12 Tf 50 {700 - i * 12} Td "
+        f"(This is a line of realistic body text number {i} used to stress "
+        f"test PDF text extraction performance.) Tj ET"
+        for i in range(lines_per_page)
+    ).encode("latin-1")
+
+    objects: list[bytes] = [b"<</Type/Catalog/Pages 2 0 R>>"]
+    font_obj_num = 3 + 2 * num_pages
+    kids = " ".join(f"{3 + 2 * p} 0 R" for p in range(num_pages))
+    objects.append(f"<</Type/Pages/Kids[{kids}]/Count {num_pages}>>".encode())
+    for _ in range(num_pages):
+        content_obj_num = len(objects) + 2
+        objects.append(
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents "
+            + str(content_obj_num).encode()
+            + b" 0 R/Resources<</Font<</F1 "
+            + str(font_obj_num).encode()
+            + b" 0 R>>>>>>"
+        )
+        objects.append(
+            b"<</Length "
+            + str(len(content_stream)).encode()
+            + b">>\nstream\n"
+            + content_stream
+            + b"\nendstream"
+        )
+    objects.append(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
+
     buf = io.BytesIO()
     buf.write(b"%PDF-1.4\n")
     offsets = []
@@ -369,6 +428,49 @@ async def test_audio_degrade_produces_a_real_transcript_when_sarva_audio_is_inst
     lowered = out[0].text.lower()
     assert "quick brown fox" in lowered
     assert "lazy dog" in lowered
+
+
+@pytest.mark.skipif(
+    not (_stt_installed() and _tts_available()),
+    reason="needs sarva[audio] (faster-whisper) and a local TTS engine (say/espeak)",
+)
+async def test_audio_degrade_does_not_freeze_the_event_loop_during_real_transcription():
+    # A real bug found by giving this degrader the same event-loop-freeze
+    # lens that had already found NoteTool/remember/recall_memory
+    # blocking the whole process on a contended lock: `transcribe()` runs
+    # a blocking subprocess decode plus real CPU-bound faster-whisper
+    # inference, called directly from this degrader's own `async def
+    # degrade` with no `asyncio.to_thread`. Confirmed live before the
+    # fix: transcribing one ordinary voice message froze the entire
+    # event loop for the full real transcription time -- a heartbeat
+    # coroutine that should tick every 0.05s made ZERO ticks of
+    # progress -- meaning every OTHER user's in-flight `/chat`/`/ws/chat`
+    # turn in a real `sarva serve` process would freeze too, for as long
+    # as this one transcription takes.
+    from sarva.audio import synthesize
+
+    raw = synthesize("The quick brown fox jumps over the lazy dog. " * 10)
+    block = AudioBlock(media_type="audio/wav", data=raw)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+
+    await AudioToTextDegrader().degrade(block)
+
+    hb_task.cancel()
+    # The real, decisive assertion: while transcription ran, the event
+    # loop must have kept running other coroutines -- a near-zero tick
+    # count is the literal old bug reproducing itself (the loop frozen
+    # solid for the whole real transcription window).
+    assert ticks >= 10, f"event loop only ticked {ticks} times -- looks frozen"
 
 
 async def test_audio_wired_into_degrade_message_end_to_end(monkeypatch):
@@ -674,6 +776,39 @@ async def test_document_degrader_truncates_very_long_extracted_text_honestly():
     # which would also match incidental "x"s in words like "text/plain".
     body = out[0].text.split(":]\n\n", 1)[1]
     assert body == "x" * 20_000
+
+
+async def test_document_degrader_does_not_freeze_the_event_loop_on_a_large_pdf():
+    # A real bug found by giving this degrader the same event-loop-freeze
+    # lens that had just found AudioToTextDegrader (immediately above,
+    # in this same sweep) blocking the whole process: pypdf's own
+    # parsing + per-page extract_text() is synchronous, CPU-bound work,
+    # called directly from this degrader's own `async def degrade` with
+    # no `asyncio.to_thread`. A 300-page attachment is not an extreme --
+    # this module's own comment above _MAX_EXTRACTED_CHARS already
+    # treats it as a plausible real one -- and real per-page text
+    # extraction at that size takes real, non-negligible wall-clock
+    # time, during which every OTHER concurrent request in a real
+    # `sarva serve` process would have been frozen too.
+    raw = _multi_page_pdf_bytes(num_pages=300, lines_per_page=50)
+    block = DocumentBlock(media_type="application/pdf", data=raw)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+
+    out = await DocumentToTextDegrader().degrade(block)
+
+    hb_task.cancel()
+    assert "This is a line of realistic body text" in out[0].text
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
 
 
 async def test_document_degrader_falls_back_cleanly_on_a_corrupt_pdf():

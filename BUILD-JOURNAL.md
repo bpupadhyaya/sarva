@@ -11743,3 +11743,75 @@ call's id from a real `enumerate()` index (`f"ollama-{i}"`) over every
 tool call in the response, never falling back to the tool's own name,
 so no collision is possible there regardless of how many calls share a
 name.
+
+
+## Two multimodal degraders froze the whole event loop during ordinary use -- the same "sync call in async def" shape already fixed once for the memory tools, found by sweeping a genuinely fresh area
+
+Round 59. Applied the same event-loop-freeze lens that closed out
+rounds 53-54 (`NoteTool`/`remember`/`recall_memory`) to a genuinely
+different area: `core/sarva/multimodal/degraders/`. `video.py` came
+back clean (decode already runs via `asyncio.create_subprocess_exec`).
+`image.py`'s synchronous Pillow decode is fast enough not to
+demonstrably freeze anything. `audio.py` and `document.py` both had
+real instances of the identical shape.
+
+**`AudioToTextDegrader.degrade()`** called `sarva.audio.transcribe()`
+directly and synchronously -- a blocking subprocess decode followed by
+real, CPU-bound `faster-whisper` inference -- with no `asyncio.
+to_thread`. Confirmed live: transcribing one ordinary ~45-word voice
+message froze the ENTIRE event loop for the full real transcription
+time -- a heartbeat coroutine that should tick every 0.05s made ZERO
+ticks of progress across several real seconds (9.09s in the initial
+repro, 4.86s in the verification run with a shorter clip). `default_
+degraders()` wires this degrader in unconditionally for both `sarva
+serve` and the CLI, and `AgentLoop` reaches it via its ordinary
+fallback path whenever the routed model can't accept audio directly --
+a single user's voice message freezes every OTHER concurrent user's
+turn too, for as long as transcription takes, up to this module's own
+10-minute cap for a long attachment. Completely ordinary use, no
+adversarial input needed.
+
+**`DocumentToTextDegrader`'s PDF path** had a smaller but real instance
+of the same shape, found by extending the same lens one step further
+rather than stopping at the first confirmed hit: `_extract_pdf_text`
+(`pypdf` parsing + per-page `extract_text()`) is also synchronous,
+CPU-bound work called directly with no `asyncio.to_thread`. Verified
+this crosses the "real, not negligible" threshold (unlike `ReadFileTool`/
+`WriteFileTool`'s own file I/O, checked in an earlier round and found
+genuinely negligible even at multi-gigabyte sizes, since realistic
+tool-call argument sizes stay small): a 300-page PDF -- this module's
+own existing comment already treats 300 pages as a plausible real
+attachment size, not an extreme -- built as a real, hand-constructed,
+byte-offset-correct PDF (matching this test file's own established
+`_minimal_pdf_bytes` discipline, not a fixture file or a trust-the-
+library shortcut) took 0.52s of real, measured wall-clock extraction
+time.
+
+**Fixed both the same way:** wrap the blocking call in `asyncio.
+to_thread`. **Verified live** both fixes hold: the real transcription
+case now ticks throughout its ~5-second real duration instead of
+freezing solid; the 300-page PDF case now ticks throughout its
+~0.5-second extraction instead of showing zero progress. **Verified by
+reverting** and watching both new tests fail with the literal old
+bug's own number -- `0` ticks -- reproducing itself. 2 new tests, 707
+-> 709 Python tests, all passing, `ruff check`/`format --check` clean.
+`docs/multimodal.md` gained a new subsection directly under the
+existing PDF decompression-bomb fix.
+
+**Fourteen consecutive rounds now (46-59)** have found real bugs. This
+round is the third time the "synchronous call inside an async def"
+lens has paid off (rounds 53-54, now 59) -- worth naming as a standing
+checklist item for any future new async code, the same way "repeated
+cost in a long-running process" and "does yesterday's fix have a bug"
+already are.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable. `image.py`'s synchronous Pillow decode was
+checked and found not demonstrably freezing anything at realistic
+sizes -- worth a numeric confirmation (not just "probably fine") if a
+future round wants full closure on this lens across every degrader.

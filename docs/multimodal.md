@@ -239,6 +239,47 @@ fix and watched it fail with the raw, uncaught `LimitReachedError`
 before re-applying. All 7 pre-existing document-degrader tests pass
 unchanged. 1 new test, 570 → 571 Python tests.
 
+### Two degraders froze the whole event loop during ordinary use — the same shape already fixed once for the memory tools, found here by giving this module its own fresh-eyes sweep
+
+`AudioToTextDegrader.degrade()` called `sarva.audio.transcribe()`
+directly and synchronously — a blocking subprocess decode followed by
+real, CPU-bound `faster-whisper` inference — with no `asyncio.
+to_thread`, the identical mistake `NoteTool`/`remember`/`recall_memory`
+were fixed for one sweep earlier (see the memory chapter). Confirmed
+live: transcribing one ordinary ~45-word voice message froze the
+*entire* event loop for the full real transcription time — a heartbeat
+coroutine that should tick every 0.05s made **zero** ticks of progress
+across several real seconds. `default_degraders()` wires this degrader
+in unconditionally for both `sarva serve` and the CLI, and `AgentLoop`
+reaches it via its ordinary fallback path whenever the routed model
+can't accept audio directly — a single user's voice message freezes
+every *other* concurrent user's turn too, for as long as transcription
+takes (up to this module's own 10-minute cap for a long attachment).
+
+The same fresh-eyes sweep, applying the identical lens one step
+further, found `DocumentToTextDegrader`'s PDF path had a smaller but
+real instance of the same shape: `_extract_pdf_text` (`pypdf` parsing +
+per-page `extract_text()`) is also synchronous, CPU-bound work called
+directly with no `asyncio.to_thread`. A 300-page PDF — not an extreme;
+this chapter's own paragraph above already treats it as a plausible
+real attachment size — took **0.52s** of real, measured wall-clock
+extraction time, a genuine (if smaller and more size-dependent)
+freeze, not a negligible one: unlike `ReadFileTool`/`WriteFileTool`'s
+own file I/O (checked in an earlier round and found genuinely
+negligible even at multi-gigabyte sizes, since realistic tool-call
+argument sizes stay small), a PDF attached as a media block can
+plausibly be multi-megabyte, and per-page text extraction is real CPU
+work, not just I/O throughput.
+
+Both fixed the same way: wrap the blocking call in `asyncio.to_thread`.
+Verified live both fixes hold: the real transcription case now shows
+the event loop ticking throughout its ~5-second real duration instead
+of freezing solid; the 300-page PDF case now ticks throughout its
+~0.5-second extraction instead of showing zero progress. Verified by
+reverting and watching both new tests fail with the literal old bug's
+own number — `0` ticks — reproducing itself. 2 new tests, 707 → 709
+Python tests.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's
