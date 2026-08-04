@@ -340,6 +340,37 @@ output, the OpenAI test failed with `Failed: DID NOT RAISE ValueError`
 adapters' test files pass unchanged. 3 new tests, 574 → 577 Python
 tests.
 
+### Two parallel calls to the same tool collided onto one id in the Gemini adapter — found by giving tool-call id handling its own fresh-eyes sweep
+
+`google.genai.types.FunctionCall.id` is documented `Optional[str]` on
+the wire, and Gemini frequently leaves it unset. `google_provider.py`'s
+own fallback for that case was `id or name` — harmless for a single
+tool call, but two ordinary parallel calls to the *same* tool in one
+turn (`get_weather("NYC")` and `get_weather("LA")`, a completely
+ordinary agentic pattern, not contrived) both fell back to the
+identical `id="get_weather"`. That collision reaches the wire, not
+just this adapter's internal bookkeeping: `_to_gemini_content` echoes
+`tool_call_id` straight into `FunctionResponse.id`, a field Gemini's
+own docs say exists specifically so the model can match a response
+back to the call that produced it — both responses would carry the
+identical id, defeating that correlation for exactly the two calls
+that most needed it disambiguated. Anthropic and OpenAI don't have
+this gap: their SDKs always supply a real per-call id, so no fallback
+exists on either adapter.
+
+Confirmed live with the existing fake-`SimpleNamespace`-client pattern
+(`test_google_provider_streaming.py`): two function-call parts with
+`id=None` for the same tool name both produced `ToolCallBlock(id=
+"get_weather", ...)`. Fixed with a per-response counter instead of the
+name-only fallback — `f"{name}-{index}"`, incrementing only when
+Gemini genuinely omitted an id — unique within a turn regardless of
+how many calls share a name or how many distinct names appear, while a
+real id Gemini *does* supply is still used exactly as given. Verified
+live the two NYC/LA calls above now get distinct ids. Verified by
+reverting and watching the new test fail with the literal old
+collision reproducing itself (`'get_weather' != 'get_weather'` — both
+sides identical). 2 new tests, 705 → 707 Python tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

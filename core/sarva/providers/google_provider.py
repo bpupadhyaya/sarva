@@ -254,6 +254,25 @@ class GoogleProvider:
         blocks: list[object] = []
         finish_reason: types.FinishReason | None = None
         usage: types.GenerateContentResponseUsageMetadata | None = None
+        # A real bug found by giving this adapter's tool-call id handling
+        # its own fresh-eyes sweep: `function_call.id` is documented as
+        # optional on the wire (google-genai's own `FunctionCall.id`
+        # docstring), and Gemini frequently leaves it unset -- the
+        # previous fallback (`id or name`) collapsed every tool call
+        # sharing a name onto the SAME id whenever id was missing.
+        # Confirmed live: two ordinary parallel calls to the same tool in
+        # one turn (e.g. `get_weather("NYC")` + `get_weather("LA")`, a
+        # completely ordinary agentic pattern) both got
+        # `id="get_weather"`, and that collision propagated all the way
+        # to the wire -- `_to_gemini_content` echoes `tool_call_id` into
+        # `FunctionResponse.id`, a field Gemini's own docs say exists so
+        # the model can match a response back to the call that produced
+        # it, so both responses reached the model carrying the identical
+        # id, defeating that correlation for exactly the two calls that
+        # most needed it disambiguated. Counter-based synthetic ids are
+        # unique within this turn regardless of how many calls share a
+        # name or how many distinct names appear.
+        _synthetic_call_id = 0
 
         try:
             stream = await self._client.aio.models.generate_content_stream(
@@ -276,8 +295,12 @@ class GoogleProvider:
                     elif part.text and part.thought:
                         yield ThinkingDeltaEvent(text=part.text)
                     elif part.function_call:
+                        call_id = part.function_call.id
+                        if not call_id:
+                            call_id = f"{part.function_call.name}-{_synthetic_call_id}"
+                            _synthetic_call_id += 1
                         call = ToolCallBlock(
-                            id=part.function_call.id or part.function_call.name,
+                            id=call_id,
                             name=part.function_call.name or "",
                             arguments=part.function_call.args or {},
                         )

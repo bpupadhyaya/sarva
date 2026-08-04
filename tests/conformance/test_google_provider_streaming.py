@@ -160,6 +160,57 @@ async def test_thought_parts_become_thinking_delta_not_text_delta():
     assert done.message.content[0].text == "the answer is 4"
 
 
+async def test_parallel_calls_to_the_same_tool_get_distinct_ids_when_gemini_omits_them():
+    # A real bug found by giving this adapter's tool-call id handling
+    # its own fresh-eyes sweep: google-genai's own FunctionCall.id is
+    # documented Optional, and Gemini frequently leaves it unset. The
+    # previous fallback (`id or name`) collapsed every call sharing a
+    # name onto the SAME id whenever id was missing -- confirmed live
+    # before this fix, two ordinary parallel calls to the same tool in
+    # one turn (a completely ordinary agentic pattern, not contrived)
+    # both got id="get_weather". That collision reaches the wire: `_to_
+    # gemini_content` echoes tool_call_id into FunctionResponse.id, a
+    # field Gemini's own docs say exists so the model can match a
+    # response back to the call that produced it -- both responses would
+    # have carried the identical id, defeating that correlation for
+    # exactly the two calls that most needed it disambiguated.
+    chunks = [
+        _chunk(
+            parts=[
+                _part(function_call=_function_call(None, "get_weather", {"city": "NYC"})),
+                _part(function_call=_function_call(None, "get_weather", {"city": "LA"})),
+            ],
+            finish_reason="STOP",
+            usage=_usage(10, 5),
+        ),
+    ]
+    provider = GoogleProvider(client=_FakeClient(chunks))
+    events = [e async for e in provider.generate(_simple_request())]
+
+    calls = [e.call for e in events if isinstance(e, ToolCallEvent)]
+    assert len(calls) == 2
+    assert calls[0].id != calls[1].id
+    assert calls[0].arguments == {"city": "NYC"}
+    assert calls[1].arguments == {"city": "LA"}
+
+
+async def test_a_real_function_call_id_from_gemini_is_used_as_is():
+    # The common case (Gemini DOES supply an id) must stay exactly as
+    # given, not overwritten by the synthetic fallback.
+    chunks = [
+        _chunk(
+            parts=[_part(function_call=_function_call("real-id-123", "get_weather", {}))],
+            finish_reason="STOP",
+            usage=_usage(5, 5),
+        ),
+    ]
+    provider = GoogleProvider(client=_FakeClient(chunks))
+    events = [e async for e in provider.generate(_simple_request())]
+
+    calls = [e.call for e in events if isinstance(e, ToolCallEvent)]
+    assert calls[0].id == "real-id-123"
+
+
 async def test_generate_yields_a_clean_stream_error_on_a_malformed_sdk_response():
     # A real bug found by reading google-genai's own source, the same
     # way as the identical gap fixed in ollama_provider.py: the SDK's

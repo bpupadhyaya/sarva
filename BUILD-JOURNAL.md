@@ -11666,3 +11666,80 @@ NaN-validation and explicit-partial-`Budget` gaps remain
 real-but-unreachable. A codebase-wide grep confirmed `run_benchmark`
 and `distill()` are the only two real callers of `complete()` --
 both now fixed, no third call site left unchecked.
+
+
+## Two parallel calls to the same tool collided onto one id in the Gemini adapter -- found by sweeping tool-call id handling specifically, a corner none of the earlier per-provider hardening rounds had checked
+
+Round 58. Ruled out `runtime.py` (Ollama-probe-caching and corrupted-
+checkpoint gaps already fixed and well-covered), `config.py`
+(atomic-write/lock-file hardening already thorough), and `apps/desktop/
+src-tauri/src/lib.rs` (already hardened across 3-4 dedicated rounds:
+signal handling, Windows taskkill, unconditional logger). Swept
+`core/sarva/providers/google_provider.py` instead -- it has a long
+comment trail of individual fixes (dropped tool-result images,
+`UnknownApiResponseError`), but nothing had specifically checked
+tool-call `id` handling.
+
+`google.genai.types.FunctionCall.id` is documented `Optional[str]` on
+the wire (its own docstring: "if populated, the client is expected to
+execute the function_call and return the response with the matching
+id"), and Gemini frequently leaves it unset. The adapter's fallback for
+that case was `id or name` -- harmless for a single tool call in a
+turn, but two ordinary PARALLEL calls to the SAME tool in one turn
+(`get_weather("NYC")` and `get_weather("LA")`, a completely ordinary
+agentic pattern, not contrived) both fell back to the identical
+`id="get_weather"`. This isn't just internal bookkeeping noise: `_to_
+gemini_content` echoes `tool_call_id` straight into `FunctionResponse.
+id`, a field Gemini's own docs say exists specifically so the model can
+match a response back to the call that produced it -- both responses
+would reach the model carrying the identical id, defeating that
+correlation for exactly the two calls that most needed it
+disambiguated. Anthropic and OpenAI don't have this gap at all: their
+SDKs always supply a real per-call id, so no fallback exists on either
+adapter -- this is specifically a Gemini-shaped hole.
+
+**Confirmed live** with the existing fake-`SimpleNamespace`-client
+pattern this file's own streaming tests already use: two function-call
+parts with `id=None` for the same tool name both produced
+`ToolCallBlock(id="get_weather", ...)`, and tracing that id through
+`_to_gemini_content` showed both `FunctionResponse` parts sent back to
+Gemini carrying the identical id too -- the collision reaches the
+wire, not just this adapter's own object identities.
+
+**Fixed** with a per-response counter instead of the name-only
+fallback: `f"{name}-{index}"`, the index incrementing only when Gemini
+genuinely omitted an id (a real id, when Gemini does supply one, is
+still used exactly as given, unchanged). Unique within a turn
+regardless of how many calls share a name or how many distinct names
+appear. **Verified live** the two NYC/LA calls above now get distinct
+ids (`get_weather-0`, `get_weather-1`). **Verified by reverting** and
+watching the new test fail with the literal old collision reproducing
+itself in the assertion failure (`'get_weather' != 'get_weather'` --
+both sides identical). A second new test pins the common case
+unchanged: a real id Gemini supplies is used as-is, not overwritten by
+the synthetic fallback. 2 new tests, 705 -> 707 Python tests, all
+passing, `ruff check`/`format --check` clean. `docs/providers.md`
+gained a new subsection directly under the tool-result-image fix, the
+other recent fresh-eyes sweep of this same trio of adapters.
+
+**Thirteen consecutive rounds now (46-58)** have found real bugs. This
+one is a useful reminder that "this file has had many individual
+fixes already" isn't the same as "this file has had every ANGLE swept"
+-- the many prior Gemini-adapter fixes covered exception handling,
+streaming shape, and content translation, but none had specifically
+walked through what happens when the SAME tool is called twice in one
+turn.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable. Checked the same "same tool called twice in one
+turn" angle against the fourth real provider, Ollama, before closing
+this round out: already clean -- `ollama_provider.py` builds each
+call's id from a real `enumerate()` index (`f"ollama-{i}"`) over every
+tool call in the response, never falling back to the tool's own name,
+so no collision is possible there regardless of how many calls share a
+name.
