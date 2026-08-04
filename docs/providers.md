@@ -530,6 +530,40 @@ on any non-`DONE` terminal state, so a scripted `sarva chat ... ||
 handle_it` can actually detect a failure instead of always seeing exit
 code 0.
 
+### The "zero config, always works" promise had one broken chain — `audio`
+
+A fresh-eyes sweep of the routing data itself (not the `Router` code,
+which is well-tested) found `routing.yaml`'s `audio: [mock]` chain —
+the *only* entry in it — could never actually resolve: `mock`'s own
+`models.yaml` entry didn't declare `audio` in its `modalities_in`
+(only `text`, `image`, `document`). Confirmed live against the real
+shipped YAML: `Router.pick(TaskClass.AUDIO, needs={Modality.AUDIO})`
+raised `LookupError` even with `mock` available — the one guarantee
+this file's own header comment makes ("mock is always last so the CLI
+and test suite work with zero config") broken for exactly the task
+class it exists to cover. `MockProvider.generate()` doesn't actually
+inspect modality at all (it just echoes the last user message's text),
+so there was no real technical limitation being papered over — this
+was purely a registry-data omission. Fixed by adding `audio` (and
+`video`, for the identical reason, ahead of any future `TaskClass.
+VIDEO`) to `mock`'s declared `modalities_in`.
+
+Currently latent in every shipped flow, not something an ordinary
+`sarva run`/`sarva chat` user could hit today: `AgentLoop` only ever
+constructs with `task_class=MAIN` or `SUBTASK`, so `TaskClass.AUDIO`
+(and `ESCALATION`) are defined but never actually invoked by any real
+CLI/server/subagent code path — a real audio attachment routes through
+`AgentLoop`'s own `LookupError`-triggered degrader fallback instead,
+which correctly falls back to the `MAIN` chain with `needs={TEXT}` and
+already works. Fixed anyway, not deferred as unreachable the way the
+quantization/`Budget` gaps are: unlike those, this fix is a one-line,
+zero-risk data correction restoring a promise the config file makes
+about itself, not a design decision requiring new validation logic for
+a path nothing can currently reach. Verified live the fix resolves the
+identical `Router.pick` call. Verified by reverting and watching the
+new test fail with the literal old `LookupError` reproducing itself.
+1 new test, 713 → 714 Python tests.
+
 ### Honestly named: no fabricated registry entries
 
 `OpenAIProvider` and `GoogleProvider` are both real, complete, tested

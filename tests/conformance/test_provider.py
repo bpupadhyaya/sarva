@@ -128,6 +128,26 @@ def test_router_never_returns_unsupported_modality():
     assert Modality.IMAGE in picked.capabilities.modalities_in
 
 
+def test_router_pick_resolves_audio_with_zero_config():
+    # A real bug found by giving routing.yaml its own fresh-eyes sweep:
+    # its own header comment promises "mock is always last so the CLI
+    # and test suite work with zero config," but the `audio: [mock]`
+    # chain -- the ONLY entry in it -- could never actually resolve,
+    # since mock's own models.yaml entry didn't declare `audio` in its
+    # modalities_in. Confirmed live: this exact call raised LookupError
+    # against the real shipped YAML even with mock available, the one
+    # case "always available" is supposed to guarantee never happens.
+    # MockProvider.generate() doesn't inspect modality at all, so there
+    # was no real technical limitation being papered over. Mirrors
+    # test_router_never_returns_unsupported_modality's own VISION case,
+    # which passed already -- this is the AUDIO case that didn't.
+    registry = Registry.load(_DATA_DIR / "models.yaml")
+    routing = load_routing(_DATA_DIR / "routing.yaml")
+    router = Router(registry, routing, available={"mock"})
+    picked = router.pick(TaskClass.AUDIO, needs={Modality.AUDIO})
+    assert Modality.AUDIO in picked.capabilities.modalities_in
+
+
 def test_router_pick_with_a_real_override_bypasses_availability_and_modality():
     registry = Registry.load(_DATA_DIR / "models.yaml")
     routing = load_routing(_DATA_DIR / "routing.yaml")
