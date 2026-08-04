@@ -13223,3 +13223,97 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The sixth bug in the same Ollama probe: `except httpx.HTTPError` doesn't cover a reachable host answering with the wrong body shape
+
+Round 77. Delegated a fresh-eyes sweep to a subagent, steered away
+from the tokenizer (round 70), provider registry/routing/degradation
+(round 71), `runtime.py`/server event-loop blocking (round 72),
+`foundry_provider.py`/`generate.py` (round 73), `openai_provider.py`
+(round 74), `agent/tools.py` memory tools (round 75), and
+`cli.py`'s `transcribe` command (round 76). It found a real one right
+back in `runtime.py`'s Ollama probe -- explicitly told to avoid that
+file, since round 72 had just fixed a different bug there, but the
+finding was genuinely orthogonal (exception handling, not event-loop
+blocking) and well enough verified to accept anyway.
+
+**The bug:** `_probe_ollama()`'s `try/except httpx.HTTPError` covers
+connection failures and non-2xx status codes, but not a *reachable*
+host answering with a 200 whose body isn't the JSON shape Ollama's
+real `/api/tags` returns. `response.json()` raises
+`json.JSONDecodeError` on a non-JSON body -- a `ValueError` subclass,
+not an `httpx.HTTPError` subclass. A differently-shaped-but-*valid*
+JSON body (a top-level list instead of a dict, or a model entry
+missing `"name"`) raises `AttributeError`/`KeyError` instead --
+neither of those is an `httpx.HTTPError` subclass either.
+
+**Why this is a realistic, not contrived, trigger:** `OLLAMA_HOST` is
+a real, user-set environment variable. A reachable-but-not-actually-
+Ollama endpoint at that address is an ordinary real-world condition --
+a corporate captive portal, a stale or misconfigured reverse proxy,
+simple port reuse by an unrelated service on the same host/port -- not
+an adversarial input.
+
+**Confirmed live**, twice (both exception shapes independently):
+`httpx.get` patched to return a 200 with an HTML body raised
+`json.JSONDecodeError` straight out of `ollama_reachable()`; patched
+to return a valid-JSON top-level list raised `AttributeError` from
+`response.json().get("models", [])` (lists have no `.get()`). Both
+crashed `GET /models` and `GET /doctor` with a raw, plain-text 500 --
+`sarva.server.app` registers no generic exception handler besides
+`ConfigError`'s own, and neither endpoint wraps these calls in its own
+try/except. `POST /chat` happened to degrade cleanly to
+`state=failed` instead, but purely by accident: `json.JSONDecodeError`
+is a `ValueError` subclass that handler's own broad `except` already
+covers for a completely unrelated reason (see round 71's degradation-
+fallback chapter), not because anyone had reasoned about this specific
+failure mode there.
+
+**Fixed** with a second `except Exception:` clause after the existing
+`httpx.HTTPError` one, rather than enumerating
+`ValueError`/`AttributeError`/`KeyError` individually one at a time.
+This probe's entire contract, per its own docstring, is
+"best-effort" -- every malformed-response shape should degrade the
+identical way `httpx.HTTPError` already does (treat as unreachable-
+or-nothing-pulled), not get re-litigated exception-type by exception-
+type as each new shape happens to be found. Explicitly the same
+"third exception type from the same call, missed by a command already
+partially fixed" pattern round 76 found in `sarva transcribe`'s
+`--model-size` handling -- generalized correctly here with a broad
+catch-all instead of repeating that narrower-fix cycle a fourth time
+in this same file (this is the *third* fix to this exact probe
+function across the project's history: round 45's redundant-calls
+cache, an earlier round's event-loop-blocking fix, now this).
+
+**Verified live** after the fix: the identical two repros now both
+return a clean 200 from `/models` and `/doctor`.
+
+**Verified by reverting** `runtime.py` alone and watching both new
+tests fail with the literal old bug's exact exceptions reproducing:
+`JSONDecodeError: Expecting value: line 1 column 1 (char 0)` for the
+non-JSON case, `AttributeError: 'list' object has no attribute 'get'`
+for the wrong-shape case.
+
+**2 new tests, 731 -> 733 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a sixth
+entry in the same numbered chain documenting this probe function's
+now-three-times-revisited history.
+
+**Thirty-one of the last thirty-two rounds (46-67, 70-77) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** This
+round's finding sat in a file explicitly marked "already swept" in the
+subagent's own instructions -- worth noting as a real limit of
+"steer away from recently-touched files" as a heuristic: it correctly
+avoids re-litigating the SAME bug, but a file can have more than one
+independent defect, and a fix for one doesn't preclude a genuinely
+different one nearby, the exact throughline every round since 71 has
+been surfacing in one shape or another.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

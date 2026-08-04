@@ -178,3 +178,68 @@ def test_ollama_pulled_models_parses_the_real_api_tags_response_shape(monkeypatc
     monkeypatch.setattr(httpx, "get", _fake_get)
 
     assert runtime.ollama_pulled_models("http://fake-host") == {"qwen2.5:0.5b", "llama3.2:1b"}
+
+
+def test_ollama_probe_survives_a_reachable_host_answering_with_a_non_json_body(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: `except httpx.HTTPError`
+    # alone doesn't cover whatever's actually listening at OLLAMA_HOST
+    # answering with a 200 whose body isn't the JSON shape Ollama's own
+    # /api/tags returns -- a real, ordinary condition (a corporate
+    # captive portal, a stale/misconfigured reverse proxy, simple port
+    # reuse by an unrelated service), not a contrived attack.
+    # response.json() raises json.JSONDecodeError on a non-JSON body,
+    # confirmed live before this fix -- not a subclass of
+    # httpx.HTTPError, so it propagated straight out of
+    # ollama_reachable()/ollama_pulled_models() into build_router()/
+    # run_diagnostics(), crashing GET /models and GET /doctor (neither
+    # has its own try/except, nor is there a generic exception handler
+    # registered besides ConfigError's own) with a raw, plain-text 500.
+    import httpx
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            import json
+
+            return json.loads("<html>captive portal</html>")
+
+    def _fake_get(url, timeout):
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    runtime._ollama_probe_cache.clear()
+
+    # Must not raise -- the whole point of a "best-effort" probe.
+    assert runtime.ollama_reachable("http://weird-host") is True  # connection itself succeeded
+    runtime._ollama_probe_cache.clear()
+    assert runtime.ollama_pulled_models("http://weird-host") == set()
+
+
+def test_ollama_probe_survives_a_reachable_host_returning_a_differently_shaped_json_body(
+    monkeypatch,
+):
+    # A sibling gap found by the same sweep: a *valid* JSON body that
+    # isn't Ollama's own shape (a top-level list instead of a dict, or a
+    # model entry missing "name") raises AttributeError/KeyError instead
+    # of json.JSONDecodeError -- neither a subclass of httpx.HTTPError
+    # either, and neither of these narrower types alone would have
+    # covered the other, the same "one exception type at a time" gap
+    # already found and closed elsewhere in this project.
+    import httpx
+
+    class _FakeListResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return ["not", "the", "expected", "shape"]
+
+    def _fake_get(url, timeout):
+        return _FakeListResponse()
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    runtime._ollama_probe_cache.clear()
+
+    assert runtime.ollama_pulled_models("http://another-weird-host") == set()

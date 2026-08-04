@@ -197,6 +197,41 @@ slow one's duration. Verified by reverting and watching the new test
 fail with the literal old number reproducing itself: `/health took
 0.205s`. 1 new test, 726 -> 727 Python tests.
 
+**A sixth bug in the same probe, found by yet another fresh-eyes
+sweep: `except httpx.HTTPError` only covers connection/status failures,
+not a reachable host answering with a body that isn't Ollama's own
+`/api/tags` shape.** A completely ordinary real-world condition —
+`OLLAMA_HOST` pointing at a corporate captive portal, a stale or
+misconfigured reverse proxy, or simple port reuse by an unrelated
+service — answers with a real HTTP 200, but a body that isn't the JSON
+`{"models": [{"name": ...}, ...]}` shape this probe expects.
+`response.json()` raises `json.JSONDecodeError` on a non-JSON body (a
+`ValueError` subclass, not an `httpx.HTTPError` subclass); a
+differently-shaped-but-*valid* JSON body (a top-level list instead of
+a dict, or a model entry missing `"name"`) raises `AttributeError` or
+`KeyError` instead — neither of those is an `httpx.HTTPError` subclass
+either, and neither narrower type alone would have covered the other.
+Confirmed live: crashed `GET /models` and `GET /doctor` with a raw,
+plain-text 500 (`sarva.server.app` registers no generic exception
+handler besides `ConfigError`'s own, and neither endpoint has its own
+try/except around these calls) — `POST /chat` happened to degrade
+cleanly instead, purely because `json.JSONDecodeError` is a
+`ValueError` subclass that handler's own broad `except` already
+covers for an unrelated reason, not because anyone had reasoned about
+this specific failure mode there either. Fixed with a second `except
+Exception:` clause after the existing `httpx.HTTPError` one, rather
+than enumerating `ValueError`/`AttributeError`/`KeyError` individually
+— this probe's entire contract, per its own docstring, is
+"best-effort," and every malformed-response shape should degrade the
+identical way `httpx.HTTPError` already does (treat as
+unreachable-or-nothing-pulled), not get re-litigated one exception
+type at a time as each new shape is found — the same "third exception
+type from the same call, missed by a command already partially fixed"
+pattern a sibling round found in `sarva transcribe`'s own `--model-size`
+handling, generalized correctly here instead of repeating it a fourth
+time. 2 new tests (one for the invalid-JSON case, one for the
+valid-but-wrong-shape case), 731 -> 733 Python tests.
+
 ### Ollama vision — the named follow-up, closed and verified against a real local vision model
 
 The gap named directly above ("real vision-capable Ollama models do

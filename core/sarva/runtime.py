@@ -69,6 +69,32 @@ def _probe_ollama(host: str) -> tuple[bool, set[str]]:
         pulled = {m["name"] for m in response.json().get("models", [])}
     except httpx.HTTPError:
         pass
+    except Exception:
+        # A real bug found by a fresh-eyes sweep: `except httpx.HTTPError`
+        # alone doesn't cover whatever's actually listening at OLLAMA_HOST
+        # answering with a 200 whose body isn't the JSON shape Ollama's
+        # own `/api/tags` returns -- a real, ordinary condition (a
+        # corporate captive portal, a stale/misconfigured reverse proxy,
+        # simple port reuse by an unrelated service), not a contrived
+        # attack. `response.json()` raises `json.JSONDecodeError` on a
+        # non-JSON body; a differently-shaped-but-valid JSON body (a top-
+        # level list/string instead of a dict, or a dict entry missing
+        # "name") raises `AttributeError`/`KeyError` instead -- neither a
+        # subclass of `httpx.HTTPError`. Confirmed live: this crashed
+        # `GET /models` and `GET /doctor` with a raw, plain-text 500 (no
+        # matching except clause here, and no generic exception handler
+        # registered in sarva.server.app besides ConfigError's own),
+        # unlike `POST /chat`, which only degrades cleanly to
+        # `state=failed` by the accident of `JSONDecodeError` happening to
+        # be a `ValueError` subclass that handler's own broad except
+        # already covers for an unrelated reason. This probe's entire
+        # contract, per its own docstring, is "best-effort" -- treating
+        # every other malformed-response shape the identical way
+        # `httpx.HTTPError` already is (reachable stays whatever it was
+        # set to above, pulled stays empty) is the correct generalization,
+        # not enumerating each new exception type reactively as it's
+        # found one at a time.
+        pass
     _ollama_probe_cache[host] = (now, reachable, pulled)
     return reachable, pulled
 
