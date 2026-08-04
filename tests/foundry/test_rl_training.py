@@ -128,6 +128,24 @@ def test_grpo_step_is_a_deliberate_noop_on_a_single_completion_group_not_nan_cor
         assert torch.equal(before[key], after[key]), f"weights changed at {key} on a no-op step"
 
 
+def test_build_grpo_batch_rejects_an_empty_completion_list_with_a_clear_message():
+    # A real bug found by a fresh-eyes sweep, the same shape already
+    # fixed in the sibling build_sft_batch: max() on the empty
+    # `sequences` list raised a bare "ValueError: max() iterable
+    # argument is empty" instead of a clear, actionable message.
+    # grpo_step's own docstring (see the group-of-one test above)
+    # already documents a group reduced to size ONE as a real scenario
+    # -- filtering out timed-out/errored completions against the real
+    # sandboxed coding-task harness -- and handles it explicitly; a
+    # group reduced to ZERO by that identical filtering is the equally
+    # real symmetric case, just one step earlier in the pipeline, before
+    # grpo_step is ever reached. Confirmed directly before this fix, not
+    # assumed: build_grpo_batch([1, 2, 3], []) raised the bare max()
+    # error.
+    with pytest.raises(ValueError, match="requires at least one completion"):
+        build_grpo_batch([1, 2, 3], [])
+
+
 def test_grpo_training_increases_the_rewarded_behaviors_probability():
     # The real end-to-end proof, mirroring DPO's preference-margin test:
     # after real GRPO training, the policy's probability of producing a

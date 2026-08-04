@@ -13674,3 +13674,81 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The GRPO batch builder's empty-list crash: the exact same bug already fixed in its sibling build_sft_batch, never propagated to this later-written function
+
+Round 82. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across rounds 70-81. It found a real one
+in `foundry/sarva_foundry/train/rl.py`'s `build_grpo_batch`, verified
+and shipped directly this round.
+
+**The bug:** `build_grpo_batch(prompt_ids, completions)` computes
+`max_len = max(len(ids) for ids, _ in sequences)` with no guard for an
+empty `completions` list. `max()` on an empty generator raises a bare,
+uninformative `ValueError: max() iterable argument is empty` --
+technically the right exception type, but naming an internal `max()`
+call the caller never wrote instead of the actual problem.
+
+**This is the exact same bug class already found and explicitly fixed
+in the sibling function `build_sft_batch`** (`sft.py`), which has its
+own `if not examples: raise ValueError("build_sft_batch requires at
+least one example, got an empty list")` guard, with a comment
+documenting the identical "bare max() message" discovery. The
+equivalent guard never made it into `build_grpo_batch`, a
+later-written sibling in the same module family (`build_sft_batch` ->
+`build_dpo_batch` -> `build_grpo_batch`, all feeding the identically-
+shaped `Trainer.*_step` methods).
+
+**Confirmed live**: `build_grpo_batch([1, 2, 3], [])` raised the bare
+`max()` message directly against the real module.
+
+**Why this is concretely reachable, not just theoretically possible:**
+`Trainer.grpo_step`'s own docstring -- already shipped, already fixed
+once for a related edge case -- explicitly documents "a group reduced
+to one after filtering out timed-out/errored completions" as a real
+scenario against the real sandboxed coding-task harness
+(`sarva_foundry.rl.environment`, spec §3.6e), and states plainly
+"neither `build_grpo_batch` nor this method enforces a minimum group
+size." A group reduced to *zero* by that identical filtering is the
+equally real symmetric case -- just one step earlier in the same
+pipeline, hitting `build_grpo_batch` itself (called before
+`grpo_step` is ever reached) rather than the NaN-variance guard
+`grpo_step` already has for the group-of-one case.
+
+**Fixed identically to `build_sft_batch`'s own guard**: an explicit
+`if not completions:` check raising a clear, actionable
+`ValueError("build_grpo_batch requires at least one completion, got an
+empty list")` before the `max()` call is ever reached.
+
+**Verified live** that the non-empty case is completely unaffected:
+`build_grpo_batch([1, 2, 3], [[4, 5], [6]])` still produces the
+correct shapes.
+
+**Verified by reverting** `rl.py` alone and watching the new test
+fail with the literal old bug's own message (`"max() iterable
+argument is empty"`) instead of the new one.
+
+**1 new test, 737 -> 738 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/training.md` gained a
+new paragraph directly after the group-of-one NaN-variance fix it
+follows and explicitly names as its symmetric sibling case.
+
+**Thirty-six of the last thirty-seven rounds (46-67, 70-82) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** A third instance in three rounds (after 80's SDK gap
+mirroring the desktop app, and 81's reward-function gap mirroring the
+eval harness) of a fix that shipped in one function never propagating
+to a sibling that shares its shape and purpose -- worth continuing to
+treat "these functions mirror each other" comments (this codebase
+writes them explicitly, in its own docstrings, every time) as a
+standing prompt to check whether a later fix to one sibling actually
+reached the others, not just the one it was written for.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -83,6 +83,21 @@ def build_grpo_batch(
     completion's own tokens (never the shared prompt), so
     `sequence_logprobs` sums exactly the log-probability of what the
     policy actually generated."""
+    if not completions:
+        # A real bug found by a fresh-eyes sweep, the same shape already
+        # fixed in the sibling build_sft_batch: max() on the empty
+        # `sequences` list below raised a bare "ValueError: max()
+        # iterable argument is empty" -- technically the right exception
+        # type, but a confusing, undocumented message naming an internal
+        # implementation detail instead of the actual problem.
+        # Trainer.grpo_step's own docstring already documents a group
+        # reduced to size ONE as a real scenario ("filtering out
+        # timed-out/errored completions" against the real sandboxed
+        # coding-task harness) and handles it explicitly -- a group
+        # reduced to ZERO by that identical filtering is the equally
+        # real symmetric case, just one step earlier in the same
+        # pipeline, before grpo_step is ever reached.
+        raise ValueError("build_grpo_batch requires at least one completion, got an empty list")
     sequences = [(prompt_ids + c, len(prompt_ids)) for c in completions]
     max_len = max(len(ids) for ids, _ in sequences)
     if max_len < 2:

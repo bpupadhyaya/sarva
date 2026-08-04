@@ -539,6 +539,28 @@ to the documented no-op contract itself, since NaN-variance genuinely
 *is* the same "no relative signal to learn from" situation the
 existing guard already names.
 
+**The equally real symmetric case, one step earlier in the same
+pipeline, found by a much later fresh-eyes sweep: a group filtered down
+to *zero* completions.** The group-of-one fix above already documents
+"a group filtered down to one after removing timed-out/errored
+completions" as a real scenario against the sandboxed coding-task
+harness — the identical filtering reducing a group to *zero* is
+equally real, and hits `build_grpo_batch` itself (called before
+`grpo_step` is ever reached) rather than the NaN-variance guard.
+`max(len(ids) for ids, _ in sequences)` over the resulting empty list
+raised a bare, uninformative `ValueError: max() iterable argument is
+empty` — the exact same bug class already found and fixed in the
+sibling `build_sft_batch` (see the SFT section above), just never
+propagated to this later-written sibling function. Confirmed directly:
+`build_grpo_batch([1, 2, 3], [])` raised that bare message before this
+fix. Fixed identically to `build_sft_batch`'s own guard: an explicit
+`if not completions:` check raising a clear, actionable
+`ValueError("build_grpo_batch requires at least one completion, got an
+empty list")` before the `max()` call is ever reached. Verified the new
+test is real: reverted the fix and watched it fail with the literal old
+bug's own message (`"max() iterable argument is empty"`) instead of the
+new one, before re-applying.
+
 `examples/14_grpo_rl_training.py` runs that exact scenario and prints
 the real before/after rates, then prints — labeled explicitly as
 illustrative, not executed — exactly how `CODING_TASKS`/
