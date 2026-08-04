@@ -220,6 +220,57 @@ real timed-out command's side-effect file genuinely never appears,
 confirmed with the process both killed and reaped, not just reported
 as failed.
 
+### `RunShellTool` buffered its ENTIRE output with no size limit at all — and the fix for that itself introduced a real deadlock, caught before shipping
+
+A much later fresh-eyes sweep of this same tool, one layer beyond the
+timeout fix above, found `proc.communicate()` had no output-size limit
+whatsoever, unlike `WebFetchTool`'s own `_MAX_FETCH_CHARS` cap sitting
+right next to it in the same module. Confirmed live: a completely
+ordinary command (`yes A | head -c 300MB` — the same shape as `git log
+-p`, a verbose build, or `cat`-ing a large data file, not a contrived
+attack) drove real process peak RSS from ~45MB to ~1GB, and the full,
+untruncated 300MB string was then appended into `messages`, resent to
+the provider on every later turn of the same run — a real memory- and
+context/cost-blowup risk in a long-running `sarva serve` process, the
+same "materialize everything before use" DoS shape already fixed for
+the video-frame degrader and local STT, never applied here.
+
+Fixed by reading `proc.stdout` in bounded chunks and stopping the READ
+itself once a cap is hit (`_MAX_SHELL_OUTPUT_BYTES`), rather than
+capturing everything and truncating the resulting string afterward —
+the latter would still incur the full memory spike before throwing the
+excess away, the actual harm this fix exists to prevent.
+
+**Verifying that fix, before it ever shipped, surfaced a second, real
+bug in the fix itself:** killing the process once the size cap fires
+(the same "don't leave an unwanted side effect running unattended"
+reasoning as the timeout fix above) hung indefinitely on a real shell
+*pipeline*. `proc.kill()` only sends `SIGKILL` to the shell
+interpreter `asyncio` tracks — not to the actual commands a pipeline
+forks (`yes`/`head` here, connected by their own internal pipe).
+Confirmed live: after stopping an early read and killing just the
+shell, the pipeline's real commands stayed alive and orphaned, still
+blocked writing into a pipe nothing was draining anymore — `await
+proc.wait()` then hung forever, since the shell itself died instantly
+but its still-running children kept the underlying pipe's write end
+open. Fixed by spawning the shell with `start_new_session=True` (its
+own process group) and killing via `os.killpg` instead of a plain
+`proc.kill()` — reaching every process in the pipeline, not just the
+one PID this project happens to track — applied to both the size-cap
+kill and the pre-existing timeout kill above, since both shared the
+identical latent gap once a pipeline is involved. Verified live both
+fixes hold together: a 300MB pipeline command now completes in ~0.01s
+with peak RSS barely above baseline, correctly truncated and
+`is_error=True`; ordinary commands (including real pipelines that
+finish on their own) are unaffected; the timeout path still kills
+cleanly. Verified by reverting and watching both new tests fail
+cleanly (the size-cap constant simply doesn't exist pre-fix — this is
+a genuinely new mechanism, not a modified existing one, the same
+"revert-and-verify still applies, just to 'does this exist at all'
+instead of 'does the old bug reproduce'" shape prior genuinely-new
+mechanisms in this project have used). 2 new tests, 720 → 722 Python
+tests.
+
 ### Two destructive calls sharing the same `tool_call_id` could let a declined one run anyway — the confirm-gate's own key, not a tool bug
 
 **Worse than any crash in this file: a declined destructive call

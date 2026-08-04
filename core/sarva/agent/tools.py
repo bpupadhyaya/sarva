@@ -8,6 +8,8 @@ to gate on confirmation. This keeps the security policy in one place: an
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -32,6 +34,24 @@ from sarva.providers.base import ToolSpec
 _MAX_FETCH_CHARS = 50_000
 _MAX_REDIRECTS = 5
 _SHELL_TIMEOUT_SECONDS = 60
+# A real bug found by giving this tool its own fresh-eyes sweep, one
+# layer beyond the already-fixed timeout-doesn't-kill-the-process gap:
+# `proc.communicate()` buffers the ENTIRE stdout+stderr stream in
+# memory with no size limit at all, unlike WebFetchTool right below
+# (which caps its own output via _MAX_FETCH_CHARS). Confirmed live: a
+# completely ordinary command (`yes A | head -c 300MB` -- the same
+# shape as `git log -p`, a verbose build, or `cat`-ing a large data
+# file, not a contrived attack) drove real process peak RSS from ~45MB
+# to ~1GB, and the full, untruncated 300MB string was then appended
+# into `messages`, resent to the provider on every later turn of the
+# same run. Bounded here by actually stopping the READ (and killing
+# the still-running process, the same "don't leave an unwanted side
+# effect running unattended" reasoning the timeout fix above already
+# established) once the cap is hit, not by capturing everything and
+# truncating the string afterward -- capturing-then-truncating would
+# still incur the full memory spike before ever throwing the excess
+# away.
+_MAX_SHELL_OUTPUT_BYTES = 1_000_000
 
 
 class ToolContext:
@@ -247,6 +267,49 @@ class EditFileTool:
         )
 
 
+async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kills the WHOLE process group the shell command runs in, not just
+    the shell interpreter `proc` itself -- a real deadlock found while
+    verifying the size-cap fix below, before it ever shipped: a shell
+    pipeline (e.g. `yes A | head -c N`) forks multiple real child
+    processes connected by their own internal pipe, and `proc.kill()`
+    only sends SIGKILL to the shell that spawned them, not to those
+    children. Confirmed live: killing just the shell after stopping an
+    early read left the pipeline's actual commands alive and orphaned,
+    still blocked trying to write into a pipe nothing was draining
+    anymore -- `await proc.wait()` then hung indefinitely waiting for a
+    shell that itself died instantly but whose still-running children
+    kept the underlying pipe's write end open. `start_new_session=True`
+    (set at the call site) puts the shell in its own process group at
+    spawn time specifically so this function can reach every process in
+    it via `os.killpg`, not just the one PID this project happens to be
+    tracking."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # already exited on its own between the timeout/cap firing and this call
+    await proc.wait()
+
+
+async def _read_stream_bounded(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]:
+    """Reads from `stream` until EOF or until strictly more than `limit`
+    bytes have been accumulated, whichever comes first -- returns
+    `(data[:limit], truncated)`. Deliberately stops the READ itself
+    rather than reading everything and slicing the result afterward:
+    the latter would still incur the full memory cost of whatever the
+    stream produced before throwing the excess away, exactly the gap
+    this function exists to close for `RunShellTool` below."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = await stream.read(65536)
+        if not chunk:
+            return b"".join(chunks), False
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)[:limit], True
+
+
 class RunShellTool:
     """Destructive by default — the loop's default confirm policy asks first."""
 
@@ -264,14 +327,24 @@ class RunShellTool:
     )
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        # start_new_session=True (POSIX only) puts the shell in its own
+        # process group so `_kill_process_group` below can actually
+        # terminate the WHOLE pipeline, not just the shell interpreter
+        # itself -- see that function's own docstring for the real
+        # deadlock this closes, found while verifying the size-cap fix
+        # immediately below, before it ever shipped.
         proc = await asyncio.create_subprocess_shell(
             args["command"],
             cwd=ctx.workdir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_SHELL_TIMEOUT_SECONDS)
+            stdout, truncated = await asyncio.wait_for(
+                _read_stream_bounded(proc.stdout, _MAX_SHELL_OUTPUT_BYTES),
+                timeout=_SHELL_TIMEOUT_SECONDS,
+            )
         except TimeoutError:
             # A real bug found by actually running a long-lived shell
             # command against a shortened timeout: asyncio.wait_for()
@@ -284,8 +357,7 @@ class RunShellTool:
             # stop unwanted side effects, and a silent timeout defeated
             # it by leaving the command running unattended regardless of
             # what the user actually approved.
-            proc.kill()
-            await proc.wait()
+            await _kill_process_group(proc)
             return ToolResultBlock(
                 tool_call_id="",
                 content=[
@@ -295,9 +367,22 @@ class RunShellTool:
                 ],
                 is_error=True,
             )
+        if truncated:
+            # The same "don't leave an unwanted side effect running
+            # unattended" reasoning as the timeout branch above: once
+            # we've decided to stop reading, leaving the process alive
+            # to keep producing output nobody will see is exactly the
+            # gap that branch already exists to close, just reached via
+            # a size cap instead of a time cap.
+            await _kill_process_group(proc)
+        else:
+            await proc.wait()
+        text = stdout.decode(errors="replace")
+        if truncated:
+            text += f"\n\n[truncated to {_MAX_SHELL_OUTPUT_BYTES} bytes and killed]"
         return ToolResultBlock(
             tool_call_id="",
-            content=[TextBlock(text=stdout.decode(errors="replace"))],
+            content=[TextBlock(text=text)],
             is_error=proc.returncode != 0,
         )
 

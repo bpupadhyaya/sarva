@@ -295,6 +295,57 @@ async def test_run_shell_timeout_kills_the_child_process_and_its_side_effects(ct
 
 
 @pytest.mark.asyncio
+async def test_run_shell_output_is_bounded_not_buffered_without_limit(ctx, monkeypatch):
+    # A real bug found by giving this tool its own fresh-eyes sweep, one
+    # layer beyond the already-fixed timeout-doesn't-kill-the-process
+    # gap above: proc.communicate() buffered the ENTIRE stdout+stderr
+    # stream with no size limit at all, unlike WebFetchTool right below
+    # (which caps its own output via _MAX_FETCH_CHARS). Confirmed live:
+    # a completely ordinary command (`yes A | head -c 300MB` -- the same
+    # shape as `git log -p`, a verbose build, or `cat`-ing a large data
+    # file, not a contrived attack) drove real process peak RSS from
+    # ~45MB to ~1GB, and the full, untruncated 300MB string was then
+    # appended into `messages`, resent to the provider on every later
+    # turn of the same run. A small monkeypatched cap here proves the
+    # read genuinely stops early rather than buffering everything then
+    # slicing the result -- the latter would still incur the full
+    # memory cost this fix exists to avoid.
+    monkeypatch.setattr(tools_module, "_MAX_SHELL_OUTPUT_BYTES", 100)
+    shell = RunShellTool()
+
+    result = await asyncio.wait_for(
+        shell.run({"command": "yes A | head -c 10000000"}, ctx), timeout=10
+    )
+
+    assert result.is_error is True  # killed mid-stream -> nonzero/negative returncode
+    assert len(result.content[0].text) < 1000  # nowhere near the full 10MB
+    assert "truncated" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_run_shell_kills_the_whole_pipeline_not_just_the_shell(ctx, monkeypatch):
+    # A real bug found while VERIFYING the size-cap fix above, before it
+    # ever shipped: a naive `proc.kill()` only sends SIGKILL to the
+    # shell interpreter itself, not to the real child processes a
+    # pipeline forks (`yes`/`head` here). Confirmed live: killing just
+    # the shell after stopping an early read left the pipeline's actual
+    # commands alive and orphaned, still blocked trying to write into a
+    # pipe nothing was draining anymore -- `await proc.wait()` then hung
+    # indefinitely, since the shell itself died instantly but its
+    # still-running children kept the underlying pipe's write end open.
+    # This test would hang (and fail via the outer asyncio.wait_for)
+    # without `start_new_session=True` + `os.killpg` in the real fix.
+    monkeypatch.setattr(tools_module, "_MAX_SHELL_OUTPUT_BYTES", 100)
+    shell = RunShellTool()
+
+    result = await asyncio.wait_for(
+        shell.run({"command": "yes A | head -c 10000000"}, ctx), timeout=10
+    )
+
+    assert result.is_error is True
+
+
+@pytest.mark.asyncio
 async def test_web_fetch_rejects_non_http_schemes(ctx):
     tool = WebFetchTool()
     result = await tool.run({"url": "file:///etc/passwd"}, ctx)

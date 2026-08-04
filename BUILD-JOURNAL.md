@@ -12169,3 +12169,90 @@ The three infra-blocked items remain deferred (Tauri `csp: null`, RL
 harness sandboxing, inference batching); the quantization/`Budget`
 NaN-validation and explicit-partial-`Budget` gaps remain
 real-but-unreachable.
+
+
+## `RunShellTool` buffered its ENTIRE output with no size limit -- and the fix for that itself deadlocked on a real pipeline, caught before it ever shipped
+
+Round 67. Confirmed the only prior `RunShellTool` fix was the
+timeout-doesn't-kill-the-child bug; the unbounded-stdout-capture issue
+was never addressed. `proc.communicate()` buffers the entire
+stdout+stderr stream with no size limit at all, unlike `WebFetchTool`
+right below it in the same module (which caps its own output via
+`_MAX_FETCH_CHARS`). Confirmed live: a completely ordinary command
+(`yes A | head -c 300MB` -- the same shape as `git log -p`, a verbose
+build, or `cat`-ing a large data file, not a contrived attack) drove
+real process peak RSS from ~45MB to ~1GB, and the full, untruncated
+300MB string was then appended into `messages`, resent to the provider
+on every later turn of the same run.
+
+**Fixed** by reading `proc.stdout` in bounded chunks and stopping the
+READ itself once a cap is hit (`_MAX_SHELL_OUTPUT_BYTES = 1_000_000`),
+rather than capturing everything and truncating the resulting string
+afterward -- the latter would still incur the full memory spike before
+throwing the excess away.
+
+**Verifying that fix, before it ever shipped, surfaced a real bug in
+the fix itself.** Testing the size-cap path against the exact same
+`yes A | head -c N` shape produced an indefinite hang, not a clean
+truncation -- confirmed by isolating step by step: the very first
+`stream.read()` call completed fine, but `proc.kill()` + `await
+proc.wait()` afterward hung forever. Root cause: `proc.kill()` only
+sends `SIGKILL` to the shell interpreter `asyncio` itself tracks, not
+to the real child processes a pipeline forks (`yes`/`head`, connected
+by their own internal pipe). Killing just the shell after stopping an
+early read left the pipeline's actual commands alive and orphaned,
+still blocked writing into a pipe nothing was draining anymore --
+`await proc.wait()` waits specifically for the tracked shell process,
+which died instantly, but the underlying pipe's write end stayed open
+because its orphaned children kept holding it, so the read side never
+saw EOF and reaping hung.
+
+**Fixed** by spawning the shell with `start_new_session=True` (its own
+process group at creation time) and killing via `os.killpg(os.getpgid
+(proc.pid), signal.SIGKILL)` instead of a plain `proc.kill()` --
+reaching every process in the pipeline, not just the one PID this
+project happens to track. Applied to BOTH the new size-cap kill and
+the pre-existing timeout kill, since both shared the identical latent
+gap the moment a pipeline is involved -- the original timeout fix's
+own test never exercised a pipeline, so this specific gap in it went
+unnoticed until now.
+
+**Verified live** both fixes hold together: the 300MB pipeline command
+now completes in ~0.01s with peak RSS barely above baseline (49.7MB
+vs. the original ~1022MB), correctly truncated with `is_error=True`;
+ordinary commands (echo, exit codes, a real pipeline finishing on its
+own) are unaffected; the timeout path still kills cleanly and quickly.
+**Verified by reverting** and watching both new tests fail cleanly --
+the size-cap constant simply doesn't exist pre-fix, a genuinely new
+mechanism rather than a modified existing one, so revert-and-verify
+here proves "this doesn't exist at all without the fix" rather than
+"the old bug's exact behavior reproduces," the same shape prior
+genuinely-new mechanisms in this project have used. 2 new tests, 720
+-> 722 Python tests, all passing, `ruff check`/`format --check` clean.
+`docs/agent-loop.md` gained a new subsection directly under the
+original timeout fix, the one this closes a gap in twice over.
+
+**Twenty-two consecutive rounds now (46-67)** have found real bugs.
+This round is the third time a fix-in-progress was caught having its
+own real bug before shipping (after round 51's off-by-one and round
+54's lazy-construction gap) -- this time the self-caught bug was
+actually MORE severe than a naive version of the original fix would
+have been (an indefinite hang vs. a memory leak), a reminder that
+"verify the fix live, thoroughly, before calling it done" catches real
+regressions a fix itself can introduce, not just confirms the original
+bug is gone.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable. `WebFetchTool` has the SAME shallower version of
+this round's first bug (captures the full HTTP response body before
+truncating the resulting string, rather than bounding the download
+itself) -- lower urgency than the shell tool (web response sizes are
+typically far smaller and more bounded than arbitrary local command
+output), left as a known, named, lower-priority gap rather than fixed
+in this same round, matching the project's discipline of scoping each
+round's fix to what's actually confirmed to matter most.
