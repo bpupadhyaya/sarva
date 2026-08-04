@@ -163,6 +163,40 @@ case.
 
 **A fourth real cost this same pair of functions had, found much later by a round-45 sweep applying the "expensive work repeated on every ordinary call in a long-running process" lens** (the same one that fixed `AgentLoop`'s leaking run directories and `FoundryProvider`'s repeated checkpoint reloads): `ollama_reachable()` and `ollama_pulled_models()` each independently hit the real `/api/tags` endpoint, and `sarva.server.app`'s `/chat`/`/ws/chat` handlers call `build_router()` immediately followed by `build_providers()` on *every* request — so one request made 2-3 redundant, identical network calls to the same endpoint, even requests that never end up routed to Ollama at all (routing hasn't been decided yet when these functions run). Confirmed live: pointing `OLLAMA_HOST` at a black-holed address (a realistic firewalled or slow-starting host, not just "nothing on localhost") measured 0.61s of pure blocking network wait added to a single request. Fixed with a short-TTL (2s) cache shared by both functions, keyed by host — long enough to collapse the redundant calls within one request, short enough that a server actually starting up mid-session is still noticed within a couple of requests. The cache preserves both functions' exact pre-existing independent semantics (`ollama_reachable()` true on any successful connection regardless of HTTP status; `ollama_pulled_models()` only populated on an actual 2xx), verified directly against a faked 500 response. Verified by reverting and watching the new test fail with `AttributeError: module 'sarva.runtime' has no attribute '_ollama_probe_cache'`. 2 new tests, all pre-existing runtime tests pass unchanged.
 
+**A fifth bug in the same probe, found by a much later fresh-eyes
+sweep: the round-45 fix above cut the redundant calls down to one, but
+never addressed that the one remaining call still fully freezes the
+process's event loop.** `_probe_ollama` calls the plain synchronous
+`httpx.get()` — a real blocking network call — directly inside
+functions (`ollama_reachable`/`ollama_pulled_models`, and in turn
+`build_router`/`build_providers`/`run_diagnostics`) that
+`sarva.server.app`'s `/models`, `/doctor`, `POST /config`, `/chat`, and
+`/ws/chat` handlers all call inline from their own `async def` bodies,
+with no `asyncio.to_thread` anywhere in the chain. A synchronous
+network call inside an `async def`, called directly rather than
+offloaded to a thread, doesn't just add latency to its own request —
+it blocks the *entire* event loop for the full call, exactly the same
+bug class already found and fixed for `VectorMemoryStore`'s sqlite
+calls, `LongTermMemoryStore`'s flock, and both multimodal degraders'
+subprocess decodes. Confirmed live with a real `httpx.AsyncClient`
+over the app's own ASGI transport (genuine concurrency, not the
+synchronous `TestClient`): racing a slow `/models` call (Ollama probe
+patched to block for 0.2s) against a concurrent, completely unrelated
+`/health` call — which touches none of the same code and should
+return in microseconds — the unrelated call took the *full* 0.205s
+too, starved of any chance to run until the slow call's blocking chunk
+released the thread. Fixed by wrapping each of the 5 real call sites in
+`sarva.server.app` with `asyncio.to_thread`, moving the blocking
+network I/O off the event loop — `runtime.py`'s own functions stay
+synchronous, since `sarva doctor`/`sarva models` call them from plain,
+non-async CLI commands with no event loop to block in the first place;
+only the server's concurrent, multi-request context has the severity
+that makes this worth fixing. Verified live after the fix: the same
+race now measures the unrelated request at ~3ms, independent of the
+slow one's duration. Verified by reverting and watching the new test
+fail with the literal old number reproducing itself: `/health took
+0.205s`. 1 new test, 726 -> 727 Python tests.
+
 ### Ollama vision — the named follow-up, closed and verified against a real local vision model
 
 The gap named directly above ("real vision-capable Ollama models do

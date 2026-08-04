@@ -249,6 +249,63 @@ async def test_two_concurrent_chat_turns_on_the_same_session_do_not_lose_a_messa
     assert user_texts == {"turn-A", "turn-B"}
 
 
+async def test_a_slow_ollama_probe_does_not_stall_a_concurrent_request(monkeypatch):
+    # A real bug found by a fresh-eyes sweep of runtime.py: build_router()
+    # (and build_providers()/run_diagnostics(), which call it internally)
+    # makes a real, SYNCHRONOUS httpx.get() call to probe whether Ollama
+    # is reachable (runtime._probe_ollama) -- called directly, with no
+    # asyncio.to_thread, from every one of /models, /doctor, POST /config,
+    # /chat, and /ws/chat's own async handlers. A synchronous network call
+    # inside an `async def` fully blocks this process's ENTIRE event loop
+    # for the whole call, not just the one request making it -- confirmed
+    # live before this fix, using a real httpx.AsyncClient over the app's
+    # own ASGI transport (genuine concurrency, not the synchronous
+    # TestClient) racing a slow /models call against an unrelated,
+    # instant /health call: the slow call reliably starved /health of any
+    # chance to run until the slow call finished, even though /health
+    # touches none of the same code and should have returned in
+    # microseconds. Fixed by wrapping each build_router()/
+    # build_providers()/run_diagnostics() call at its 5 call sites in
+    # asyncio.to_thread, so the blocking network I/O runs off the event
+    # loop thread.
+    import time
+
+    import httpx
+    import sarva.runtime as runtime_module
+
+    def slow_get(url, timeout=0.3):
+        time.sleep(0.2)  # simulate a slow/unreachable Ollama host's real network wait
+        raise httpx.ConnectError("simulated slow-then-unreachable host")
+
+    monkeypatch.setattr(runtime_module.httpx, "get", slow_get)
+    runtime_module._ollama_probe_cache.clear()
+
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        loop = asyncio.get_event_loop()
+        # Both tasks created back-to-back, timer started before either runs
+        # a single step -- NOT `await`ing/sleeping between them, which
+        # would let the slow task's blocking chunk run (and finish)
+        # *during* that gap, making the fast request measure as fast
+        # regardless of whether the bug is fixed (confirmed by hand: an
+        # earlier version of this test with an intervening `await
+        # asyncio.sleep(0.02)` before starting the timer passed even
+        # against the unfixed code, for exactly this reason).
+        t0 = loop.time()
+        slow_task = asyncio.create_task(client.get("/models"))
+        fast_task = asyncio.create_task(client.get("/health"))
+        fast_resp = await fast_task
+        fast_elapsed = loop.time() - t0
+        slow_resp = await slow_task
+
+    assert slow_resp.status_code == 200
+    assert fast_resp.status_code == 200
+    # The unrelated /health request must complete quickly -- if the event
+    # loop were still frozen by the slow probe, this would take roughly
+    # as long as the probe itself (~0.2s), not a few milliseconds.
+    assert fast_elapsed < 0.1, f"/health took {fast_elapsed:.3f}s -- event loop was blocked"
+
+
 def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
     _force_mock_only(monkeypatch)
     monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)

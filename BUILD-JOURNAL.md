@@ -12749,3 +12749,108 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The Ollama probe's round-45 caching fix cut redundant calls to one, but the one remaining call still froze the whole server's event loop for every concurrent request
+
+Round 72. Delegated a fresh-eyes sweep to a subagent, steered away from
+the tokenizer (round 70) and the provider registry/routing/degradation
+path (round 71) toward memory, provider streaming parsers, the RL
+harness, and the remaining agent tools. It found a real one in
+`sarva.runtime`, verified and shipped directly this round.
+
+**The bug:** `_probe_ollama()` (`sarva/runtime.py`) calls the plain
+synchronous `httpx.get()` -- a real blocking network call -- directly.
+`ollama_reachable()`/`ollama_pulled_models()` call it, and in turn
+`build_router()`/`build_providers()`/`run_diagnostics()` call *those*
+-- and `sarva.server.app`'s `/models`, `/doctor`, `POST /config`,
+`/chat`, and `/ws/chat` handlers all call these functions directly,
+inline, from their own `async def` bodies, with no `asyncio.to_thread`
+anywhere in the chain. A synchronous network call inside an `async
+def`, called without offloading it to a thread, doesn't just add
+latency to its own request -- it blocks the *entire* event loop for the
+full call. This is the exact same bug class this project has found and
+fixed repeatedly elsewhere (`VectorMemoryStore`'s sqlite calls,
+`LongTermMemoryStore`'s flock, both multimodal degraders' subprocess
+decodes) -- just missed here, in a function whose own docstring says
+"never blocks startup for more than a beat," true only in the narrow
+sense of duration, not in the sense that actually matters for a
+concurrent server.
+
+**Why it survived this long:** a round-45 sweep already looked hard at
+this exact function and found a real, related bug -- `ollama_reachable()`
+and `ollama_pulled_models()` each independently hit the same endpoint,
+so one request made 2-3 redundant network calls. That round fixed the
+redundancy with a 2-second TTL cache, measured "0.61s of pure blocking
+network wait" against a black-holed host, and characterized the fix
+purely as removing *added latency to one request*. Cutting 2-3 calls
+down to 1 was a real improvement, but it never addressed that the one
+remaining call still fully freezes the process for every OTHER
+concurrent in-flight request too -- a different, more severe framing of
+the same underlying blocking call that a latency-focused fix doesn't
+naturally lead you to notice.
+
+**Confirmed live**, using a real `httpx.AsyncClient` over the app's own
+ASGI transport (genuine concurrency -- the synchronous `TestClient`
+used elsewhere in this test file can't demonstrate this at all):
+raced a slow `/models` call (the Ollama probe patched to block for
+0.2s, simulating a slow/unreachable host) against a concurrent,
+completely unrelated `/health` call -- touches none of the same code,
+should return in microseconds. The unrelated call took the *full*
+0.205s too, starved of any chance to run until the slow call's
+blocking chunk released the thread. Reachable on essentially every
+real request to a running `sarva serve` process whenever the 2-second
+probe cache has expired, including the zero-config default state (no
+local Ollama running) this project explicitly designs for.
+
+**Fixed** by wrapping each of the 5 real call sites in
+`sarva.server.app` (`/models`, `/doctor`, `POST /config`, `/chat`,
+`/ws/chat`) with `asyncio.to_thread`, moving the blocking network I/O
+off the event loop thread. `runtime.py`'s own functions deliberately
+stay synchronous -- `sarva doctor`/`sarva models` call them from plain,
+non-async CLI commands with no event loop to block in the first place,
+so only the server's concurrent, multi-request context has the
+severity that makes this worth fixing; converting the whole chain to
+async for a single-command CLI process would be scope well beyond the
+actual, concretely reachable bug.
+
+**Verified live** after the fix: the identical race now measures the
+unrelated `/health` request at ~3ms, independent of the slow request's
+duration -- both complete, but no longer serialized behind each other.
+
+**Verified by reverting** `sarva/server/app.py` alone and watching the
+new regression test fail with the literal old number reproducing
+itself: `/health took 0.205s -- event loop was blocked`. Writing this
+test correctly took two attempts -- the first version inserted an
+`await asyncio.sleep(0.02)` between starting the slow request and
+timing the fast one, intended to "let the slow request start," but
+that gap let the *entire* 0.2s blocking chunk run and finish inside the
+sleep itself (asyncio can't interleave a synchronous blocking call with
+anything else, including its own sleep's deadline), so the timer
+started only after the damage was already done and the test passed
+even against the unfixed code -- caught by actually reverting and
+checking, not assumed. Fixed by starting both requests back-to-back
+with the timer already running before either takes a single step, so
+the fast request's own completion time directly reflects however long
+the event loop stayed blocked.
+
+**1 new test, 726 -> 727 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the round-45 caching fix it follows up on.
+
+**Twenty-six of the last twenty-seven rounds (46-67, 70-72) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+second reminder in as many rounds (after round 71's mock-capabilities
+bug) that a feature getting *a* fix for a *related* problem doesn't
+mean every problem in that area is closed -- the round-45 fix genuinely
+solved what it set out to solve (redundant calls), and its own test
+suite staying green the whole time never signaled that a more severe,
+different-shaped problem was still sitting right next to it.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

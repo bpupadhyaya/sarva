@@ -151,7 +151,15 @@ def create_app() -> FastAPI:
 
     @app.get("/models", response_model=list[ModelInfoOut])
     async def models() -> list[ModelInfoOut]:
-        router = build_router()
+        # asyncio.to_thread: build_router() ultimately makes a real,
+        # synchronous httpx.get() network call to probe Ollama
+        # (runtime._probe_ollama) -- see that function's own comment on
+        # the bug this closes. Called inline, that blocks this whole
+        # process's event loop for the full network round-trip (up to
+        # its 0.3s timeout, or longer against a black-holed/slow-to-
+        # refuse address), stalling every other concurrent request this
+        # server is handling, not just this one.
+        router = await asyncio.to_thread(build_router)
         return [
             ModelInfoOut(id=m.id, display_name=m.display_name, available=m.id in router.available)
             for m in router.registry.all()
@@ -163,7 +171,11 @@ def create_app() -> FastAPI:
         desktop app's first-run screen polls to decide whether anything is
         configured yet, reusing `run_diagnostics()` exactly so this can
         never drift out of sync with what the CLI reports."""
-        return [DoctorCheckOut(name=c.name, ok=c.ok, detail=c.detail) for c in run_diagnostics()]
+        # asyncio.to_thread: see /models' own comment -- run_diagnostics()
+        # calls build_router()/build_providers() internally, so it makes
+        # the identical blocking Ollama-probe network call.
+        checks = await asyncio.to_thread(run_diagnostics)
+        return [DoctorCheckOut(name=c.name, ok=c.ok, detail=c.detail) for c in checks]
 
     @app.post("/config", response_model=list[DoctorCheckOut])
     async def save_config_route(req: SaveConfigRequest) -> list[DoctorCheckOut]:
@@ -180,7 +192,9 @@ def create_app() -> FastAPI:
         non_empty = {k: v for k, v in values.items() if v}
         if non_empty:
             save_config(non_empty)
-        return [DoctorCheckOut(name=c.name, ok=c.ok, detail=c.detail) for c in run_diagnostics()]
+        # asyncio.to_thread: see /models' own comment.
+        checks = await asyncio.to_thread(run_diagnostics)
+        return [DoctorCheckOut(name=c.name, ok=c.ok, detail=c.detail) for c in checks]
 
     @app.post("/chat", response_model=ChatResponse)
     async def chat(req: ChatRequest) -> ChatResponse:
@@ -208,9 +222,15 @@ def create_app() -> FastAPI:
                 extra_content = _extra_content_blocks(req.image_base64, req.image_media_type)
 
                 try:
+                    # asyncio.to_thread: see /models' own comment -- both
+                    # calls ultimately make a blocking Ollama-probe network
+                    # call that would otherwise freeze this whole process's
+                    # event loop, stalling every other concurrent request.
+                    router = await asyncio.to_thread(build_router)
+                    providers = await asyncio.to_thread(build_providers)
                     loop = AgentLoop(
-                        router=build_router(),
-                        providers=build_providers(),
+                        router=router,
+                        providers=providers,
                         tools=[],
                         confirm=always_allow,
                         degraders=default_degraders(),
@@ -452,9 +472,12 @@ def create_app() -> FastAPI:
                         return
 
                     try:
+                        # asyncio.to_thread: see /models' own comment.
+                        router = await asyncio.to_thread(build_router)
+                        providers = await asyncio.to_thread(build_providers)
                         loop = AgentLoop(
-                            router=build_router(),
-                            providers=build_providers(),
+                            router=router,
+                            providers=providers,
                             tools=BUILTIN_TOOLS,
                             confirm=always_allow if auto else ws_confirm,
                             degraders=default_degraders(),
