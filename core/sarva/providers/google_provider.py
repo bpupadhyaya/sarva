@@ -295,6 +295,33 @@ class GoogleProvider:
                     elif part.text and part.thought:
                         yield ThinkingDeltaEvent(text=part.text)
                     elif part.function_call:
+                        # A real bug found by giving this adapter's block
+                        # ordering its own fresh-eyes sweep: text was
+                        # accumulated into `text_acc` across the WHOLE
+                        # stream and only ever spliced into `blocks` once,
+                        # at the very front, after the loop ended --
+                        # unlike ToolCallBlock/ImageBlock below, which
+                        # were already appended in true chronological
+                        # order as each part arrived. An ordinary
+                        # sequential-tool-calling turn (reasoning text,
+                        # then a call, then more reasoning text, then
+                        # another call -- documented Gemini behavior, not
+                        # contrived) confirmed live: both text segments
+                        # got concatenated into ONE TextBlock hoisted
+                        # ahead of BOTH tool calls, misrepresenting which
+                        # reasoning text justified which call in the
+                        # persisted Message -- exactly what AgentLoop
+                        # appends to transcript_out/SessionStore and
+                        # re-sends as history on the next turn. Any text
+                        # accumulated so far is flushed into its own
+                        # TextBlock, in place, before this tool call is
+                        # appended -- text within one uninterrupted run
+                        # still merges into a single block (unaffected),
+                        # but a tool call between two text runs no longer
+                        # gets silently reordered around.
+                        if text_acc:
+                            blocks.append(TextBlock(text=text_acc))
+                            text_acc = ""
                         call_id = part.function_call.id
                         if not call_id:
                             call_id = f"{part.function_call.name}-{_synthetic_call_id}"
@@ -307,6 +334,9 @@ class GoogleProvider:
                         blocks.append(call)
                         yield ToolCallEvent(call=call)
                     elif part.inline_data:
+                        if text_acc:
+                            blocks.append(TextBlock(text=text_acc))
+                            text_acc = ""
                         # image-out: an image-capable Gemini model (e.g.
                         # a "-image" model variant) returns generated
                         # image bytes the same way images are sent IN
@@ -345,8 +375,13 @@ class GoogleProvider:
             yield StreamErrorEvent(code="provider", detail=str(e), retryable=True)
             return
 
+        # Appended, not inserted at the front -- any trailing text (the
+        # ordinary case: a plain END_TURN reply, or reasoning text after
+        # the last tool call in a turn) belongs after every block that
+        # chronologically preceded it, matching the flush-before-append
+        # ordering used for text preceding a tool call/image above.
         if text_acc:
-            blocks.insert(0, TextBlock(text=text_acc))
+            blocks.append(TextBlock(text=text_acc))
 
         # Gemini has no distinct "made a tool call" finish_reason -- it
         # reports STOP even when the response includes function_call

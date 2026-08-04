@@ -534,6 +534,42 @@ reverting and watching the new test fail with the literal old
 collision reproducing itself (`'get_weather' != 'get_weather'` — both
 sides identical). 2 new tests, 705 → 707 Python tests.
 
+### Interleaved text and tool calls got silently reordered in the Gemini adapter — a sibling ordering bug, not the id-collision above
+
+A different bug in the same `generate()` loop, found by a later
+fresh-eyes sweep: `ToolCallBlock`/`ImageBlock` were already appended
+into `blocks` in true chronological stream order as each part arrived,
+but streamed text took a different path entirely — every text part was
+accumulated into one running string (`text_acc`) across the *whole*
+stream, then spliced into `blocks` exactly once, unconditionally
+inserted at index 0, after the loop had already finished.
+
+An ordinary sequential-tool-calling turn — reasoning text, a call, more
+reasoning text, another call, a documented Gemini pattern and not
+contrived — confirmed live before this fix: both text segments were
+concatenated into a single `TextBlock` and hoisted ahead of *both* tool
+calls, even though the second segment chronologically followed the
+first call. The corruption is specific to the persisted `DoneEvent.
+message`, not the live token-by-token stream — `TextDeltaEvent`/
+`ToolCallEvent` still fire in correct order — but that persisted
+message is exactly what `AgentLoop` appends to `transcript_out`/
+`SessionStore` and re-sends as `history` via `_to_gemini_content` on
+the next turn, so the saved/replayed record silently misrepresented
+which reasoning text justified which call from the very first
+multi-call turn.
+
+Fixed by flushing any accumulated text into its own `TextBlock`, in
+place, immediately before appending a tool call or image block — text
+within one uninterrupted run still merges into a single block
+(confirmed unaffected by a second new test), but a tool call or image
+between two text runs no longer gets silently reordered around. The
+trailing flush after the stream ends now appends rather than inserts
+at the front, for the same reason. Verified live the NYC/LA turn above
+now produces `[text, call, text, call]` in true order. Verified by
+reverting and watching the new test fail with the literal old bug's
+own shape: both text segments merged into one block, hoisted ahead of
+both calls. 2 new tests, 748 → 750 Python tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with

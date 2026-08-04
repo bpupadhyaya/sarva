@@ -211,6 +211,65 @@ async def test_a_real_function_call_id_from_gemini_is_used_as_is():
     assert calls[0].id == "real-id-123"
 
 
+async def test_interleaved_text_and_tool_calls_keep_their_chronological_order():
+    # A real bug found by giving this adapter's block ordering its own
+    # fresh-eyes sweep: text was accumulated into one running string
+    # across the WHOLE stream and only ever spliced into `blocks` once,
+    # at the very front, after the loop ended -- unlike ToolCallBlock/
+    # ImageBlock, which were already appended in true chronological
+    # order as each part arrived. Confirmed live before this fix: an
+    # ordinary sequential-tool-calling turn (reasoning text, a call,
+    # more reasoning text, another call -- documented Gemini behavior)
+    # produced ONE TextBlock with both text segments concatenated,
+    # hoisted ahead of BOTH tool calls -- misrepresenting which
+    # reasoning text justified which call in the persisted Message, the
+    # exact thing AgentLoop appends to transcript_out/SessionStore and
+    # re-sends as history on the next turn.
+    chunks = [
+        _chunk(parts=[_part(text="Let me check the weather in NYC.")]),
+        _chunk(
+            parts=[_part(function_call=_function_call("call-1", "get_weather", {"city": "NYC"}))]
+        ),
+        _chunk(parts=[_part(text="Now let me check the weather in LA.")]),
+        _chunk(
+            parts=[_part(function_call=_function_call("call-2", "get_weather", {"city": "LA"}))],
+            finish_reason="STOP",
+            usage=_usage(10, 10),
+        ),
+    ]
+    provider = GoogleProvider(client=_FakeClient(chunks))
+    events = [e async for e in provider.generate(_simple_request())]
+
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+    shapes = [
+        (type(b).__name__, getattr(b, "text", None) or getattr(b, "name", None))
+        for b in done.message.content
+    ]
+    assert shapes == [
+        ("TextBlock", "Let me check the weather in NYC."),
+        ("ToolCallBlock", "get_weather"),
+        ("TextBlock", "Now let me check the weather in LA."),
+        ("ToolCallBlock", "get_weather"),
+    ]
+
+
+async def test_consecutive_text_deltas_with_no_call_between_them_still_merge_into_one_block():
+    # A sibling check for the fix above: text arriving as multiple
+    # streamed deltas with nothing else interleaved must still collapse
+    # into a single TextBlock, not fragment into one block per delta.
+    chunks = [
+        _chunk(parts=[_part(text="Hel")]),
+        _chunk(parts=[_part(text="lo")]),
+        _chunk(parts=[_part(text=", world.")], finish_reason="STOP", usage=_usage(5, 5)),
+    ]
+    provider = GoogleProvider(client=_FakeClient(chunks))
+    events = [e async for e in provider.generate(_simple_request())]
+
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+    assert len(done.message.content) == 1
+    assert done.message.content[0].text == "Hello, world."
+
+
 async def test_generate_yields_a_clean_stream_error_on_a_malformed_sdk_response():
     # A real bug found by reading google-genai's own source, the same
     # way as the identical gap fixed in ollama_provider.py: the SDK's

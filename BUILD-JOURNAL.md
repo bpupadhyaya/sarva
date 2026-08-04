@@ -14452,3 +14452,77 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## Interleaved text and tool calls got silently reordered in the Gemini adapter
+
+Round 91. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~12 rounds and pointed at
+genuinely unswept territory or sibling-propagation/overclaiming-comment
+gaps. It found a real one in `google_provider.py`'s `generate()`
+streaming loop -- a sibling ordering bug to the earlier id-collision
+fix in the same function, not the same bug repeated.
+
+**The bug:** `ToolCallBlock`/`ImageBlock` were already appended into
+`blocks` in true chronological stream order as each part arrived, but
+streamed text took a different path: every text part was accumulated
+into one running string across the *whole* stream, then spliced into
+`blocks` exactly once -- unconditionally inserted at index 0, after
+the loop had already finished. Any text produced *between* or *after*
+tool calls got silently pulled forward and merged with earlier text,
+ahead of every tool call, even ones that chronologically preceded it.
+
+**Confirmed live** before the fix: an ordinary sequential-tool-calling
+turn (reasoning text, a call, more reasoning text, another call --
+documented Gemini function-calling behavior, not contrived) produced
+
+```
+- TextBlock "Let me check the weather in NYC.Now let me check the weather in LA."
+- ToolCallBlock get_weather
+- ToolCallBlock get_weather
+```
+
+instead of the true chronological `[text, call, text, call]`. The
+live token-by-token stream (`TextDeltaEvent`/`ToolCallEvent`) is
+unaffected and renders in correct order -- the corruption is specific
+to the persisted `DoneEvent.message`, exactly what `AgentLoop` appends
+to `transcript_out`/`SessionStore` and re-sends as `history` on the
+next turn, so the saved/replayed record silently misrepresented which
+reasoning text justified which tool call from the very first
+multi-call Gemini turn.
+
+**Fixed** by flushing any accumulated text into its own `TextBlock`,
+in place, immediately before appending a tool call or image block --
+text within one uninterrupted run still merges into a single block,
+but a tool call or image between two text runs no longer gets
+silently reordered around. The trailing flush after the stream ends
+now appends rather than inserts at the front, for the same reason.
+
+**Verified live**: the NYC/LA repro above now produces
+`[text "...NYC.", call(NYC), text "...LA.", call(LA)]` in true order.
+
+**Verified by reverting** `google_provider.py` alone and watching the
+new test fail with the literal old bug's own shape: both text segments
+merged into one block, hoisted ahead of both calls.
+
+**2 new tests, 748 -> 750 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the id-collision fix chapter in the same
+adapter.
+
+**Forty-six of the last forty-seven rounds (46-67, 70-91) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.**
+Another instance of this project's other recurring theme -- a value
+accumulated across an entire stream and spliced in at a fixed position
+after the fact, rather than appended in place as it actually arrived
+-- distinct from, but structurally similar to, the id-collision bug
+found earlier in this same function. Worth remembering that
+"accumulate into one variable, insert once at the end" is itself a
+pattern worth distrusting whenever sibling values in the same loop are
+already being appended in true stream order.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
