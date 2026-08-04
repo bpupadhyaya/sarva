@@ -75,6 +75,54 @@ async def test_multiple_tool_results_do_not_fuse_into_one_misleading_value():
     assert out["content"] != "42"
 
 
+async def test_tool_result_with_an_image_sends_it_via_the_real_images_field_not_silently_dropped():
+    # A real bug found by a fresh-eyes sweep, the identical gap already
+    # found and fixed in the Anthropic/OpenAI/Google adapters, just
+    # never applied here: the plain text-only join silently dropped any
+    # non-text content inside a tool result -- ImageBlock most
+    # importantly (a screenshot/image-generation tool's result,
+    # ToolResultBlock.content's own type comment already names this as
+    # an anticipated shape). Confirmed live before this fix: a
+    # ToolResultBlock with a TextBlock and an ImageBlock produced a wire
+    # message with the image gone, no trace anywhere. Ollama's own
+    # /api/chat wire format has no per-tool-result content shape at all
+    # -- fixed by extracting the image into the same message-level
+    # `images` array a top-level ImageBlock already populates (the only
+    # shape Ollama's own API actually supports), rather than dropping it.
+    raw_bytes = b"\x89PNG\r\n\x1a\nfake but real bytes for this test"
+    m = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_call_id="call_1",
+                content=[
+                    TextBlock(text="here is the screenshot"),
+                    ImageBlock(media_type="image/png", data=raw_bytes),
+                ],
+            )
+        ],
+    )
+    out = await _to_ollama_message(m)
+    assert out["content"] == "here is the screenshot"
+    assert out["images"] == [base64.standard_b64encode(raw_bytes).decode()]
+
+
+async def test_tool_result_with_an_unsupported_block_still_raises_not_silently_dropped():
+    # A sibling of the image case above: a genuinely untranslatable
+    # block type inside a tool result (no image, no text mapping at
+    # all) must still raise, matching every other adapter's own loud-
+    # failure discipline for exactly this case -- not every non-text
+    # block inside a tool result is now silently accepted.
+    from sarva.multimodal.content import ThinkingBlock
+
+    m = Message(
+        role="user",
+        content=[ToolResultBlock(tool_call_id="call_1", content=[ThinkingBlock(text="reasoning")])],
+    )
+    with pytest.raises(ValueError, match="ThinkingBlock"):
+        await _to_ollama_message(m)
+
+
 async def test_message_with_no_tool_calls_omits_the_tool_calls_key():
     m = Message(role="user", content=[TextBlock(text="hi")])
     out = await _to_ollama_message(m)

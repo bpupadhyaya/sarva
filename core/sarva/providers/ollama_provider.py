@@ -63,7 +63,45 @@ async def _to_ollama_message(m: Message) -> dict[str, Any]:
             tool_calls.append({"function": {"name": b.name, "arguments": b.arguments}})
         elif isinstance(b, ToolResultBlock):
             # Ollama has no dedicated tool-result role; render as a tool message.
-            text_parts.append("".join(c.text for c in b.content if isinstance(c, TextBlock)))
+            #
+            # A real bug found by a fresh-eyes sweep, the identical gap
+            # already found and fixed in the Anthropic/OpenAI/Google
+            # adapters, just never applied here: the plain `"".join(...
+            # TextBlock)` silently dropped any non-text content --
+            # ImageBlock most importantly (a screenshot/image-generation
+            # tool's result; ToolResultBlock.content's own type comment
+            # already names this as an anticipated shape, not a
+            # hypothetical) -- sending Ollama a tool result missing
+            # content the caller believes is present, the model
+            # answering as if it had never received it. Confirmed live:
+            # a ToolResultBlock with a TextBlock and an ImageBlock
+            # produced a wire message with the image gone, no trace
+            # anywhere. Unlike OpenAI (whose tool-message content field
+            # only accepts text), Ollama's own `/api/chat` wire format
+            # has no per-tool-result content shape at all -- it's a
+            # flat, message-level `images` array, the identical one a
+            # top-level `ImageBlock` above already populates, confirmed
+            # against a real running server. So a tool-result image
+            # genuinely CAN be sent, just via that same message-level
+            # array rather than nested inside the tool result's own
+            # text -- fixed by extracting it there instead of dropping
+            # it. Any other, genuinely untranslatable block type still
+            # raises, matching every other adapter's own discipline for
+            # this exact case.
+            result_text_parts: list[str] = []
+            for c in b.content:
+                if isinstance(c, TextBlock):
+                    result_text_parts.append(c.text)
+                elif isinstance(c, ImageBlock):
+                    c_bytes = await resolve_media_bytes(c)
+                    images.append(base64.standard_b64encode(c_bytes).decode())
+                else:
+                    raise ValueError(
+                        f"OllamaProvider cannot translate a {type(c).__name__!r} content "
+                        "block inside a tool result (no wire-format mapping exists for it "
+                        "yet)"
+                    )
+            text_parts.append("".join(result_text_parts))
         else:
             # A block type this adapter has no translation for at all.
             # Raising here is deliberate, matching the

@@ -460,6 +460,49 @@ output, the OpenAI test failed with `Failed: DID NOT RAISE ValueError`
 adapters' test files pass unchanged. 3 new tests, 574 → 577 Python
 tests.
 
+### The fourth real adapter had the identical gap — Ollama, never given the equivalent fix at the time
+
+A much later fresh-eyes sweep pointed specifically at the two
+providers never given their own dedicated round (Anthropic/OpenAI/
+Google, Ollama's three siblings) found the same shape: `_to_ollama_
+message`'s own `ToolResultBlock` branch had the identical plain
+`"".join(c.text for c in b.content if isinstance(c, TextBlock))`, the
+exact code the fix above closed for the other three adapters — just
+never applied to this one. Confirmed live: a `ToolResultBlock`
+carrying a `TextBlock` and an `ImageBlock` produced a wire message
+with the image gone, no trace anywhere. Concretely reachable, not
+latent the way it was for the other three at fix time: `McpToolAdapter.
+run()` (`sarva.mcp_client`) already converts a real MCP server's
+`ImageContent` (a standard MCP content type — screenshots, diagrams,
+generated images) into a real `ImageBlock` inside the `ToolResultBlock`
+it returns, so any real `sarva run --mcp-server ...` session using an
+image-returning MCP tool, routed to Ollama (the project's own "free
+& private," zero-config default), silently lost that image with the
+model answering as if it had never received it.
+
+Ollama's own `/api/chat` wire format has no per-tool-result content
+shape at all, genuinely different from all three siblings above — but
+unlike OpenAI's hard "no wire shape exists" case, Ollama's own message
+schema already has a flat, message-level `images` array, the identical
+one a top-level `ImageBlock` populates a few lines above this fix (see
+"Ollama vision" above). So a tool-result image genuinely *can* be
+sent, just via that same message-level array rather than nested inside
+the tool result's own content the way Anthropic/Gemini do it. Fixed by
+extracting a tool result's `ImageBlock`s into that array instead of
+dropping them; any other, genuinely untranslatable block type inside a
+tool result still raises, matching every other adapter's own
+discipline for this exact case (and the top-level `else: raise` this
+same file already has, a few lines below). Verified live across three
+cases together: the image case (now sent via `images`, text content
+unaffected), a text-only tool result (completely unaffected, matching
+the pre-existing behavior exactly), and a genuinely untranslatable
+block type inside a tool result (still raises `ValueError` naming it).
+Verified by reverting and watching both new tests fail for the
+specific, correct reason — the image test with a missing `images` key,
+the unsupported-type test with `Failed: DID NOT RAISE ValueError` — the
+identical failure signature the original three-adapter fix's own
+revert-and-verify produced. 2 new tests, 745 → 747 total.
+
 ### Two parallel calls to the same tool collided onto one id in the Gemini adapter — found by giving tool-call id handling its own fresh-eyes sweep
 
 `google.genai.types.FunctionCall.id` is documented `Optional[str]` on

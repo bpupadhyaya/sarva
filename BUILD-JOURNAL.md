@@ -14287,3 +14287,92 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The fourth real adapter had the identical tool-result-image-dropping gap already fixed once for its three siblings -- Ollama, never given the equivalent fix at the time
+
+Round 89. Delegated a fresh-eyes sweep to a subagent, explicitly
+pointed at `anthropic_provider.py`/`google_provider.py`/
+`ollama_provider.py` since none had ever received a dedicated round
+despite `openai_provider.py` getting several. It found a real one in
+`ollama_provider.py` -- the identical bug a much earlier round had
+already found and fixed for Anthropic, OpenAI, and Google, just never
+applied to Ollama -- verified and shipped directly this round.
+
+**The bug:** `_to_ollama_message`'s `ToolResultBlock` branch used a
+plain `"".join(c.text for c in b.content if isinstance(c, TextBlock))`
+-- the exact code an earlier round's own "A `ToolResultBlock` carrying
+an image was silently dropped by all three real adapters" fix closed
+for Anthropic/OpenAI/Google, just never propagated to this fourth,
+sibling adapter. Any non-text block inside a tool result -- an
+`ImageBlock` most importantly -- vanished with zero indication.
+
+**Confirmed live**: a `ToolResultBlock` carrying a `TextBlock` and an
+`ImageBlock` produced a wire message with the image completely gone,
+no trace anywhere.
+
+**Why concretely reachable, not the latent gap it was for the other
+three adapters at their own fix time:** `McpToolAdapter.run()`
+(`sarva.mcp_client`) already converts a real MCP server's
+`ImageContent` -- a standard MCP content type (screenshots, diagrams,
+generated images) -- into a real `ImageBlock` inside the
+`ToolResultBlock` it returns. Any real `sarva run --mcp-server ...`
+session using an image-returning MCP tool, routed to Ollama (this
+project's own "free & private," zero-config default), silently lost
+that image, the model answering as if it had never received it -- a
+materially misleading response, not a cosmetic gap.
+
+**Why the fix isn't a copy-paste of the other three adapters':**
+Ollama's own `/api/chat` wire format has no per-tool-result content
+shape at all, genuinely different from Anthropic/Gemini (which nest
+images inside the tool result's own content list) and from OpenAI
+(whose SDK type has no image variant for tool messages at all, so that
+fix raises instead). But Ollama's own message schema already has a
+flat, message-level `images` array -- the identical one a top-level
+`ImageBlock` already populates, confirmed against a real running
+server by an earlier round. So a tool-result image genuinely *can* be
+sent on Ollama, just via that same message-level array rather than
+nested in the tool result's own text.
+
+**Fixed** by extracting a tool result's `ImageBlock`s into that same
+`images` array instead of dropping them; any other, genuinely
+untranslatable block type inside a tool result still raises, matching
+every other adapter's own discipline for this exact case.
+
+**Verified live** across three cases together: the image case (now
+correctly sent via `images`, text content unaffected), a text-only
+tool result (completely unaffected, matching the pre-existing
+behavior exactly), and a genuinely untranslatable block type inside a
+tool result (still raises `ValueError` naming it).
+
+**Verified by reverting** `ollama_provider.py` alone and watching both
+new tests fail for the specific, correct reason -- the image test with
+a missing `images` key, the unsupported-type test with `Failed: DID
+NOT RAISE ValueError` -- the identical failure signature the original
+three-adapter fix's own revert-and-verify produced.
+
+**2 new tests, 745 -> 747 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the original three-adapter fix chapter,
+explicitly naming Ollama as the fourth sibling that never got the
+equivalent treatment.
+
+**Forty-four of the last forty-five rounds (46-67, 70-89) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+fifth instance across recent rounds of a fix that shipped for some
+members of a sibling group never propagating to all of them -- this
+one notable for having sat unfixed the longest of any instance found
+so far, since the original three-adapter fix long predates this
+entire run of rounds. Worth treating "a fix that names N siblings by
+type" (here, the three real cloud SDKs) as an incomplete checklist
+whenever the codebase actually has more than N siblings of that shape
+-- Ollama was always the fourth real adapter, just not one of the
+three the original sweep happened to be checking.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
