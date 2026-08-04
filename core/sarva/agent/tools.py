@@ -441,15 +441,37 @@ class WebFetchTool:
             ) as client:
                 for _ in range(_MAX_REDIRECTS + 1):
                     await ensure_public_host(url)
-                    resp = await client.get(url)
-                    if resp.is_redirect and resp.has_redirect_location:
-                        url = urljoin(str(resp.url), resp.headers["location"])
-                        continue
-                    resp.raise_for_status()
-                    text = resp.text[:_MAX_FETCH_CHARS]
-                    if len(resp.text) > _MAX_FETCH_CHARS:
-                        text += "\n\n[truncated]"
-                    return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
+                    # client.stream(), not client.get(): the same
+                    # "buffer everything then truncate the string" gap
+                    # already fixed for RunShellTool's stdout capture --
+                    # `client.get()` fully downloads the whole response
+                    # body into memory before `.text` is ever sliced, so
+                    # a response with a large-but-plausible body (no
+                    # adversarial intent needed -- a big JSON API
+                    # response, an uncompressed log file, a large HTML
+                    # page) incurs the full download's memory cost
+                    # before any of it is thrown away. Streaming and
+                    # stopping the READ itself once `_MAX_FETCH_CHARS`
+                    # is reached bounds that cost directly, the same
+                    # "stop reading, don't read-then-discard" fix shape.
+                    async with client.stream("GET", url) as resp:
+                        if resp.is_redirect and resp.has_redirect_location:
+                            url = urljoin(str(resp.url), resp.headers["location"])
+                            continue
+                        resp.raise_for_status()
+                        parts: list[str] = []
+                        total = 0
+                        truncated = False
+                        async for chunk in resp.aiter_text():
+                            parts.append(chunk)
+                            total += len(chunk)
+                            if total > _MAX_FETCH_CHARS:
+                                truncated = True
+                                break
+                        text = "".join(parts)[:_MAX_FETCH_CHARS]
+                        if truncated:
+                            text += "\n\n[truncated]"
+                        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
             return ToolResultBlock(
                 tool_call_id="",
                 content=[TextBlock(text=f"too many redirects fetching {args['url']!r}")],

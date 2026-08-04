@@ -436,6 +436,43 @@ became an explicit `core` dependency, since production code now imports
 it directly rather than relying on it resolving implicitly through
 `httpx`'s own requirement.
 
+### `WebFetchTool` also had the same unbounded-buffering gap `RunShellTool` did — deliberately left for a later round, then closed with a cleaner test isolation
+
+`RunShellTool`'s stdout-buffering fix (see the tool-use chapter's own
+entry) noted `WebFetchTool` had the identical shallower gap:
+`client.get(url)` fully downloads the entire response body into memory
+before `.text` is ever sliced to `_MAX_FETCH_CHARS` — harmless for the
+ordinary small page this tool usually fetches, but a large-but-
+plausible response (a big JSON API response, an uncompressed log file,
+a large HTML page, no adversarial intent needed) incurs the full
+download's memory cost before any of it is thrown away. Deliberately
+deferred at the time because testing it cleanly seemed to require
+defeating the SSRF guard (`ensure_public_host`/`ssrf_safe_transport`)
+in a way that would itself be testing an attack the guard exists to
+block, not the download-bounding logic.
+
+Closed one round later with a cleaner isolation: a no-op stand-in for
+`ensure_public_host` plus a real `httpx.MockTransport` streaming a
+large body tests the bounding fix directly, without needing to defeat
+(or even exercise) the SSRF guard at all — that guard already has its
+own thorough, separate live coverage elsewhere in this file. Fixed by
+switching from `client.get(url)` to `client.stream("GET", url)` and
+reading `resp.aiter_text()` in a loop, stopping the READ itself once
+`_MAX_FETCH_CHARS` is exceeded — the same "stop reading, don't
+read-then-discard" shape as the `RunShellTool` fix, not a
+coincidentally similar one. Verified live the read genuinely stops
+early, not just that the final string ends up truncated: a mock server
+offering 2000 chunks (~125MiB) only ever had 1 consumed before the cap
+fired. Verified by reverting and watching the new test fail with the
+literal old bug's own number — all 2000 of 2000 chunks consumed —
+reproducing itself. Fixing this also required updating one pre-existing
+test (`test_ensure_public_host_rejects_a_redirect_to_an_internal_
+address`) that had monkeypatched `httpx.AsyncClient.get` directly — no
+longer called at all now that this tool uses `.stream()` — to patch the
+shared lower-level `AsyncClient.send()` both entry points route
+through instead, a small but real ripple from changing which httpx API
+this tool actually calls. 1 new test, 722 → 723 Python tests.
+
 ## Budgets: exceeding one is a clean stop, not an exception
 
 ```python

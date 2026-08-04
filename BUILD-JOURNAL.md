@@ -12373,3 +12373,128 @@ under the ACTUAL new code path, not just the harness function in
 isolation. Otherwise, the next round should pick a genuinely
 untried area rather than re-treading the five angles this round
 already confirmed clean.
+
+
+## Round 69: five more fresh-sweep angles ruled safe, then `WebFetchTool` closed the same unbounded-buffering gap `RunShellTool` had, deferred one round earlier
+
+Round 69. Read round 68's own entry first specifically to avoid
+re-treading its five angles, then swept five genuinely different ones.
+All five held up under real, live reproduction attempts -- reporting
+honestly again, matching round 68's own precedent that a clean sweep
+is a legitimate, valued outcome in this project, not a failure to work
+around.
+
+**`config.py`'s cross-process concurrent set/unset** (session.py and
+longterm.py both needed a real lock for this exact shape; config.py's
+own `_exclusive_lock` fix predates this specific streak). Re-verified
+with GENUINE separate OS processes (`multiprocessing.Process`, not
+just the threads the original fix's own tests used): three real
+processes each calling `save_config` 500 times with three different
+keys concurrently -- all three keys survive intact, no lost update.
+Two writer processes (mixing `save_config`/`unset_config`) racing
+against two reader processes hammering `load_config` (1200 reads
+total) -- zero `ConfigError`s, zero unexpected exceptions, every read
+saw a complete, valid file. This gap is genuinely closed under real
+multi-process load, not just the narrower thread-based coverage the
+original fix's own test used.
+
+**`sarva-sdk`'s TypeScript types against the real Python wire shapes**
+(the SDK was checked once against a live server for basic flows;
+never field-by-field against the server's actual serialization
+behavior). Cross-checked every exported interface in `types.ts`
+against the real Pydantic models it claims to mirror -- every field
+typed required in TS is genuinely always serialized (no
+`exclude_none`/`exclude_unset` anywhere in the server), and
+`SarvaClient.requestJson()` correctly gates on `response.ok` before
+ever casting the body to a typed shape, so a non-2xx response can
+never masquerade as a well-typed success. No required-but-actually-
+omittable field found.
+
+**The desktop app's handling of the sidecar `sarva serve` process
+crashing mid-session** (not at startup, not at shutdown -- while the
+app is actually in use). Confirmed this is a non-issue by
+construction: there's no persistent connection or "connected"
+indicator that could go stale, since `App.tsx` only opens a WebSocket
+when `send()` is actually called, and already has working `onerror`/
+`onclose` handlers (from an earlier round) that surface a clear
+connection-error message on the next interaction. A mid-session crash
+while idle produces no UI symptom until the next send, at which point
+it fails cleanly and visibly.
+
+**`resolve_media_bytes`'s `path`-sourced case** for path-traversal/
+symlink concerns. Confirmed via grep across all of `core/sarva`
+(excluding tests) that no real production call site ever constructs a
+media block with `path=` -- every real caller uses `data=` exclusively.
+Genuinely unreachable today, the same status this module's own
+docstring already documents for the `url` source.
+
+**The bundled `ARITHMETIC` benchmark cases' own content**, re-run
+through the real grader and real `MockProvider`: confirmed honestly
+0/10 as claimed, no case's expected answer is a substring of its own
+prompt in a way the word-boundary+sign-aware grader would false-
+positive on.
+
+All five checked out clean under live verification for the fresh
+sweep itself. Rather than end the round there, picked up one of the
+explicitly-deferred items instead of searching for something entirely
+new: `WebFetchTool`'s own shallower version of round 67's
+`RunShellTool` fix, deferred at the time because testing it cleanly
+seemed to require defeating the SSRF guard.
+
+**Found a cleaner isolation and shipped the fix.** `client.get(url)`
+fully downloads the entire response body into memory before `.text`
+is ever sliced to `_MAX_FETCH_CHARS` -- harmless for the ordinary small
+page this tool usually fetches, but a large-but-plausible response (a
+big JSON API response, an uncompressed log file, a large HTML page, no
+adversarial intent needed) incurs the full download's memory cost
+before any of it is thrown away. The cleaner test isolation: a no-op
+stand-in for `ensure_public_host` plus a real `httpx.MockTransport`
+streaming a large body tests the bounding fix directly, without
+needing to defeat (or even exercise) the SSRF guard at all -- that
+guard already has its own thorough, separate live coverage elsewhere.
+
+**Fixed** by switching from `client.get(url)` to `client.stream("GET",
+url)` and reading `resp.aiter_text()` in a loop, stopping the READ
+itself once `_MAX_FETCH_CHARS` is exceeded -- the same "stop reading,
+don't read-then-discard" shape as the `RunShellTool` fix, not a
+coincidentally similar one. **Verified live** the read genuinely stops
+early, not just that the final string ends up truncated: a mock server
+offering 2000 chunks (~125MiB) only ever had 1 consumed before the cap
+fired. **Verified by reverting** and watching the new test fail with
+the literal old bug's own number -- all 2000 of 2000 chunks consumed
+-- reproducing itself. Fixing this also required updating one
+pre-existing test that had monkeypatched `httpx.AsyncClient.get`
+directly (no longer called at all now that this tool uses `.stream()`)
+to patch the shared lower-level `AsyncClient.send()` both entry points
+route through instead -- a small but real ripple from changing which
+httpx API this tool calls, caught immediately by the full suite run
+rather than shipped broken. 1 new test, 722 -> 723 Python tests, all
+passing, `ruff check`/`format --check` clean. `docs/agent-loop.md`
+gained a new subsection directly under the SSRF-fix chapter, right
+before the `RunShellTool` fix it mirrors.
+
+**Twenty-two consecutive rounds (46-67) found real bugs; round 68 was
+a clean sweep; round 69 (this one) swept five more angles clean, then
+closed out a real, previously-identified-but-deferred gap instead of
+searching for something brand new.** Ten total fresh-sweep candidate
+angles checked across rounds 68-69, all genuinely verified live, none
+fabricated -- diminishing returns from continued fresh-angle sweeping
+is an expected, honest signal at this point, and picking up a real
+deferred item is a legitimate, equally valuable way to keep shipping
+verified fixes.
+
+**Next:** `AgentState.INTERRUPTED`'s dead-but-legal state remains the
+one other deliberately-deferred item, though it's more a design/
+completeness question (wire it to a real cancellation feature, or
+formally document it as reserved) than a bug with a clean fix --
+different in kind from `WebFetchTool`'s gap, not necessarily actionable
+the same way. A future round might also get more mileage from a
+genuinely different METHOD (property-based/fuzz testing of a specific
+parser or serializer) now that reasoning-then-targeted-repro across
+this many angles is showing diminishing returns. The completeness-
+audit backlog remains at three items needing external-dependency/scope
+decisions from the author (a code-execution sandbox tool, web search,
+image generation). The three infra-blocked items remain deferred
+(Tauri `csp: null`, RL harness sandboxing, inference batching); the
+quantization/`Budget` NaN-validation gap has three confirmed-but-
+unreachable instances tracked together.

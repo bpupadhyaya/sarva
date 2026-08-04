@@ -6,6 +6,7 @@ import asyncio
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 import sarva.agent.tools as tools_module
 from sarva.agent.tools import (
@@ -394,18 +395,21 @@ async def test_ensure_public_host_rejects_a_redirect_to_an_internal_address(ctx,
     # internal address. A validate-the-caller's-URL-once check would
     # never catch that. Simulated here (no real attacker-controlled
     # public redirector available to test against) by monkeypatching
-    # httpx.AsyncClient.get to return a real Response object carrying a
-    # redirect Location header pointing at localhost.
+    # httpx.AsyncClient.send -- the common lower-level primitive both
+    # `.get()` and the streaming `.stream()` this tool now uses (see
+    # test_web_fetch_bounds_the_read_itself_not_just_the_final_string
+    # above) ultimately call -- to return a real Response object
+    # carrying a redirect Location header pointing at localhost.
     import httpx
 
-    async def fake_get(self, url, *a, **kw):
+    async def fake_send(self, request, **kw):
         return httpx.Response(
             302,
             headers={"location": "http://127.0.0.1:11434/api/tags"},
-            request=httpx.Request("GET", url),
+            request=request,
         )
 
-    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
     tool = WebFetchTool()
     result = await tool.run({"url": "https://example.com/redirector"}, ctx)
     assert result.is_error
@@ -468,6 +472,61 @@ async def test_web_fetch_is_not_bypassable_via_dns_rebinding(ctx, monkeypatch):
         # internal server's real response reaching the model.
     finally:
         server.shutdown()
+
+
+async def test_web_fetch_bounds_the_read_itself_not_just_the_final_string(ctx, monkeypatch):
+    # A real bug found by giving this tool the same lens that had just
+    # found RunShellTool buffering its entire stdout with no limit:
+    # `client.get(url)` fully downloads the WHOLE response body into
+    # memory before `.text` is ever sliced to `_MAX_FETCH_CHARS` --
+    # harmless for the ordinary small page this tool usually fetches,
+    # but a large-but-plausible response (a big JSON API response, an
+    # uncompressed log file, a large HTML page -- no adversarial intent
+    # needed) incurs the full download's memory cost before any of it
+    # is thrown away. Isolated here from the (separately, thoroughly
+    # tested) SSRF guard via a no-op ensure_public_host and a real
+    # httpx.MockTransport streaming a huge body -- this test's job is
+    # proving the download-bounding fix, not re-verifying SSRF
+    # protection. Confirmed live before the fix: the mock server was
+    # asked to stream 2000 chunks (125MiB) and all 2000 were consumed
+    # before the final string got truncated.
+    monkeypatch.setattr(tools_module, "ensure_public_host", lambda url: _noop())
+
+    chunk = b"x" * 65536
+    num_chunks = 2000  # ~125MiB if fully consumed
+    chunks_yielded = {"n": 0}
+
+    class _HugeStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(num_chunks):
+                chunks_yielded["n"] += 1
+                yield chunk
+
+        async def aclose(self):
+            return None
+
+    def handler(request):
+        return httpx.Response(200, stream=_HugeStream())
+
+    monkeypatch.setattr(tools_module, "ssrf_safe_transport", lambda: httpx.MockTransport(handler))
+
+    tool = WebFetchTool()
+    result = await asyncio.wait_for(tool.run({"url": "http://example.test/big"}, ctx), timeout=10)
+
+    assert not result.is_error
+    assert "[truncated]" in result.content[0].text
+    assert len(result.content[0].text) < 100_000  # nowhere near the full 125MiB
+    # The real, decisive assertion: the read must have stopped early,
+    # not consumed the whole stream and thrown the excess away
+    # afterward -- that would still incur the full memory cost this fix
+    # exists to avoid.
+    assert chunks_yielded["n"] < num_chunks, (
+        f"consumed {chunks_yielded['n']} of {num_chunks} chunks -- not actually bounded"
+    )
+
+
+async def _noop() -> None:
+    return None
 
 
 @pytest.mark.live
