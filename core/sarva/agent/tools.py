@@ -591,6 +591,37 @@ class RecallMemoryTool:
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
         top_k = args.get("top_k", 5)
+        # A real bug found by a fresh-eyes sweep: `input_schema` above
+        # declares `top_k` as `{"type": "integer"}`, but nothing between
+        # a real model's tool call and this line ever enforces that --
+        # `spec.input_schema` is purely descriptive, sent to the
+        # provider so the model knows the expected shape, never
+        # validated server-side against the arguments a model actually
+        # sends back. Confirmed live two ways: a model emitting
+        # `top_k` as the JSON string `"3"` (a real, plausible model
+        # mistake, not a contrived attack) reached `VectorMemoryStore.
+        # search()`'s unguarded `scored[:top_k]` and raised a raw,
+        # non-actionable `TypeError: slice indices must be integers or
+        # None or have an __index__ method` -- caught by AgentLoop's
+        # outer `except Exception`, so it doesn't crash the run, but the
+        # model sees a bare Python exception string instead of a clean,
+        # actionable error. Worse, silently: a *negative* `top_k` (the
+        # schema has no `minimum` either) doesn't error at all --
+        # Python's own slice semantics turn `top_k=-1` into "drop the
+        # last result," so `store.search(..., top_k=-1)` against a
+        # store holding exactly one genuinely relevant memory returned
+        # `[]`, and this tool reported "No relevant memories found"
+        # while a relevant memory actually existed -- a silently wrong
+        # answer, not just an ugly one. Fixed by validating here, the
+        # one place both failure modes are still cheap to reject with a
+        # clear, actionable message instead of a raw exception or a
+        # silently wrong empty result.
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 0:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=f"top_k must be a non-negative integer, got {top_k!r}")],
+                is_error=True,
+            )
         session_id = ctx.session_id or self._session_id
         # See RememberTool.run's own comment -- the identical
         # event-loop-blocking gap (including the same lazy-construction

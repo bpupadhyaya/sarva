@@ -398,6 +398,43 @@ checked that the parameter exists. A run with no session at all
 falls back to the tool's own default, exactly as before this was wired
 in — every existing call site that never sets a session is unaffected.
 
+### `recall_memory`'s own `top_k` schema was purely descriptive, never enforced — a fresh-eyes sweep found the gap between what the schema promises and what actually reaches the store
+
+`RecallMemoryTool.spec.input_schema` declares `top_k` as `{"type":
+"integer"}`, but nothing between a real model's tool call and
+`VectorMemoryStore.search()` ever validates that against the arguments
+a model actually sends back — `input_schema` is purely descriptive,
+sent to the provider so the model knows the expected shape, never
+enforced server-side. Confirmed live, two distinct failure modes: a
+model emitting `top_k` as the JSON string `"3"` (a real, plausible
+model mistake, not a contrived attack) reached `search()`'s unguarded
+`scored[:top_k]` and raised a raw, non-actionable `TypeError: slice
+indices must be integers or None or have an __index__ method` —
+`AgentLoop`'s own broad exception handling around tool dispatch
+already keeps this from crashing the whole run, but the model sees a
+bare Python exception string instead of a clean, actionable error.
+Worse, silently: the schema has no `minimum` either, so a *negative*
+`top_k` doesn't error at all — Python's own slice semantics turn
+`top_k=-1` into "drop the last result," so a store holding exactly one
+genuinely relevant memory returned `[]`, and the tool reported "No
+relevant memories found" while a relevant memory actually existed — a
+silently wrong answer, not just an ugly one. Fixed by validating
+`top_k` explicitly in `RecallMemoryTool.run()` — the one place both
+failure modes are still cheap to reject — returning the same clean,
+actionable `ToolResultBlock(is_error=True, ...)` shape this file's
+other tools already use for expected validation failures (an unknown
+tool, a declined confirmation), rather than a raw exception or a
+silently wrong empty result. `bool` is deliberately rejected too, not
+silently coerced to `0`/`1` — Python's `isinstance(True, int)` is
+`True`, so a JSON `top_k: true` would otherwise sail through
+un-flagged. Verified live across five cases together: the string case,
+the negative case, an explicit `True`, an ordinary valid integer, and
+the omitted-argument default — only the first three are rejected, the
+last two behave exactly as before. Verified by reverting and watching
+both new tests fail with the literal old bug reproducing itself — the
+raw `TypeError` for the first, the false "No relevant memories found"
+for the second. 2 new tests, 741 → 743 total.
+
 ## Long-term memory: plain markdown files, one per topic
 
 The design doc's own literal promise (§3.4): "long-term memory as plain

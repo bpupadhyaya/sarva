@@ -647,6 +647,46 @@ async def test_recall_with_no_memories_says_so(ctx, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_recall_rejects_a_non_integer_top_k_with_a_clean_error(ctx, tmp_path):
+    # A real bug found by a fresh-eyes sweep: the tool's own
+    # input_schema declares top_k as {"type": "integer"}, but nothing
+    # enforces that against a real model's actual tool-call arguments --
+    # input_schema is purely descriptive, never validated server-side.
+    # A model emitting top_k as the JSON string "3" (a real, plausible
+    # model mistake) reached VectorMemoryStore.search()'s unguarded
+    # scored[:top_k] and raised a raw, non-actionable TypeError,
+    # confirmed live before this fix.
+    store = VectorMemoryStore(tmp_path / "memory.db")
+    store.add("default", "some relevant memory")
+    recall = RecallMemoryTool(store=store)
+
+    result = await recall.run({"query": "relevant", "top_k": "3"}, ctx)
+
+    assert result.is_error
+    assert "top_k must be a non-negative integer" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_recall_rejects_a_negative_top_k_instead_of_silently_dropping_a_result(ctx, tmp_path):
+    # A second, silent failure mode from the same missing validation:
+    # the schema has no `minimum` either, so a negative top_k didn't
+    # error at all -- Python's own slice semantics turn `top_k=-1` into
+    # "drop the last result," so a store holding exactly one genuinely
+    # relevant memory returned [] and this tool reported "No relevant
+    # memories found" while a relevant memory actually existed.
+    # Confirmed live before this fix: this exact setup returned that
+    # false "no memories found" message instead of the real memory.
+    store = VectorMemoryStore(tmp_path / "memory.db")
+    store.add("default", "the launch code is blue")
+    recall = RecallMemoryTool(store=store)
+
+    result = await recall.run({"query": "launch code", "top_k": -1}, ctx)
+
+    assert result.is_error
+    assert "top_k must be a non-negative integer" in result.content[0].text
+
+
+@pytest.mark.asyncio
 async def test_remember_uses_ctx_session_id_when_present(tmp_path):
     # ctx.session_id (threaded from AgentLoop.run(session_id=...), which
     # in turn comes from the CLI's --session / the server's session

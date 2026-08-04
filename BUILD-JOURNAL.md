@@ -14038,3 +14038,88 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## recall_memory's own top_k schema was purely descriptive, never enforced -- a string crashed it with a raw TypeError, a negative value silently dropped a real result
+
+Round 86. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across rounds 70-85, prioritizing
+genuinely fresh territory now that the memory-tools file and
+`longterm.py` were both thoroughly closed out. It found a real one in
+`RecallMemoryTool`, spanning `core/sarva/agent/tools.py` and
+`core/sarva/memory/vector.py`, verified and shipped directly this
+round.
+
+**The bug:** `RecallMemoryTool.spec.input_schema` declares `top_k` as
+`{"type": "integer"}`, but nothing between a real model's tool call
+and `VectorMemoryStore.search()` ever validates that against the
+arguments a model actually sends back -- `input_schema` is purely
+descriptive, sent to the provider so the model knows the expected
+shape, never enforced server-side anywhere in the dispatch path.
+
+**Two distinct failure modes, both confirmed live:**
+
+1. A model emitting `top_k` as the JSON string `"3"` (a real,
+plausible model mistake, not a contrived attack -- `openai_provider.py`
+preserves whatever JSON type a model's tool-call arguments actually
+use) reached `search()`'s unguarded `scored[:top_k]` and raised a raw
+`TypeError: slice indices must be integers or None or have an
+__index__ method`. `AgentLoop`'s own broad exception handling around
+tool dispatch already keeps this from crashing the whole run, but the
+model sees a bare Python exception string instead of a clean,
+actionable error.
+
+2. Worse, and silent: the schema has no `minimum` either, so a
+*negative* `top_k` doesn't error at all -- Python's own slice
+semantics turn `top_k=-1` into "drop the last result." A store holding
+exactly one genuinely relevant memory returned `[]`, and the tool
+reported "No relevant memories found" while a relevant memory actually
+existed -- a silently wrong answer, not just an ugly one, exactly the
+failure shape this project's own discipline treats as worse than a
+loud crash.
+
+**Fixed** by validating `top_k` explicitly in `RecallMemoryTool.run()`
+-- the one place both failure modes are still cheap to reject --
+returning the same clean, actionable `ToolResultBlock(is_error=True,
+...)` shape this file's other tools already use for expected
+validation failures (an unknown tool, a declined confirmation), rather
+than a raw exception or a silently wrong empty result. `bool` is
+deliberately rejected too, not silently coerced: Python's
+`isinstance(True, int)` is `True`, so a JSON `top_k: true` would
+otherwise sail through un-flagged as `top_k=1`.
+
+**Verified live** across five cases together: the string case, the
+negative case, an explicit `True`, an ordinary valid integer, and the
+omitted-argument default -- only the first three are rejected, the
+last two behave exactly as before the fix.
+
+**Verified by reverting** `tools.py` alone and watching both new tests
+fail with the literal old bug reproducing itself: the raw `TypeError`
+for the string case, the false "No relevant memories found" for the
+negative case.
+
+**2 new tests, 741 -> 743 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new section
+directly after the semantic-memory chapter's session-isolation fix,
+before the long-term-memory chapter begins.
+
+**Fortieth of the last forty-one rounds (46-67, 70-86) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+genuinely different bug shape than the last several rounds --
+unvalidated tool-call arguments trusting a purely-descriptive JSON
+schema, not an async-dispatch gap or a lossy-identity collision.
+Notable that this same subagent's sweep also fuzz-verified `dpo.py`'s
+`sequence_logprobs`/`build_dpo_batch` against a real ln(2) fixed-point
+invariant and `moe.py` against a naive per-token reference
+implementation, both clean -- a useful reminder that a thorough sweep
+covering several candidate areas and reporting only the one real
+finding, honestly, is exactly the discipline this project has valued
+throughout.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
