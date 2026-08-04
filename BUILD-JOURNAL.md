@@ -12944,3 +12944,105 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## Malformed OpenAI tool-call-arguments JSON silently became {}, with no signal anywhere — and the existing test for this exact scenario had encoded the bug as its own expectation
+
+Round 74. Delegated a fresh-eyes sweep to a subagent, steered away
+from the tokenizer (round 70), provider registry/routing/degradation
+(round 71), `runtime.py`/server event-loop blocking (round 72), and
+`foundry_provider.py`/`generate.py` (round 73). It found a real one in
+`sarva.providers.openai_provider`, verified and shipped directly this
+round.
+
+**The bug:** OpenAI streams a tool call's `arguments` as string
+fragments scattered across many chunks, keyed by `index` -- the
+adapter accumulates them itself and `json.loads()`s the result once
+the stream ends. If that accumulated string isn't valid JSON --
+unescaped embedded quotes are a real, documented GPT tool-calling
+failure mode, independent of `max_tokens` truncation -- the code
+caught `json.JSONDecodeError` and silently substituted `{}`. No
+`StreamErrorEvent`, unlike every other failure path in this same
+function (rate limits, network errors, malformed SDK responses all
+already yield one).
+
+**Why it's severe:** `AgentLoop` dispatches `call.arguments` straight
+to `tool.run()` with zero re-validation. A built-in tool's required-
+key access (e.g. `args["command"]`) raises a bare `KeyError` the model
+has no way to connect back to its own dropped arguments. Worse: an MCP
+tool (`McpToolAdapter.run`) forwards `{}` straight to the remote
+server with zero local validation -- for any tool with optional or
+defaulted parameters, this silently executes the *wrong* action with
+no error at all. Genuinely undetectable corruption, not just a
+confusing message -- exactly the failure mode this project's own
+no-fabrication discipline treats as worse than a loud crash.
+
+**Confirmed live** with a duck-typed fake stream (this codebase's
+established discipline for testing SDK-based adapters without a live
+API key) delivering a tool call whose accumulated arguments string
+never forms valid JSON: the adapter emitted a normal-looking
+`ToolCallEvent` with `arguments={}` and a clean `DoneEvent` with
+`stop_reason=TOOL_USE`, as if the model's call had genuinely carried
+no arguments.
+
+**Anthropic and Gemini don't share this gap:** Anthropic's SDK hands
+back an already-assembled final message with no manual JSON re-parse
+at all; Gemini's SDK returns already-structured argument dicts
+directly. Unique to OpenAI's own manual delta-accumulation path, the
+one piece of genuinely adapter-specific logic this project's own
+`test_openai_provider_streaming.py` module docstring already calls out
+as needing dedicated hermetic tests.
+
+**Fixed** by treating this the same as every other stream-level
+failure in this function: `yield StreamErrorEvent(code=
+"malformed_tool_arguments", ..., retryable=True); return` instead of
+silently substituting `{}` and pressing on. `retryable=True` gives
+`AgentLoop`'s existing retry mechanism -- the same one a rate limit or
+network blip already gets -- a real chance to get a clean response on
+the next model call, rather than quietly corrupting the one already in
+hand.
+
+**A genuinely interesting wrinkle: the existing, dedicated test for
+this exact scenario had encoded the bug as its own expectation.**
+`test_malformed_tool_call_arguments_do_not_crash_the_adapter` asserted
+`tool_event.call.arguments == {}` with the comment "must degrade to an
+empty dict, not raise out of the adapter." A reasonable instinct, half
+right: not raising an uncaught exception out of the adapter genuinely
+was the correct call. But "silently substitute `{}` and continue as if
+nothing happened" was the wrong way to satisfy that instinct --
+signaling the corruption via the exact same `StreamErrorEvent`
+mechanism this function already uses for every other failure achieves
+"don't crash" *and* "don't silently corrupt." Rewrote the test to
+assert the `StreamErrorEvent` instead of the empty dict, and added a
+sibling test confirming ordinary well-formed tool-call arguments still
+parse exactly as before (unaffected by the new branch).
+
+**Verified by reverting** `openai_provider.py` alone and watching the
+rewritten test fail with the literal old bug reproducing itself: 2
+events instead of 1, a `ToolCallEvent` carrying the corrupted `{}`
+followed by a normal `DoneEvent` -- exactly what a caller relying on
+the old, buggy behavior would have seen.
+
+**1 test rewritten, 1 new test, 728 -> 729 Python tests, all passing,
+`ruff check`/`format --check` clean.** `docs/providers.md` gained a
+new subsection directly after the existing "found and fixed in both
+remaining adapters" exception-handling chapter it extends.
+
+**Twenty-eight of the last twenty-nine rounds (46-67, 70-74) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** A fourth consecutive round (after 71's mock-capabilities
+bug, 72's blocking Ollama probe, and 73's foundry empty-message crash)
+where a prior round's own test suite -- passing the whole time -- had
+quietly encoded the very assumption that made the bug possible. Worth
+treating a project's own "regression guard" tests as a document of
+intent to periodically re-examine, not just a green checkmark to
+preserve: this one was testing the right *shape* of fix (don't crash)
+while missing the actual bar (don't corrupt data silently either).
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

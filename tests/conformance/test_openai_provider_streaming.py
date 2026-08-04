@@ -24,7 +24,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from sarva.multimodal.content import Message, TextBlock
-from sarva.providers.base import DoneEvent, GenerateRequest, StopReason, ToolCallEvent
+from sarva.providers.base import (
+    DoneEvent,
+    GenerateRequest,
+    StopReason,
+    StreamErrorEvent,
+    ToolCallEvent,
+)
 from sarva.providers.openai_provider import OpenAIProvider
 
 
@@ -131,11 +137,49 @@ async def test_text_only_stream_produces_end_turn():
 
 
 async def test_malformed_tool_call_arguments_do_not_crash_the_adapter():
-    # A tool call whose accumulated argument fragments never form valid
-    # JSON (truncated stream, provider bug) must degrade to an empty
-    # dict, not raise out of the adapter.
+    # A real bug found by a fresh-eyes sweep, not by this test as
+    # originally written: a tool call whose accumulated argument
+    # fragments never form valid JSON (truncated stream, a real,
+    # documented GPT tool-calling failure mode) used to silently
+    # degrade to an empty dict here -- no error, no signal anywhere.
+    # AgentLoop would then dispatch that corrupted {} to whatever tool
+    # the model actually meant to call with real arguments: a built-in
+    # tool's required-key access raises a confusing bare KeyError with
+    # no way to trace it back to dropped arguments; an MCP tool forwards
+    # {} straight to the remote server with zero local validation,
+    # silently executing the WRONG action for any tool with optional/
+    # defaulted parameters -- undetectable corruption, not just a
+    # confusing message. "Must not crash the adapter" was the right
+    # instinct (a raw JSONDecodeError propagating out would be worse),
+    # but "silently substitute {}" was the wrong way to satisfy it --
+    # every other failure path in this same function already signals a
+    # real problem via StreamErrorEvent (retryable=True re-calls the
+    # model fresh, the same recovery a rate limit or network blip
+    # already gets), and this is that same treatment, not a crash.
     chunks = [
         _chunk(tool_call_deltas=[_tc_delta(0, id="call_a", name="broken", arguments="{not json")]),
+        _chunk(finish_reason="tool_calls", usage=_usage(1, 1)),
+    ]
+    provider = OpenAIProvider(client=_FakeClient(chunks))
+    req = _simple_request()
+
+    events = [e async for e in provider.generate(req)]  # must not raise
+
+    assert len(events) == 1
+    assert isinstance(events[0], StreamErrorEvent)
+    assert events[0].code == "malformed_tool_arguments"
+    assert events[0].retryable is True
+    assert "broken" in events[0].detail
+
+
+async def test_well_formed_tool_call_arguments_still_parse_normally():
+    # Regression guard: the malformed-JSON branch above must never
+    # trigger on ordinary, valid tool-call arguments -- the
+    # overwhelmingly common case this function handles on every real
+    # tool-using turn.
+    chunks = [
+        _chunk(tool_call_deltas=[_tc_delta(0, id="call_a", name="get_weather", arguments="")]),
+        _chunk(tool_call_deltas=[_tc_delta(0, arguments='{"city": "Paris"}')]),
         _chunk(finish_reason="tool_calls", usage=_usage(1, 1)),
     ]
     provider = OpenAIProvider(client=_FakeClient(chunks))
@@ -144,4 +188,4 @@ async def test_malformed_tool_call_arguments_do_not_crash_the_adapter():
     events = [e async for e in provider.generate(req)]
 
     tool_event = next(e for e in events if isinstance(e, ToolCallEvent))
-    assert tool_event.call.arguments == {}
+    assert tool_event.call.arguments == {"city": "Paris"}

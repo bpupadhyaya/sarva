@@ -334,6 +334,50 @@ async-stream infra), 547 → 550 Python tests. **This closes the
 adapters (Anthropic, OpenAI, Google) — Ollama's own equivalent
 (malformed NDJSON, not an SDK exception) was already closed earlier.**
 
+### Malformed tool-call-arguments JSON silently became an empty dict, with no signal anywhere — the one OpenAI-specific accumulation gap the interleaving test above didn't cover
+
+The tool-call streaming shape named earlier in this chapter — OpenAI
+scatters a tool call's `arguments` as string fragments across many
+chunks, and the adapter accumulates and `json.loads()`s them itself
+once the stream ends — has a failure mode the existing interleaving
+test never exercised: what if the fully-accumulated string still isn't
+valid JSON? Unescaped embedded quotes in a tool call's string
+arguments are a real, documented GPT tool-calling failure mode,
+independent of `max_tokens` truncation. The existing code caught
+`json.JSONDecodeError` and silently substituted `{}` — no
+`StreamErrorEvent`, unlike every other failure path in this same
+function (rate limits, network errors, malformed SDK responses all
+yield one). `AgentLoop` would then dispatch that corrupted, empty
+arguments dict to whatever tool the model actually meant to call with
+real arguments: a built-in tool's required-key access raises a
+confusing bare `KeyError` with no way to trace it back to silently
+dropped arguments; an MCP tool (`McpToolAdapter.run`) forwards `{}`
+straight to the remote server with zero local validation, silently
+executing the *wrong* action for any tool with optional or defaulted
+parameters — genuinely undetectable corruption, not just a confusing
+error message. Anthropic and Gemini don't share this gap: Anthropic's
+SDK hands back an already-assembled message with no manual JSON
+re-parse, and Gemini's SDK returns already-structured argument dicts
+directly, no `json.loads()` on raw accumulated text at all — unique to
+OpenAI's manual delta-accumulation path.
+
+Confirmed live with a duck-typed fake stream delivering a tool call
+whose accumulated arguments never form valid JSON. Fixed by treating
+this the same as every other stream-level failure in this function:
+`yield StreamErrorEvent(code="malformed_tool_arguments", ...,
+retryable=True); return` instead of silently substituting `{}` and
+continuing — `retryable=True` gives `AgentLoop`'s existing retry
+mechanism (the same one a rate limit or network blip already gets) a
+real chance to get a clean response on the next attempt, rather than
+quietly corrupting the one it already has. The existing dedicated test
+for this exact scenario had encoded the buggy behavior as its own
+expectation (`arguments == {}`, "must degrade... not raise") — a
+reasonable instinct half-satisfied: not raising was right, but silent
+substitution was the wrong way to satisfy it. Rewritten to assert the
+`StreamErrorEvent` instead, plus a new sibling test confirming ordinary
+well-formed arguments still parse exactly as before. 1 test rewritten,
+1 new, 728 → 729 Python tests.
+
 ### A `ToolResultBlock` carrying an image was silently dropped by all three real adapters — each fixed to match what its own SDK actually supports, not a uniform guess
 
 A fresh sweep, checking each adapter's request-translation logic beyond

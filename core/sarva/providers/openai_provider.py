@@ -270,8 +270,35 @@ class OpenAIProvider:
         for part in tool_call_parts.values():
             try:
                 arguments = json.loads(part["arguments"]) if part["arguments"] else {}
-            except json.JSONDecodeError:
-                arguments = {}
+            except json.JSONDecodeError as e:
+                # A real bug found by actually feeding a stream malformed
+                # tool-call-arguments JSON (a real, documented GPT
+                # tool-calling failure mode, independent of max_tokens
+                # truncation -- confirmed live with a genuinely
+                # malformed accumulated string, unescaped embedded
+                # quotes): silently substituting {} here let AgentLoop
+                # dispatch a corrupted, empty arguments dict to whatever
+                # tool the model actually meant to call with real
+                # arguments -- no StreamErrorEvent, no signal anywhere.
+                # A built-in tool's required-key access then raises a
+                # confusing bare KeyError the model has no way to
+                # connect back to its own dropped arguments; an MCP tool
+                # (McpToolAdapter.run) forwards {} straight to the
+                # remote server with zero local validation, silently
+                # executing the WRONG action for any tool with optional/
+                # defaulted parameters -- genuinely undetectable
+                # corruption, not just a confusing message. Every other
+                # failure path in this function already signals a real
+                # problem via StreamErrorEvent (retryable=True re-calls
+                # the model fresh, the same recovery a rate limit or a
+                # network blip already gets) -- this was the one
+                # instance that silently pressed on instead.
+                yield StreamErrorEvent(
+                    code="malformed_tool_arguments",
+                    detail=f"tool call {part['name']!r} arguments were not valid JSON: {e}",
+                    retryable=True,
+                )
+                return
             call = ToolCallBlock(id=part["id"], name=part["name"], arguments=arguments)
             blocks.append(call)
             yield ToolCallEvent(call=call)
