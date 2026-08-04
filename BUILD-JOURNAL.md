@@ -13411,3 +13411,80 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The eval harness's grader had a third instance of its own recurring boundary-logic gap: a decimal point never blocked a false match, on either side
+
+Round 79. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across rounds 70-78. It found a real one
+in `core/sarva/eval/harness.py`'s `contains_match` grader -- a
+function that had ALREADY been fixed twice before for the identical
+shape of bug, verified and shipped directly this round.
+
+**The bug:** `contains_match`'s word-boundary pattern,
+`(?<![\w-])` + escaped-expected + `(?!\w)`, excludes a preceding word
+character or minus sign, and a following word character -- fixes from
+two earlier rounds (digit adjacency, then sign-blindness). Neither
+side excludes `.`. Since `.` isn't `\w`, a decimal point never blocks
+either boundary, so `expected="9"` matches inside `"0.9"` (decimal
+point immediately *before* the match) and `expected="12"` matches
+inside `"12.5"` (decimal point immediately *after* it) -- both
+numerically wrong answers score `correct=True`.
+
+**Confirmed live**, both directions, through the real `run_benchmark()`
+call path with a scripted `MockProvider`: a model answering `"0.9"` to
+`"What is 45 / 5?"` (correct answer `9`) scored `correct=True`, 100%
+reported accuracy on a genuinely wrong answer. Concretely reachable
+via this project's own bundled `ARITHMETIC` division cases (`div-1:
+84/7=12`, `div-2: 45/5=9`) -- exactly the cases a real weaker model is
+most likely to answer with a decimal instead of a clean integer, via
+`sarva eval` -> `cli.py`'s `_eval()` -> `run_benchmark(ARITHMETIC,
+provider, model=model_id)`, `contains_match` the default grader for
+every case, against any real configured provider's actual text output.
+
+**Why the fix isn't symmetric with the earlier `-` fix, and
+deliberately so:** adding `.` to the lookbehind's excluded-character
+set (mirroring `-` exactly) is safe and correct -- a decimal point
+directly preceding a number is never *not* part of that number.  But
+unconditionally excluding a trailing `.` the same way would break the
+single most common real shape in this benchmark's own output: an
+ordinary sentence-ending period (`"The answer is 12."`). A second,
+narrower lookahead, `(?!\.\d)`, threads this correctly -- it only
+rejects a match immediately followed by a decimal point *and then
+another digit* (a genuine decimal continuation like `"12.5"`), leaving
+a bare trailing period exactly as matchable as it always was.
+
+**Verified live** across ten cases together: both new decimal-adjacency
+directions, the pre-existing digit-adjacency and sign-adjacency fixes,
+the sentence-ending-period case, currency-prefix matching, and both
+positive and negative exact matches -- confirming the fix doesn't
+regress anything the two earlier rounds' fixes established.
+
+**Verified by reverting** `harness.py` alone and watching the new test
+fail with the literal old bug reproducing itself:
+`contains_match("0.9", expected="9")` returning `True`.
+
+**1 new test, 735 -> 736 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/eval.md` gained a new section
+directly after the sign-blindness chapter it follows, in the same
+numbered-fix sequence.
+
+**Thirty-three of the last thirty-four rounds (46-67, 70-79) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** This round's own function had already been fixed twice for
+the identical shape of defect (a boundary regex missing one more
+character from its excluded set) -- worth naming as its own pattern
+now: when a fix generalizes a boundary condition from one specific
+character (`-`) to make it "significant," the fix is still scoped to
+the characters actually considered at the time, and a genuinely
+different character in the same role (`.`) can sit right next to it,
+unexamined, until a fresh pass checks the function again rather than
+assuming prior fixes closed every gap in the same shape.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

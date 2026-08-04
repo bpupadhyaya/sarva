@@ -117,8 +117,27 @@ def contains_match(output: str, case: BenchmarkCase) -> bool:
     `ARITHMETIC` case today (none has a negative `expected`), but a
     real, separate defect in the same boundary logic, fixed by the
     same change rather than left in place alongside the sign-blindness
-    fix."""
-    pattern = r"(?<![\w-])" + re.escape(case.expected.strip()) + r"(?!\w)"
+    fix.
+
+    A third bug in the same boundary logic, found by a much later
+    fresh-eyes sweep: decimal-point adjacency. Neither side of the
+    boundary excluded `.` -- not `\\w`, so it never blocked a match on
+    either side, the same shape as the digit- and sign-adjacency bugs
+    above. Confirmed live: `expected="9"` matched inside `"0.9"` (a
+    decimal point immediately *before* the match), and `expected="12"`
+    matched inside `"12.5"` (a decimal point immediately *after* it) --
+    both wrong answers scored `correct=True`. Concretely reachable via
+    this project's own bundled `ARITHMETIC` division cases (`div-1:
+    84/7=12`, `div-2: 45/5=9`), the ones a real weaker model is most
+    likely to answer with a decimal instead of an integer. Fixed by
+    adding `.` to the lookbehind's excluded-character set (mirroring
+    `-`) and adding a second lookahead, `(?!\\.\\d)`, that only rejects
+    a match followed by a decimal point *and then a digit* -- not by a
+    bare trailing `.`, which stays allowed so an ordinary
+    sentence-ending period (`"The answer is 12."`) still matches
+    correctly; only a genuine decimal continuation (`"12.5"`) is now
+    rejected."""
+    pattern = r"(?<![\w.-])" + re.escape(case.expected.strip()) + r"(?!\w)(?!\.\d)"
     return re.search(pattern, output.strip(), re.IGNORECASE) is not None
 
 

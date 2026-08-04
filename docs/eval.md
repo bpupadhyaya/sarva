@@ -110,6 +110,39 @@ the fix and watched both fail — the sign-blind case scoring `-45` as a
 match, the negative-expected case never matching `-5` at all — before
 re-applying. All 11 pre-existing eval-harness tests pass unchanged.
 
+## A third bug in the same boundary logic, unaddressed by either fix above: decimal-point adjacency
+
+A much later fresh-eyes sweep checked the same function a third time,
+rather than assuming two rounds of fixes had closed every gap in the
+boundary logic's shape. Neither the lookbehind nor the lookahead
+excludes `.` — it isn't `\w`, so (exactly like `-` before the
+sign-blindness fix) it never blocked a match on either side. Confirmed
+live, two distinct failure directions: `expected="9"` matched inside
+`"0.9"` (a decimal point immediately *before* the match), and
+`expected="12"` matched inside `"12.5"` (a decimal point immediately
+*after* it) — both numerically wrong answers scored `correct=True`.
+Concretely reachable via `ARITHMETIC`'s own bundled division cases
+(`div-1: 84/7=12`, `div-2: 45/5=9`) — the cases a real weaker model is
+most likely to answer with a decimal instead of a clean integer.
+
+The fix isn't symmetric with the `-` fix, and deliberately so. Adding
+`.` to the lookbehind's excluded-character set (mirroring `-` exactly)
+correctly blocks `"0.9"` from matching `"9"` — a decimal point
+directly preceding a number is never *not* part of that number.  But
+unconditionally excluding a trailing `.` the same way would break the
+single most common real case in this benchmark's own output shape: an
+ordinary sentence-ending period (`"The answer is 12."`). A second,
+narrower lookahead, `(?!\.\d)`, threads this correctly — it only
+rejects a match immediately followed by a decimal point *and then
+another digit* (a genuine decimal continuation, `"12.5"`), leaving a
+bare trailing period exactly as matchable as it always was. Verified
+live across both directions plus the existing digit-adjacency,
+sign-adjacency, and sentence-ending-period cases together, confirming
+the fix doesn't regress anything the two earlier fixes established.
+Verified by reverting and watching the new test fail with the literal
+old bug reproducing itself: `contains_match("0.9", expected="9")`
+returning `True`. 1 new test, 735 → 736 Python tests.
+
 ## A `ProviderError` on one case doesn't sink the whole run
 
 If a case's request fails (rate limit, auth, any `ProviderError`), that

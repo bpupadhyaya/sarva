@@ -84,6 +84,37 @@ def test_contains_match_still_recognizes_a_genuinely_negative_expected_answer():
     assert not contains_match("The answer is -55", case)  # still rejects a longer wrong number
 
 
+def test_contains_match_is_not_decimal_blind():
+    # A third bug in the same boundary logic, found by a much later
+    # fresh-eyes sweep: neither side of the word-boundary pattern
+    # excluded "." -- not \w, so it never blocked a match on either
+    # side, the same shape as the digit- and sign-adjacency bugs above.
+    # Confirmed live: expected="9" matched inside "0.9" (a decimal point
+    # immediately before the match), and expected="12" matched inside
+    # "12.5" (a decimal point immediately after it) -- both wrong
+    # answers scored correct=True. Concretely reachable via this
+    # project's own bundled ARITHMETIC division cases (div-1: 84/7=12,
+    # div-2: 45/5=9), the ones a real weaker model is most likely to
+    # answer with a decimal instead of an integer.
+    case_9 = BenchmarkCase(id="div-2", prompt="p", expected="9")
+    assert not contains_match("0.9", case_9)
+    assert not contains_match("The answer is 0.9", case_9)
+    assert contains_match("9", case_9)  # the real fix must not break this
+
+    case_12 = BenchmarkCase(id="div-1", prompt="p", expected="12")
+    assert not contains_match("12.5", case_12)
+    assert contains_match("12", case_12)
+    # A bare trailing period (ordinary sentence punctuation, not a
+    # decimal continuation) must still match -- only a period followed
+    # by another digit is a genuine decimal, not just any period.
+    assert contains_match("The answer is 12.", case_12)
+
+    # A genuinely decimal expected answer must still match itself exactly.
+    case_decimal = BenchmarkCase(id="dec-1", prompt="p", expected="0.9")
+    assert contains_match("0.9", case_decimal)
+    assert contains_match("The answer is 0.9.", case_decimal)
+
+
 def test_arithmetic_benchmark_is_bundled_and_has_real_cases():
     assert ARITHMETIC.name == "arithmetic"
     assert len(ARITHMETIC.cases) == 10
