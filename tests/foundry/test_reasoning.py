@@ -133,6 +133,33 @@ def test_answer_reward_is_not_sign_blind():
     assert answer_reward(correct, "45") == 1.0
 
 
+def test_answer_reward_is_not_decimal_blind():
+    # A fifth real reward-hacking exploit, an independent instance of
+    # the identical decimal-point-adjacency bug already found and fixed
+    # in sarva.eval.harness.contains_match: "." is not \w, so it never
+    # blocked a match on either side of the word-boundary pattern, the
+    # same shape as the sign-blindness bug above. This function's own
+    # word-boundary fix was copied from contains_match before THAT
+    # function's own later decimal-point fix existed, so it never
+    # inherited the correction. Confirmed directly before this fix:
+    # answer_reward("<think>...</think>The answer is 9.5", "9") returned
+    # 1.0 -- a model whose real sampled output happened to include a
+    # trailing decimal (a plausible failure mode for an undertrained
+    # model, not contrived) got full training reward for a numerically
+    # wrong answer, corrupting the actual RL training signal via
+    # examples/17_reasoning_token_training.py's real call into
+    # reasoning_reward() against real sample_completion() output.
+    wrong_leading = "<think>4 plus 5</think>The answer is 9.5"
+    assert answer_reward(wrong_leading, "9") == 0.0
+    wrong_trailing = "<think>84 divided by 7</think>The answer is 12.5"
+    assert answer_reward(wrong_trailing, "12") == 0.0
+    # A bare trailing period (ordinary sentence punctuation, not a
+    # decimal continuation) must still reward correctly -- only a
+    # period followed by another digit is a genuine decimal.
+    correct = "<think>4 plus 5</think>The answer is 9."
+    assert answer_reward(correct, "9") == 1.0
+
+
 def test_reasoning_reward_combines_format_and_answer_with_default_weights():
     both_right = "<think>2+3=5</think>5"
     assert reasoning_reward(both_right, "5") == 1.0  # 0.3*1 + 0.7*1

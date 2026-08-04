@@ -123,7 +123,31 @@ def answer_reward(completion_text: str, expected_answer: str) -> float:
     # Fixed the identical way: `(?<![\w-])`/`(?!\w)` lookaround instead
     # of `\b`, treating `-` as significant on purpose rather than
     # relying on word/non-word transitions to get it right by accident.
-    pattern = r"(?<![\w-])" + re.escape(expected_answer) + r"(?!\w)"
+    #
+    # A fifth real reward-hacking exploit, found by a much later
+    # fresh-eyes sweep: an independent instance of the identical
+    # decimal-point-adjacency bug found and fixed in `sarva.eval.
+    # harness.contains_match` -- `.` is not `\w`, so it never blocked a
+    # match on either side of the boundary, the same shape as the
+    # sign-blindness bug just above. Confirmed directly:
+    # `answer_reward("<think>...</think>The answer is 9.5", "9")`
+    # returned `1.0` before this fix -- a model whose real sampled
+    # output happened to include a trailing decimal (a plausible
+    # failure mode for an undertrained model, not contrived) got full
+    # training reward for a numerically wrong answer, corrupting the
+    # actual RL training signal via `examples/17_reasoning_token_
+    # training.py`'s real call into `reasoning_reward()` against real
+    # `sample_completion()` output. This function's own word-boundary
+    # fix (a few paragraphs up) was copied from `contains_match` before
+    # THAT function's own later decimal-point fix existed, so it never
+    # inherited the correction -- the same "copied before the later fix
+    # existed" gap the sign-blindness paragraph above already names for
+    # a different character. Fixed the identical way: `.` added to the
+    # lookbehind's excluded-character set, and a second lookahead,
+    # `(?!\.\d)`, that only rejects a match followed by a decimal point
+    # *and then another digit* -- not by a bare trailing `.`, so an
+    # ordinary sentence-ending period stays matchable.
+    pattern = r"(?<![\w.-])" + re.escape(expected_answer) + r"(?!\w)(?!\.\d)"
     return 1.0 if re.search(pattern, answer_segment) else 0.0
 
 

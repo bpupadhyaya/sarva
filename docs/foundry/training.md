@@ -635,13 +635,36 @@ to get it right by accident. Verified the new test is real: reverted
 the fix and watched it fail with the exact reward-hacking result
 (`1.0` for a wrong answer) before re-applying.
 
+**A fifth real reward-hacking exploit, an independent instance of the
+identical decimal-point-adjacency bug already found and fixed in
+`contains_match`, found by a much later fresh-eyes sweep:** the same
+"copied before the later fix existed" gap the sign-blindness paragraph
+above already names, just for a different character. `.` is not `\w`,
+so it never blocked a match on either side of the pattern. Confirmed
+directly, not hypothetical: `answer_reward("<think>...</think>The
+answer is 9.5", "9")` returned `1.0` before this fix — a model whose
+real sampled output happened to include a trailing decimal (a
+plausible failure mode for an undertrained model, not contrived) got
+full training reward for a numerically wrong answer via this module's
+own real call path. Fixed the identical way `contains_match` was: `.`
+added to the lookbehind's excluded-character set, and a second
+lookahead, `(?!\.\d)`, that only rejects a match followed by a decimal
+point *and then another digit* — not a bare trailing period, so an
+ordinary sentence-ending one stays matchable. Verified the new test is
+real: reverted the fix and watched it fail with the exact
+reward-hacking result (`1.0` for a wrong decimal answer) before
+re-applying.
+
 **The already-published 31% → 56% numbers below were re-checked
-against the fix, not left standing on faith:** re-ran
+against both fixes above, not left standing on faith:** re-ran
 `examples/17_reasoning_token_training.py` (same fixed seed,
-fully deterministic) after the fix and got the identical 31% → 56%
-result. The exploit was real and worth closing regardless — proven by
-the standalone reproduction above — but it happened not to change this
-specific run's already-reported numbers, an honest outcome confirmed
+fully deterministic) after each fix and got the identical 31% → 56%
+result both times. Both exploits were real and worth closing
+regardless — proven by the standalone reproductions above — but
+neither happened to change this specific run's already-reported
+numbers: this task's real answer space (single-digit sums, always a
+positive integer) never organically produces a negative or decimal
+completion, an honest outcome confirmed
 by actually re-running the example, not assumed because the fix
 "should" leave healthy runs unaffected.
 

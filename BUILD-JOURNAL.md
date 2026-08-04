@@ -13581,3 +13581,96 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The eval harness's decimal-point-adjacency fix from round 79 had an un-propagated sibling: the exact same bug in the real RL reward function, corrupting training signal, not just a benchmark report
+
+Round 81. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across rounds 70-80. It found a real one
+in `foundry/sarva_foundry/train/reasoning.py`'s `answer_reward` --
+the live GRPO reward function for reasoning-token RL training --
+verified and shipped directly this round.
+
+**The bug:** `answer_reward`'s word-boundary pattern,
+`(?<![\w-])` + escaped-expected + `(?!\w)`, is a direct copy of
+`sarva.eval.harness.contains_match`'s own pattern -- its docstring
+says so explicitly, and documents having already inherited that
+function's digit-adjacency and sign-blindness fixes at earlier points
+in time. But it was copied *before* round 79's decimal-point fix to
+`contains_match` existed, so it never inherited that correction:
+`.` isn't `\w`, so a decimal point never blocks either boundary,
+letting `expected="9"` match inside a wrong `"9.5"` and `expected="12"`
+match inside a wrong `"12.5"`.
+
+**Confirmed live**, directly against the real module: `answer_reward
+("<think>4 plus 5</think>The answer is 9.5", "9")` returned `1.0`
+(should be `0.0`); same for `reasoning_reward` and a division-style
+`"12.5"` vs `"12"` case. All wrong decimal answers scored full reward.
+
+**Why this is more severe than round 79's original finding:** that
+fix closed a gap in a benchmark *report* -- a wrong number would
+inflate a printed accuracy statistic. This one corrupts the actual
+training *signal* a real GRPO run optimizes against.
+`reasoning_reward`/`answer_reward` is invoked directly in the real
+training loop (`examples/17_reasoning_token_training.py:140`) against
+real `sample_completion()` output -- genuine autoregressive multinomial
+sampling from the model being trained, not contrived input. A freshly-
+initialized or undertrained model's real sampled output producing a
+numeral like `"9.5"` when the correct answer is `"9"` is a plausible,
+not adversarial, failure mode -- exactly the sort of reward-hacking
+exploit this same function's own docstring already narrates finding
+and closing three times over for other boundary cases (raw substring
+matching, repeated `</think>` tags, sign-blindness).
+
+**Fixed identically to round 79's `contains_match` fix**: `.` added to
+the lookbehind's excluded-character set, and a second lookahead,
+`(?!\.\d)`, that only rejects a match followed by a decimal point
+*and then another digit* -- not a bare trailing period, so an ordinary
+sentence-ending one (`"The answer is 9."`) stays matchable exactly as
+before.
+
+**Verified live** across six cases together: both new decimal-
+adjacency directions, the pre-existing digit-adjacency and sign-
+adjacency fixes, the sentence-ending-period case, and an exact
+integer match -- confirming no regression against any of the four
+prior fixes this same function already carries.
+
+**Verified by reverting** `reasoning.py` alone and watching the new
+test fail with the literal old bug reproducing itself: `1.0` instead
+of `0.0` for `answer_reward("<think>...</think>The answer is 9.5",
+"9")`.
+
+**Re-ran the real training example after the fix**, matching this
+project's established discipline of not leaving a claimed-unaffected
+published result standing on faith: `examples/17_reasoning_token_
+training.py` (same fixed seed, fully deterministic) produced the
+identical 31% -> 56% accuracy improvement both before and after this
+fix -- single-digit addition's real answer space is always a positive
+integer, so the exploit never organically fired in that specific
+example, but was real and worth closing regardless, the same honest
+"closed a real gap, didn't change this run's numbers" outcome the
+sign-blindness fix's own re-run established earlier.
+
+**1 new test, 736 -> 737 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/training.md` gained a
+new paragraph directly after the sign-blindness fix chapter it
+mirrors, and the doc's existing "numbers re-checked" paragraph was
+updated to cover both fixes' re-runs together rather than duplicating
+the verification narrative.
+
+**Thirty-five of the last thirty-six rounds (46-67, 70-81) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+second instance (after round 79/80's own doubled finding) of a fresh
+sweep finding that a fix already shipped in one function hadn't been
+propagated to a sibling that explicitly, documentedly, copied from it
+-- worth treating "function X copied its logic from function Y" as a
+standing prompt to re-check X every time Y gets fixed again, not just
+at the moment of the copy.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
