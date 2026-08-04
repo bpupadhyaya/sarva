@@ -211,6 +211,26 @@ reached `done`. A run that errors, gets budget-exhausted, or is
 cancelled mid-way is never persisted; a session file only ever reflects
 turns that genuinely completed, not partial or failed state.
 
+**`sarva models` had a fourth, not-yet-covered instance of the
+"unescaped external text" bug class this project has already fixed
+three separate times** (`doctor`'s own `check.detail`, an MCP server
+command repr, MCP tool names — see the MCP chapter). A local foundry
+checkpoint's `id`/`display_name` come straight from the checkpoint
+bundle's own DIRECTORY NAME (`model_info_for_bundle()`) — fully
+user-controlled (a user's own `--output-dir` choice, or a shared/
+downloaded checkpoint folder) — and `models_cmd` printed them with no
+`escape()` call at all, unlike `doctor`, which already escapes the
+identical checkpoint-name data reaching it through `DiagnosticCheck.
+detail`. Confirmed live: a real checkpoint bundle directory named
+`chatbot-v2 [draft]` — an ordinary, non-adversarial naming choice, not
+a contrived attack — had `[draft]` silently swallowed from both the
+printed model id and display name, since Rich interpreted it as an
+unknown style tag. Fixed by escaping both fields, matching the
+already-established pattern. Verified live the identical checkpoint
+name now renders literally. Verified by reverting and watching the new
+test fail with the exact swallowed value reproducing itself. 1 new
+test, 715 → 716 Python tests.
+
 ## The server: `sarva.server.app`
 
 Two different endpoints for two different needs, and the module's own

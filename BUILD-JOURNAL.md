@@ -12013,3 +12013,73 @@ sandboxing, inference batching); the quantization/`Budget`
 NaN-validation and explicit-partial-`Budget` gaps remain
 real-but-unreachable. `AgentState.INTERRUPTED` (found dead-but-legal in
 round 63) remains an open, low-priority note for a future round.
+
+
+## `sarva models` silently swallowed part of a local foundry checkpoint's own name -- a fourth, not-yet-covered instance of a bug class this project has already fixed three times
+
+Round 65. Read `sarva doctor` fresh (not assumed already covered just
+because `cli.py` generally has had many fixes) and confirmed it
+correctly escapes every dynamic string it prints, including
+`DiagnosticCheck.detail`, which embeds the same foundry-checkpoint
+directory names discussed below -- confirmed live that `doctor`
+renders a checkpoint name containing real Rich markup completely
+literally, unmangled. Read `models_cmd` next, right alongside it, and
+found the gap `doctor` doesn't have.
+
+`models_cmd` printed `m.id`/`m.display_name` with no `escape()` call
+at all. Those fields are trusted static data from `models.yaml` for
+the built-in providers, but for a local foundry checkpoint they come
+straight from the checkpoint bundle's own DIRECTORY NAME (`model_info_
+for_bundle()` in `foundry_provider.py`: `id=f"foundry/{name}"`,
+`display_name=f"Foundry checkpoint: {name} ..."`, where `name =
+bundle_dir.name`) -- fully user/externally controlled, a user's own
+`--output-dir` choice or a shared/downloaded checkpoint folder, not a
+value this project itself ever validates or sanitizes.
+
+**Confirmed live:** created a real, valid checkpoint bundle under a
+directory named `chatbot-v2 [draft]` -- an ordinary, non-adversarial
+naming choice, not a contrived attack (`[draft]`/`[backup]`/`[final]`
+are common real directory-naming habits) -- pointed
+`SARVA_FOUNDRY_CHECKPOINTS` at it, and ran the real CLI. `[draft]` was
+silently gone from BOTH the printed model id and display name (Rich
+parsed it as an unknown-but-swallowed style tag). The identical
+checkpoint name shown via `sarva doctor` (which does call `escape()`)
+rendered literally and correctly in the same session -- proving this
+wasn't an unavoidable Rich limitation, just a spot this project's own
+already-three-times-established fix pattern (`doctor`'s own detail
+text, an MCP server command repr, MCP tool names) never reached.
+
+**Fixed** by escaping both `m.id` and `m.display_name` before
+printing, leaving the intentional `[green]x[/green]` availability
+marker unescaped (that one really is meant as markup). **Verified
+live** the identical checkpoint name now renders literally, `[draft]`
+intact in both fields. **Verified by reverting** and watching the new
+test fail with the exact swallowed value reproducing itself -- the
+reverted code's output was missing `[draft]` from the id string
+entirely, the literal old bug. 1 new test, 715 -> 716 Python tests,
+all passing, `ruff check`/`format --check` clean. `docs/packaging.md`
+gained a new subsection directly under the CLI chapter's own session-
+persistence note, right before the server chapter begins.
+
+**Twenty consecutive rounds now (46-65)** have found real bugs. This
+round found the FOURTH instance of a bug class this project's own
+journal already names as fixed three separate times -- worth noting
+explicitly: "we've fixed this class of bug before" is not the same as
+"we've fixed every instance of it," and a targeted sweep specifically
+re-checking a KNOWN bug class against call sites not yet audited
+against it is a distinct, productive lens from "find something new."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable. `AgentState.INTERRUPTED` (dead-but-legal, round
+63) remains an open, low-priority note. Grepped every `console.print(f`
+call site in `cli.py` before closing this round out: `run`'s own
+verbose tool-call display (`-> {name}({args})`) already escapes both
+fields; `sessions list`'s printed session name can never contain
+markup characters at all, since `SessionStore`'s own `_sanitize()`
+rejects any name outside `[letters, digits, -, _]` at creation time.
+No further gap found in this file.

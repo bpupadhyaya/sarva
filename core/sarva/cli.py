@@ -559,10 +559,25 @@ async def _run(
 @app.command("models")
 def models_cmd() -> None:
     """List models known to the registry and whether they're available."""
+    # escape(): m.id/m.display_name are trusted static data from
+    # models.yaml for the built-in providers, but for a local foundry
+    # checkpoint they come straight from the checkpoint bundle's own
+    # DIRECTORY NAME (model_info_for_bundle() in foundry_provider.py) --
+    # fully user-controlled (a user's own --output-dir choice, or a
+    # shared/downloaded checkpoint folder), and Rich interprets
+    # unescaped brackets as markup. Confirmed live: a checkpoint
+    # directory named "chatbot-v2 [draft]" -- a completely ordinary,
+    # non-adversarial naming choice, not a contrived attack -- had
+    # "[draft]" silently swallowed from both the model id and display
+    # name (Rich parsed it as an unknown style tag). `doctor` already
+    # escapes the identical checkpoint-name data reaching it through
+    # DiagnosticCheck.detail; this is the one other real call site that
+    # hadn't been brought in line with that same, already-established
+    # fix pattern.
     router = _build_router()
     for m in router.registry.all():
         mark = "[green]x[/green]" if m.id in router.available else " "
-        console.print(f"\\[{mark}] {m.id:20s} {m.display_name}")
+        console.print(f"\\[{mark}] {escape(m.id):20s} {escape(m.display_name)}")
 
 
 @app.command("doctor")

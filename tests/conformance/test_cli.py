@@ -615,6 +615,55 @@ def test_models_lists_mock_as_available(monkeypatch):
     assert "[x]" in result.stdout or "x]" in result.stdout
 
 
+def test_models_with_markup_characters_in_a_model_id_are_escaped_not_swallowed(monkeypatch):
+    # A real bug found by giving `sarva models` its own fresh-eyes
+    # sweep: m.id/m.display_name are trusted static data from
+    # models.yaml for the built-in providers, but for a local foundry
+    # checkpoint they come straight from the checkpoint bundle's own
+    # DIRECTORY NAME (model_info_for_bundle() in foundry_provider.py)
+    # -- fully user-controlled (a user's own --output-dir choice, or a
+    # shared/downloaded checkpoint folder). Confirmed live before the
+    # fix: a real checkpoint bundle directory named "chatbot-v2
+    # [draft]" -- an ordinary, non-adversarial naming choice, not a
+    # contrived attack -- had "[draft]" silently swallowed from both
+    # the printed model id and display name, since this command had no
+    # escape() call at all (unlike `doctor`, which already escapes the
+    # identical checkpoint-name data reaching it through
+    # DiagnosticCheck.detail). Pinned here with a fake router rather
+    # than a real foundry checkpoint bundle -- the precise unit for
+    # what this command actually does with whatever ModelInfo objects
+    # the registry hands it, matching this file's own MCP-tool-name
+    # test's isolation style above.
+    _clear_provider_env(monkeypatch)
+
+    class _FakeModel:
+        id = "foundry/chatbot-v2 [draft]"
+        display_name = "Foundry checkpoint: chatbot-v2 [draft] (local, from-scratch)"
+
+    class _FakeRegistry:
+        def all(self):
+            return [_FakeModel()]
+
+    class _FakeRouter:
+        registry = _FakeRegistry()
+        available = {"foundry/chatbot-v2 [draft]"}
+
+    monkeypatch.setattr(cli_module, "_build_router", lambda: _FakeRouter())
+
+    result = runner.invoke(app, ["models"])
+
+    assert result.exit_code == 0, result.output
+    # The raw brackets and their contents must survive verbatim -- not
+    # interpreted as real Rich markup (which would instead silently
+    # drop "[draft]" entirely). Two separate occurrences are expected:
+    # once in the model id, once in the display name -- collapsing
+    # line-wrap whitespace so a real terminal-width wrap inside the
+    # long display name doesn't make an exact substring match brittle.
+    normalized = " ".join(result.stdout.split())
+    assert "foundry/chatbot-v2 [draft]" in normalized
+    assert normalized.count("[draft]") == 2
+
+
 def test_eval_grades_the_mock_provider_against_the_arithmetic_benchmark(monkeypatch):
     _clear_provider_env(monkeypatch)
 
