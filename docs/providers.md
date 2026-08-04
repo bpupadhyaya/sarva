@@ -85,7 +85,11 @@ knowing if you're adding a fifth:
   reconstructs the wire-format block from it on the way back in, and
   drops it (as before) only when no signature is present. Neither
   OpenAI's nor Gemini's reasoning content has an equivalent requirement
-  to translate.
+  to translate. **A sibling wire type, `redacted_thinking` — returned
+  whenever the model's own safety classifier flags part of its
+  reasoning, a normal occurrence with thinking on, not a rare one — was
+  silently dropped entirely until a later fresh-eyes sweep found it;
+  see below.**
 - **Ollama has no dedicated tool-result role at all.** Anthropic/OpenAI/
   Gemini each have a real wire shape for "here's what the tool
   returned" (a `tool_result` content block, a `role="tool"` message, a
@@ -370,6 +374,47 @@ live the two NYC/LA calls above now get distinct ids. Verified by
 reverting and watching the new test fail with the literal old
 collision reproducing itself (`'get_weather' != 'get_weather'` — both
 sides identical). 2 new tests, 705 → 707 Python tests.
+
+### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
+
+The signed-`thinking`-block round trip above was already hardened, with
+its own dedicated end-to-end test proving a real two-turn conversation
+survives intact. A fresh-eyes sweep applied the identical question one
+layer deeper: does the adapter handle *every* content-block type
+Anthropic's real SDK can return, not just the one already covered?
+`anthropic.types.RedactedThinkingBlock` (`type="redacted_thinking"`,
+`data: str`) is a normal, documented block the API returns whenever the
+model's own safety classifier flags part of its reasoning — unrelated
+to whether the user's own prompt is adversarial, and reachable any time
+extended thinking is on (this adapter's own default for every
+Anthropic call). `generate()`'s response-parsing loop had no branch for
+it at all, so it matched none of the `if`/`elif`s and was silently
+dropped — never surfaced as a block, never yielded.
+
+Confirmed live with the exact same fake-SDK-client pattern the signed
+round-trip test already uses, just swapping in a `redacted_thinking`
+block ahead of a `tool_use` block (the ordinary "reason, then call a
+tool" shape): the resulting `Message`, threaded unmodified into the
+next turn's history the same way `AgentLoop` always does, started with
+`tool_use` alone. Anthropic's extended-thinking + tool-use contract
+requires the leading thinking/redacted-thinking block be replayed
+verbatim on the follow-up request — the real API would reject a turn
+missing it, not just silently ignore the loss.
+
+Fixed by representing it as a `ThinkingBlock` too, reusing the exact
+same `provider_data`-as-opaque-round-trip-storage mechanism the signed
+case already established rather than inventing a new content-block
+type: empty visible text (redaction's whole point — there is none), the
+encrypted blob stored under a distinct `provider_data` key
+(`redacted_data`) from the signed case's `signature`, so the outgoing
+translation can tell the two apart and reconstruct the correct wire
+shape (`{"type": "redacted_thinking", "data": ...}` vs. `{"type":
+"thinking", "thinking": ..., "signature": ...}`) for each. Verified
+live the redacted block now survives the identical two-turn round trip
+the signed case's test already proves. Verified by reverting and
+watching the new test fail exactly where the block should have been:
+`content[0]` was `tool_use`, not `redacted_thinking` — the block simply
+wasn't there. 1 new test, 709 → 710 Python tests.
 
 ## The model registry: adding a model is a YAML edit, not a code change
 

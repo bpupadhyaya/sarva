@@ -132,3 +132,71 @@ async def test_a_signed_thinking_block_survives_a_real_two_turn_round_trip():
         "name": "get_weather",
         "input": {"city": "Paris"},
     }
+
+
+async def test_a_redacted_thinking_block_survives_a_real_two_turn_round_trip():
+    # A real bug found by giving this adapter's thinking round-trip its
+    # own fresh-eyes sweep, one layer deeper than the plain `thinking`
+    # case the test above already covers: Anthropic's real SDK also
+    # defines RedactedThinkingBlock (type="redacted_thinking", data: str)
+    # -- returned whenever the model's own safety classifier flags part
+    # of its reasoning, a normal, documented, non-adversarial occurrence
+    # with adaptive thinking on (this adapter's own default), not a rare
+    # edge case. With no branch for it, this block matched none of
+    # generate()'s if/elifs and was silently dropped -- confirmed live
+    # before the fix, the resulting Message threaded into the next
+    # turn's history started with tool_use alone, which the real
+    # Anthropic API rejects once thinking is enabled and a tool-use
+    # turn's leading reasoning block is missing.
+    turn_1_response = SimpleNamespace(
+        content=[
+            _content_block("redacted_thinking", data="ENCRYPTED_BLOB_XYZ"),
+            _content_block("tool_use", id="t1", name="get_weather", input={"city": "Paris"}),
+        ],
+        stop_reason="tool_use",
+        usage=_usage(20, 10),
+    )
+    turn_2_response = SimpleNamespace(
+        content=[_content_block("text", text="It's sunny in Paris.")],
+        stop_reason="end_turn",
+        usage=_usage(30, 8),
+    )
+    client = _FakeClient([turn_1_response, turn_2_response])
+    provider = AnthropicProvider(client=client)
+
+    request_1 = GenerateRequest(
+        model="claude-opus-4-8",
+        messages=[Message(role="user", content=[TextBlock(text="what's the weather in Paris?")])],
+    )
+    events_1 = [e async for e in provider.generate(request_1)]
+    done_1 = events_1[-1]
+    assert isinstance(done_1, DoneEvent)
+
+    history = [*request_1.messages, done_1.message]
+    history.append(
+        Message(
+            role="user",
+            content=[
+                ToolResultBlock(
+                    tool_call_id="t1", content=[TextBlock(text="sunny, 22C")], is_error=False
+                )
+            ],
+        )
+    )
+    request_2 = GenerateRequest(model="claude-opus-4-8", messages=history)
+    events_2 = [e async for e in provider.generate(request_2)]
+    done_2 = events_2[-1]
+    assert isinstance(done_2, DoneEvent)
+
+    second_call_messages = client.messages.calls[1]["messages"]
+    assistant_turn = next(m for m in second_call_messages if m["role"] == "assistant")
+    assert assistant_turn["content"][0] == {
+        "type": "redacted_thinking",
+        "data": "ENCRYPTED_BLOB_XYZ",
+    }
+    assert assistant_turn["content"][1] == {
+        "type": "tool_use",
+        "id": "t1",
+        "name": "get_weather",
+        "input": {"city": "Paris"},
+    }

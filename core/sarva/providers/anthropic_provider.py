@@ -157,9 +157,20 @@ async def _to_anthropic_message(m: Message) -> dict[str, Any]:
             # predating this field) can't be reconstructed safely, so it
             # still drops exactly as before rather than sending a
             # fabricated one Anthropic would reject anyway.
-            signature = (b.provider_data or {}).get("signature")
-            if signature:
-                blocks.append({"type": "thinking", "thinking": b.text, "signature": signature})
+            #
+            # A redacted_thinking block (see generate()'s own comment on
+            # the parsing side) round-trips the same way, just under a
+            # different wire shape: the opaque encrypted blob goes back
+            # as `data` on a `redacted_thinking` block, never as
+            # `thinking` text (there is none -- redaction's whole point)
+            # or a `signature` (redacted blocks don't carry one).
+            redacted_data = (b.provider_data or {}).get("redacted_data")
+            if redacted_data is not None:
+                blocks.append({"type": "redacted_thinking", "data": redacted_data})
+            else:
+                signature = (b.provider_data or {}).get("signature")
+                if signature:
+                    blocks.append({"type": "thinking", "thinking": b.text, "signature": signature})
         else:
             # A block type this adapter has no translation for at all
             # (e.g. DocumentBlock reaching this adapter directly,
@@ -252,6 +263,34 @@ class AnthropicProvider:
                         provider_data={"signature": getattr(b, "signature", None)},
                     )
                 )
+            elif b.type == "redacted_thinking":
+                # A real bug found by giving this adapter's thinking
+                # round-trip its own fresh-eyes sweep, one layer deeper
+                # than the plain `thinking` case it was already fixed
+                # for: Anthropic's real SDK also defines
+                # `RedactedThinkingBlock` (`type="redacted_thinking"`,
+                # `data: str`), returned whenever the model's own safety
+                # classifier flags part of its reasoning -- a normal,
+                # documented, non-adversarial occurrence with adaptive
+                # thinking on (this adapter's own default), not a rare
+                # edge case. With no branch for it here, it matched none
+                # of the `if`/`elif`s above and was silently dropped --
+                # never surfaced as a ThinkingBlock, never yielded.
+                # Confirmed live: when a redacted_thinking block preceded
+                # a tool_use block (the ordinary "reason, then call a
+                # tool" shape), the resulting Message threaded into the
+                # next turn's history started with `tool_use` alone --
+                # Anthropic's extended-thinking + tool-use contract
+                # requires the leading thinking/redacted_thinking block
+                # be replayed verbatim on the follow-up request, so the
+                # real API would reject that turn. Represented as a
+                # `ThinkingBlock` with empty visible text (redaction's
+                # whole point is no visible text) and the opaque
+                # encrypted blob preserved in `provider_data` under a
+                # distinct key from the signed case's `signature`, so
+                # `_to_anthropic_message` below can tell the two apart
+                # and reconstruct the correct wire shape for each.
+                blocks.append(ThinkingBlock(text="", provider_data={"redacted_data": b.data}))
             elif b.type == "tool_use":
                 call = ToolCallBlock(id=b.id, name=b.name, arguments=b.input)
                 blocks.append(call)
