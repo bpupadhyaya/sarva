@@ -518,6 +518,39 @@ a normal terminal state with a full `Spend` summary attached to
 runaway agent stops itself cleanly, with a receipt of exactly how much
 it spent before stopping.
 
+### The turn that tips spend over budget used to vanish from history entirely
+
+A real bug found by a fresh-eyes sweep: `messages.append(done.message)`
+sat *below* the budget check instead of above it, even though its own
+comment already claimed to be unconditional — "appended once here,
+unconditionally, regardless of stop_reason." The budget check's early
+`break` (added when the append was first made unconditional across
+stop reasons — see below) exits the loop before that line is ever
+reached, so whenever a response's own usage is what tips `spend` over
+`Budget`, the response was generated and genuinely billed
+(`spend.total_tokens`/`cost_usd`/`wall_seconds` already reflect it,
+computed just above the check) but left no trace in `messages` — and
+therefore none in `transcript_out` either.
+
+Confirmed live: a run with `Budget(max_total_tokens=1)` against the
+mock provider's default echo behavior produced a real END_TURN
+response — `spend.total_tokens == 39` proves it happened and was
+billed — that `transcript_out` never contained at all; only the
+original user message survived. Reachable with no adversarial input,
+just an ordinary conversation running up against `max_total_tokens`,
+`max_wall_seconds`, or `max_cost_usd` on what happens to be an
+otherwise-successful final turn — a long session nearing its token
+cap, a slow answer crossing its wall-clock cap, or a costly call
+crossing its cost cap. `server/app.py`'s `/chat`/`/ws/chat` handlers
+and `cli.py`'s `chat`/`run` commands all consume `transcript_out`
+exactly as exercised here.
+
+Fixed by moving the append above the budget check, matching what the
+comment already claimed. `RunDoneEvent.final_message` deliberately
+stays unset on this path either way — the later, near-identical
+budget re-check after verification (below) withholds it the same way
+by design; only the append needed to move.
+
 ## Multimodal-aware routing, and degradation as an opt-in fallback
 
 Before the first model call, the loop scans every message for the

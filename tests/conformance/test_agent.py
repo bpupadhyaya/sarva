@@ -545,6 +545,33 @@ async def test_transcript_out_populated_even_on_failure(run_root):
 
 
 @pytest.mark.asyncio
+async def test_transcript_out_includes_the_turn_that_tipped_spend_over_budget(run_root):
+    """Regression test for a real bug: `messages.append(done.message)` sat
+    below the budget check instead of above it, despite its own comment
+    already claiming to be unconditional "regardless of stop_reason" — a
+    response whose own usage is what tips `spend` over `Budget` was
+    generated and billed (`spend.total_tokens` already reflects it) but
+    left no trace in `messages`/`transcript_out` at all. Confirmed live
+    before the fix: a real END_TURN response vanished entirely, only the
+    original user message survived."""
+    provider = MockProvider(script=[ScriptedTurn(text="the answer is 42")])
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        budget=Budget(max_total_tokens=1),  # tripped by the very first response's own usage
+        run_root=run_root,
+    )
+    transcript: list[Message] = []
+
+    events = [e async for e in loop.run("what's the answer?", transcript_out=transcript)]
+
+    assert events[-1].state == AgentState.BUDGET_EXCEEDED
+    assert events[-1].spend.total_tokens > 0
+    assert [m.role for m in transcript] == ["user", "assistant"]
+    assert transcript[1].text() == "the answer is 42"
+
+
+@pytest.mark.asyncio
 async def test_a_retryable_stream_error_actually_retries_instead_of_crashing(run_root):
     # A real bug found by actually running a retryable stream error (the
     # exact case every real adapter's RateLimitError/5xx APIStatusError

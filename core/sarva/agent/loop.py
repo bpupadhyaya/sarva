@@ -714,19 +714,29 @@ class AgentLoop:
             spend.cost_usd += done.usage.cost_usd
             spend.wall_seconds = time.monotonic() - started
 
+            # Appended once here, unconditionally, before the budget check
+            # below and regardless of stop_reason — `messages` (and
+            # therefore `transcript_out`) must reflect every assistant turn
+            # that actually happened, not just the ones on the tool-use
+            # path or the ones that stayed under budget. A prior version
+            # appended after the budget check, so a response whose own
+            # usage is what tipped `spend` over `Budget` was silently
+            # dropped from history entirely — the model was really called
+            # and really billed for it (`spend.total_tokens` etc. already
+            # reflect it, right above), but the turn that cost that spend
+            # left no trace in `messages`/`transcript_out`. Confirmed live:
+            # a run with `Budget(max_total_tokens=1)` produced a real,
+            # billed END_TURN response that `transcript_out` never
+            # contained at all. `final_message` deliberately still stays
+            # unset on this path (see the matching budget re-check after
+            # verification below) — only the append needed to move.
+            messages.append(done.message)
+
             reason = spend.exceeded(self._budget)
             if reason:
                 transition(AgentState.BUDGET_EXCEEDED)
                 yield await emit(StateChangedEvent(state=state, detail=reason))
                 break
-
-            # Appended once here, unconditionally, regardless of stop_reason —
-            # `messages` (and therefore `transcript_out`) must reflect every
-            # assistant turn that actually happened, not just the ones on the
-            # tool-use path. A prior version only appended inside the
-            # TOOL_USE branch below, silently dropping the final turn from
-            # the recorded history on every successful (END_TURN) run.
-            messages.append(done.message)
 
             if done.stop_reason == StopReason.END_TURN:
                 # Verifier subagent (opt-in via `verify=True`), scoped

@@ -14376,3 +14376,79 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## The turn that tips spend over budget used to vanish from history entirely
+
+Round 90. Delegated a fresh-eyes sweep to a subagent, steered away from
+every file/area covered across the last ~10 rounds and pointed at
+genuinely unswept territory or sibling-propagation gaps. It found a
+real one in `AgentLoop._run_impl` itself.
+
+**The bug:** `messages.append(done.message)` sat *below* the budget
+check (`reason = spend.exceeded(self._budget); if reason: ... break`)
+instead of above it -- despite its own comment already claiming to be
+unconditional, "regardless of stop_reason." That comment describes an
+earlier round's real fix (a plain END_TURN success used to be dropped
+from history entirely, only the TOOL_USE path appended), but the
+budget check's own early `break` exits the loop before the append is
+ever reached, so that earlier fix never actually covered this one
+path. Whenever a response's own usage is what tips `spend` over
+`Budget`, the response was generated and genuinely billed --
+`spend.total_tokens`/`cost_usd`/`wall_seconds` are computed just above
+the check, from that exact response's usage -- but left no trace in
+`messages`, and therefore none in `transcript_out` either.
+
+**Confirmed live:** a run with `Budget(max_total_tokens=1)` against
+the mock provider's default echo behavior produced a real END_TURN
+response -- `spend.total_tokens == 39` proves it happened and was
+billed -- that `transcript_out` never contained at all; only the
+original user message survived.
+
+**Why concretely reachable:** no adversarial input needed, just an
+ordinary conversation running up against `max_total_tokens`,
+`max_wall_seconds`, or `max_cost_usd` on what happens to be an
+otherwise-successful final turn -- a long session nearing its token
+cap, a slow answer crossing its wall-clock cap, or a costly call
+crossing its cost cap. `server/app.py`'s `/chat`/`/ws/chat` handlers
+and `cli.py`'s `chat`/`run` commands all consume `transcript_out`
+exactly as exercised in the repro -- a real end user in this situation
+got a bare `budget_exceeded` with the model's real, already-paid-for
+answer silently gone from recorded history.
+
+**Fixed** by moving the append above the budget check, matching what
+its own comment already claimed. `RunDoneEvent.final_message`
+deliberately stays unset on this path either way -- the later,
+near-identical budget re-check after verification withholds it the
+same way by design, so only the append needed to move, not the
+final-message semantics.
+
+**Verified live** with the same repro: `transcript_out` now correctly
+contains `["user", "assistant"]` even though the run still ends
+`BUDGET_EXCEEDED`.
+
+**Verified by reverting** `loop.py` alone and watching the new test
+fail with the literal old bug's own shape: `['user']` instead of
+`['user', 'assistant']`.
+
+**1 new test, 747 -> 748 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+subsection directly after the "Budgets: exceeding one is a clean stop,
+not an exception" chapter, right where the unconditional-append
+history already lived.
+
+**Forty-five of the last forty-six rounds (46-67, 70-90) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.**
+Another instance of a fix's own comment overclaiming its coverage --
+"unconditional, regardless of stop_reason" was true for every stop
+reason once `done.stop_reason` was actually inspected, but not true
+for the early-exit budget path sitting above that inspection entirely.
+Worth remembering that a comment asserting "this is unconditional" is
+itself a claim to verify against the *actual* control flow, not just
+against the branches it explicitly names.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
