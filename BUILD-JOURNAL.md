@@ -11519,3 +11519,76 @@ sandbox tool, web search, image generation). The three infra-blocked
 items remain deferred (Tauri `csp: null`, RL harness sandboxing,
 inference batching); the quantization/`Budget` NaN-validation and
 explicit-partial-`Budget` gaps remain real-but-unreachable.
+
+
+## `Recipe.param_count()` silently ignored MoE configs entirely -- a real bug found by sweeping a genuinely fresh area, foundry's own cost-estimation module
+
+Round 56. Considered following up round 55's own closing note about
+whether `sarva serve` should support MCP tools too -- a genuine scope
+question, not a confirmed bug, so deferred it and swept a completely
+fresh area instead, continuing the streak's own discipline. Checked
+`server/app.py` (already heavily hardened) and the desktop app (also
+extensively hardened, only a minor cosmetic staleness found, not worth
+shipping) before settling on `foundry/sarva_foundry/recipes/recipe.py`
+-- untouched since its original commit despite `sarva_foundry.model.moe`
+(a fully supported, separately-built MoE feature) landing in this
+codebase in a LATER milestone and never triggering a revisit here.
+
+`Recipe.param_count()`'s formula computes the FFN parameter
+contribution purely from dense-SwiGLU shapes (`3 * dim * hidden_dim`)
+and never looked at `TransformerConfig.moe` at all. An MoE-enabled
+`Recipe` is completely ordinary use of the public API -- `moe` is a
+first-class, tested field on `TransformerConfig`, and MoE's own
+docstring frames scaling to larger configs as exactly the point of
+building it. Confirmed live: a real MoE-enabled config's actual
+instantiated parameter count (12,860,090,368, matching
+`DecoderOnlyTransformer(cfg).num_parameters()`) came back **~12x**
+what `param_count()` reported (1,057,581,056) -- since
+`TransformerBlock` swaps EVERY layer's FFN for `MoEFeedForward` the
+instant `cfg.moe` is set (not a small addition on top of the dense
+path), and this formula's own dense-only assumption silently produced
+a confidently wrong number instead of erroring. `compute_estimate()`
+(the module's entire stated purpose: "a real FLOPs-based cost
+estimate, not a fabricated dollar figure") was silently wrong by the
+same factor: **$70.51** reported for what a real model would actually
+cost, **$857.34**. `tests/foundry/test_recipes.py` never exercised an
+MoE config, so nothing caught this since MoE shipped.
+
+**Fixed** by mirroring `MoEFeedForward.__init__`'s own weight shapes
+exactly when `cfg.moe is not None`: one `dim -> n_experts` gate (the
+routing bias is a registered buffer, never a `Parameter` -- correctly
+excluded here too, matching what `.parameters()` actually counts),
+plus `n_experts + n_shared_experts` independent SwiGLU experts, each
+its own three `dim`<->`hidden` matrices at the MoE's own hidden size
+(usually far smaller than the dense `hidden_dim`), never the dense
+formula's hidden size. **Verified live** the fixed formula matches a
+real instantiated MoE model exactly (same technique the dense case's
+own existing tests already use: instantiate a real model, compare
+`.num_parameters()` bit-for-bit). **Verified by reverting** and
+watching the new test fail with the literal old mismatch reproducing
+itself (`11340032 == 14297344` -- false, the exact wrong-vs-real
+numbers for the test's own smaller config). 1 new test, 702 -> 703
+Python tests, all passing, `ruff check`/`format --check` clean.
+`docs/foundry/recipes.md` gained a new subsection directly under the
+compute-estimate chapter this is a gap in.
+
+**Eleven consecutive rounds now (46-56)** have found real bugs -- and
+this is the first in the streak found by sweeping a module NOT because
+it was recently touched (the usual "does yesterday's fix have a bug"
+lens), but because a SEPARATE feature shipped later never triggered a
+review of an EARLIER module it silently broke the assumptions of. A
+genuinely different variant of the same underlying discipline: check
+whether new code invalidated an old module's implicit assumptions, not
+just whether new code has its own bugs.
+
+**Next:** `sarva_foundry.recipes`' four named configs (`LAPTOP_125M`,
+`SCALE_1B`, `SCALE_7B`, `SCALE_70B`) are all dense (no `moe=...`) --
+worth checking whether an MoE-based named recipe should exist given
+MoE is now a real, tested architecture option, though that's a feature/
+scope decision for the author, not a bug. The completeness-audit
+backlog remains at three items needing external-dependency/scope
+decisions from the author (a code-execution sandbox tool, web search,
+image generation). The three infra-blocked items remain deferred
+(Tauri `csp: null`, RL harness sandboxing, inference batching); the
+quantization/`Budget` NaN-validation and explicit-partial-`Budget` gaps
+remain real-but-unreachable.

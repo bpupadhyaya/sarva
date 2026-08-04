@@ -9,7 +9,8 @@ paper."""
 
 from __future__ import annotations
 
-from sarva_foundry.model import DecoderOnlyTransformer
+from sarva_foundry.model import DecoderOnlyTransformer, TransformerConfig
+from sarva_foundry.model.moe import MoEConfig
 from sarva_foundry.recipes import ALL_RECIPES, LAPTOP_125M, SCALE_1B, SCALE_7B, SCALE_70B
 from sarva_foundry.recipes.recipe import Recipe
 
@@ -35,6 +36,42 @@ def test_7b_and_70b_param_counts_are_pinned_exact_without_instantiating():
     # approximate) produces for these configs.
     assert SCALE_7B.param_count() == 5_802_037_248
     assert SCALE_70B.param_count() == 55_628_275_712
+
+
+def test_param_count_matches_a_real_instantiated_moe_model():
+    # A real bug found by giving this module its own fresh-eyes sweep,
+    # long after sarva_foundry.model.moe shipped in a separate
+    # milestone: param_count()'s formula only ever accounted for the
+    # dense SwiGLU FFN case, silently ignoring an MoE-enabled config
+    # entirely (an MoE Recipe is completely ordinary use of the public
+    # API -- `moe` is a first-class field on TransformerConfig).
+    # Confirmed live before the fix: the formula's answer for this exact
+    # config came back ~12x too SMALL, since TransformerBlock swaps
+    # EVERY layer's FFN for MoEFeedForward the moment cfg.moe is set,
+    # not a small addition on top of the dense path -- and
+    # compute_estimate() (and therefore its dollar-cost output) was
+    # silently wrong by the same factor, with no exception or warning.
+    cfg = TransformerConfig(
+        vocab_size=32000,
+        dim=256,
+        n_layers=4,
+        n_heads=8,
+        n_kv_heads=4,
+        max_seq_len=512,
+        moe=MoEConfig(n_experts=8, n_experts_per_tok=2, n_shared_experts=1),
+    )
+    real = DecoderOnlyTransformer(cfg).num_parameters()
+    recipe = Recipe(
+        name="toy-moe",
+        description="",
+        model=cfg,
+        total_tokens=1000,
+        batch_size=1,
+        learning_rate=1e-3,
+        warmup_steps=0,
+        runnable_here=True,
+    )
+    assert recipe.param_count() == real
 
 
 def test_runnable_here_flags_match_what_this_project_actually_runs():

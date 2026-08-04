@@ -69,6 +69,35 @@ own measured speed* — a genuine correlation check between the formula
 and reality, not two independent, unverified numbers sitting next to
 each other.
 
+### A real bug found by a fresh-eyes sweep, long after MoE shipped separately: `param_count()` silently ignored an MoE config entirely
+
+`sarva_foundry.model.moe` (MoE support) landed in a separate, later
+milestone than this module, and this module was never revisited
+against it. `Recipe.param_count()`'s formula only ever accounted for
+the dense SwiGLU FFN case — an MoE-enabled `TransformerConfig` (`moe`
+is a first-class, tested field on `TransformerConfig`, completely
+ordinary use of the public API) silently got the dense formula's
+answer anyway, no exception, no warning. Confirmed live: a real
+MoE-enabled config's actual instantiated parameter count came back
+**~12x** this formula's answer, since `TransformerBlock` swaps *every*
+layer's FFN for `MoEFeedForward` the instant `cfg.moe` is set (see
+`transformer.md`) — not a small addition on top of the dense path — and
+`compute_estimate()`'s dollar-cost output was silently wrong by the
+same factor: **$70.51** reported for what a real instantiated model
+would actually cost, **$857.34**.
+
+Fixed by mirroring `MoEFeedForward.__init__`'s own weight shapes
+exactly when `cfg.moe is not None`: one `dim → n_experts` gate (the
+routing bias is a registered buffer, never a `Parameter`, so it's
+correctly excluded here too, matching what `.parameters()` actually
+counts), plus `n_experts + n_shared_experts` independent SwiGLU
+experts, each its own three `dim`↔`hidden` matrices at the MoE's own
+(usually much smaller) expert hidden size — never the dense
+`hidden_dim`. Verified live the fixed formula matches a real
+instantiated MoE model exactly. Verified by reverting and watching the
+new test fail with the literal old mismatch reproducing itself
+(`11340032 == 14297344` — false). 1 new test.
+
 ## Build it yourself
 
 ```python

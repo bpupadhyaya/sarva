@@ -39,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sarva_foundry.model import TransformerConfig
+from sarva_foundry.model.layers import default_swiglu_hidden_dim
 
 
 @dataclass(frozen=True)
@@ -71,14 +72,41 @@ class Recipe:
         against a real instantiated model."""
         cfg = self.model
         head_dim = cfg.dim // cfg.n_heads
-        # `__post_init__` always resolves `hidden_dim` to a concrete value
-        # (the default when unset) -- never None on a constructed config.
-        hidden_dim = cfg.hidden_dim
-        assert hidden_dim is not None
         # wq, wo: dim -> dim each. wk, wv: dim -> n_kv_heads*head_dim each.
         attn = 2 * cfg.dim * cfg.dim + 2 * cfg.dim * (cfg.n_kv_heads * head_dim)
-        # SwiGLU: three dim<->hidden_dim matrices (gate, up, down).
-        mlp = 3 * cfg.dim * hidden_dim
+        if cfg.moe is not None:
+            # A real bug found by giving this module its own fresh-eyes
+            # sweep, long after `sarva_foundry.model.moe` shipped in a
+            # separate milestone: this formula only ever accounted for
+            # the dense SwiGLU FFN case, silently ignoring `cfg.moe`
+            # entirely -- confirmed live, an MoE-enabled config's real
+            # instantiated parameter count came back ~12x this formula's
+            # answer, since `TransformerBlock` swaps EVERY layer's FFN
+            # for `MoEFeedForward` the moment `cfg.moe is not None`
+            # (see transformer.py), not a small addition on top of the
+            # dense path. Mirrors `MoEFeedForward.__init__`'s own weight
+            # shapes exactly: one `dim -> n_experts` gate (`expert_bias`
+            # is a registered buffer, never a `Parameter`, so it's
+            # correctly excluded here too, matching what `.parameters()`
+            # actually counts), plus `n_experts + n_shared_experts`
+            # independent SwiGLU experts, each its own three dim<->hidden
+            # matrices at the MoE's own (usually much smaller) hidden
+            # size -- never the dense `hidden_dim` above.
+            moe = cfg.moe
+            expert_hidden = moe.expert_hidden_dim or max(
+                32, default_swiglu_hidden_dim(cfg.dim) // 4
+            )
+            gate = cfg.dim * moe.n_experts
+            experts = (moe.n_experts + moe.n_shared_experts) * 3 * cfg.dim * expert_hidden
+            mlp = gate + experts
+        else:
+            # `__post_init__` always resolves `hidden_dim` to a concrete
+            # value (the default when unset) -- never None on a
+            # constructed config.
+            hidden_dim = cfg.hidden_dim
+            assert hidden_dim is not None
+            # SwiGLU: three dim<->hidden_dim matrices (gate, up, down).
+            mlp = 3 * cfg.dim * hidden_dim
         norms = 2 * cfg.dim  # attn_norm + mlp_norm weight vectors
         per_layer = attn + mlp + norms
         # Tied embedding/unembedding (counted once) + final norm.
