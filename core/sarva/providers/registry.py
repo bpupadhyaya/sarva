@@ -41,7 +41,20 @@ class Registry:
 
     @classmethod
     def load(cls, path: Path) -> Registry:
-        raw = yaml.safe_load(path.read_text())
+        # encoding="utf-8" explicit, not locale-default: a real,
+        # systemic gap found across nine bare `read_text()` call sites
+        # in this codebase (agent/tools.py's ReadFileTool, memory/
+        # session.py's SessionStore.load, config.py, cli.py, memory/
+        # longterm.py, foundry_provider.py, this file) -- every
+        # corresponding WRITE path already forces UTF-8 explicitly
+        # (atomic_write_text/atomic_write_bytes), but no read path did,
+        # so a non-ASCII models.yaml/routing.yaml (a model's own
+        # display_name in a non-English locale, say) would decode
+        # correctly on most developer machines (real UTF-8 locale) but
+        # not on a musl-libc container, Windows without UTF-8 mode, or
+        # PYTHONCOERCECLOCALE=0 -- confirmed live for the ReadFileTool/
+        # SessionStore instances, this file fixed for the same reason.
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         models = {m["id"]: ModelInfo.model_validate(m) for m in raw["models"]}
         return cls(models)
 
@@ -61,7 +74,7 @@ class Registry:
 
 
 def load_routing(path: Path) -> dict[TaskClass, list[str]]:
-    raw = yaml.safe_load(path.read_text())
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     return {TaskClass(k): v for k, v in raw["routing"].items()}
 
 

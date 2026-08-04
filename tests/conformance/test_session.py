@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 import sys
+from pathlib import Path
 
 import pytest
 from sarva.memory.session import SessionStore
@@ -31,6 +32,39 @@ def test_save_then_load_round_trips(store):
     ]
     store.save("greeting", messages)
     assert store.load("greeting") == messages
+
+
+def test_load_passes_an_explicit_utf8_encoding_not_locale_default(store, monkeypatch):
+    # A real bug found by a fresh-eyes sweep of read_text() call sites
+    # across the codebase: `load()` used to call `path.read_text()` with
+    # no `encoding=`, which uses `locale.getpreferredencoding(False)`,
+    # not UTF-8 -- genuinely locale-dependent on this project's own
+    # minimum Python (3.12), e.g. on musl-libc containers (Alpine),
+    # Windows without UTF-8 mode, or PYTHONCOERCECLOCALE=0. `save()`
+    # always writes UTF-8 (pydantic's dump_json), so a non-ASCII saved
+    # conversation would round-trip fine on most developer machines but
+    # raise UnicodeDecodeError on such a deployment -- and since that's
+    # a ValueError subclass, it's silently swallowed by the `except
+    # ValueError` handlers in cli.py/server/app.py and reported as a
+    # generic "invalid session," permanently unloadable even though the
+    # file on disk is perfectly valid UTF-8 JSON. This spy directly pins
+    # the fix (explicit encoding="utf-8" on every read_text() call),
+    # rather than depending on the OS's actual locale to reproduce it.
+    messages = [Message(role="user", content=[TextBlock(text="café Ω 日本語 -- bonjour!")])]
+    store.save("intl", messages)
+
+    real_read_text = Path.read_text
+
+    def spy_read_text(self, *args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8", (
+            "read_text() must pass encoding='utf-8' explicitly, not rely on "
+            "locale.getpreferredencoding()"
+        )
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+
+    assert store.load("intl") == messages
 
 
 def test_round_trip_preserves_binary_content(store):

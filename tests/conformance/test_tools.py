@@ -84,6 +84,42 @@ async def test_write_does_not_destroy_the_previous_file_if_interrupted_mid_write
 
 
 @pytest.mark.asyncio
+async def test_read_file_passes_an_explicit_utf8_encoding_not_locale_default(ctx, monkeypatch):
+    # A real bug found by a fresh-eyes sweep of read_text() call sites
+    # across the codebase: this tool used to call `p.read_text()` with
+    # no `encoding=`, which uses `locale.getpreferredencoding(False)`,
+    # not UTF-8 -- genuinely locale-dependent on this project's own
+    # minimum Python (3.12; PEP 686's default-UTF-8 mode doesn't land
+    # until 3.15), e.g. on musl-libc containers (Alpine), Windows
+    # without UTF-8 mode, or PYTHONCOERCECLOCALE=0 -- all realistic
+    # `sarva serve`/`sarva run` deployment targets, not adversarial
+    # ones. Confirmed live before this fix: a file WriteFileTool had
+    # just written (always UTF-8 via atomic_write_text) crashed with
+    # UnicodeDecodeError reading it straight back, despite this tool's
+    # own description promising "Read a UTF-8 text file." This spy
+    # directly pins the fix (explicit encoding="utf-8"), rather than
+    # depending on the OS's actual locale to reproduce it.
+    write = WriteFileTool()
+    await write.run({"path": "note.txt", "content": "café Ω 日本語 -- bonjour!"}, ctx)
+
+    real_read_text = Path.read_text
+
+    def spy_read_text(self, *args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8", (
+            "read_text() must pass encoding='utf-8' explicitly, not rely on "
+            "locale.getpreferredencoding()"
+        )
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+
+    read = ReadFileTool()
+    result = await read.run({"path": "note.txt"}, ctx)
+    assert not result.is_error
+    assert result.content[0].text == "café Ω 日本語 -- bonjour!"
+
+
+@pytest.mark.asyncio
 async def test_edit_replaces_the_one_exact_occurrence(ctx):
     write = WriteFileTool()
     edit = EditFileTool()

@@ -107,7 +107,7 @@ def _read_bytes_or_exit(path: Path, description: str) -> bytes:
 
 def _read_text_or_exit(path: Path, description: str) -> str:
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     except OSError as e:
         _print_file_error("read", description, path, e)
         raise typer.Exit(1) from e

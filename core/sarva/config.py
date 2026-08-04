@@ -98,7 +98,7 @@ def load_config(path: Path | None = None) -> dict[str, str]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ConfigError(f"config file at {path} is corrupted (invalid JSON): {e}") from e
 

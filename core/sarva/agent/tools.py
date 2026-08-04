@@ -130,7 +130,22 @@ class ReadFileTool:
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
         p = _within_workdir(ctx.workdir, args["path"])
-        text = p.read_text()
+        # A real bug found by a fresh-eyes sweep: `read_text()` with no
+        # `encoding=` uses `locale.getpreferredencoding(False)`, not
+        # UTF-8 -- on this project's own minimum Python (3.12; PEP 686's
+        # default-UTF-8 mode doesn't land until 3.15) that's genuinely
+        # locale-dependent, not automatically UTF-8, on musl-libc
+        # containers (Alpine), Windows without UTF-8 mode enabled, or
+        # PYTHONCOERCECLOCALE=0 -- all realistic `sarva serve`/`sarva
+        # run` deployment targets, not adversarial ones. Confirmed live:
+        # a file this tool's own WriteFileTool sibling had just written
+        # (always UTF-8 via atomic_write_text) crashed with
+        # UnicodeDecodeError reading it straight back, despite this
+        # tool's own description promising "Read a UTF-8 text file."
+        # WriteFileTool/EditFileTool already force UTF-8 explicitly;
+        # this, the plainest and first of the three, never got the same
+        # fix.
+        text = p.read_text(encoding="utf-8")
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
 
 

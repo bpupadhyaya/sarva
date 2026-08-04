@@ -310,7 +310,7 @@ class ByteLevelBPETokenizer:
 
     @classmethod
     def load(cls, path: Path) -> ByteLevelBPETokenizer:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         tok = cls()
         tok.merges = [tuple(pair) for pair in data["merges"]]
         tok._merge_rank = {pair: i for i, pair in enumerate(tok.merges)}

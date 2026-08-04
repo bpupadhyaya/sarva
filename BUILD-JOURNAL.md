@@ -14526,3 +14526,93 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `ReadFileTool` and `SessionStore.load` decoded files with the locale-default encoding, not UTF-8 -- a systemic gap across nine call sites
+
+Round 92. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~13 rounds and pointed
+at sibling-propagation gaps and overclaiming comments specifically. It
+found a real one, and widening the sweep past the first instance
+turned it into a systemic, codebase-wide fix.
+
+**The bug:** `ReadFileTool.run()` called `p.read_text()` with no
+`encoding=` argument, even though its own tool description promises
+"Read a UTF-8 text file." `Path.read_text()` with no explicit encoding
+uses `locale.getpreferredencoding(False)`, not UTF-8 -- on this
+project's own minimum Python (3.12; PEP 686's default-UTF-8 mode
+doesn't land until 3.15) that's genuinely locale-dependent: not UTF-8
+at all on a musl-libc container (Alpine), on Windows without UTF-8
+mode enabled, or with `PYTHONCOERCECLOCALE=0` -- all realistic `sarva
+serve`/`sarva run` deployment targets, not adversarial input.
+
+**Confirmed live**: a file `WriteFileTool` had just written (always
+UTF-8 via `atomic_write_text`) crashed with `UnicodeDecodeError`
+reading it straight back, under a simulated non-UTF-8 locale.
+`WriteFileTool`/`EditFileTool` already force UTF-8 explicitly (the
+CRLF fix from an earlier round is exactly this discipline);
+`ReadFileTool`, the plainest and first of the three file tools, never
+got either fix -- the classic "fix shipped in one sibling, never
+propagated to another" pattern this project keeps finding.
+
+**A second, higher-blast-radius instance**: `SessionStore.load()`
+had the identical bare `path.read_text()` on a session JSON file
+`save()` always writes as UTF-8 (pydantic's `dump_json`). Worse
+failure mode here: `UnicodeDecodeError` is a `ValueError` subclass, so
+it's silently swallowed by the existing `except ValueError` handlers
+in `cli.py`/`server/app.py` and reported as a generic "invalid
+session" -- any previously-saved conversation containing non-ASCII
+text (any non-English content, an emoji, an accented name) becomes
+permanently unloadable on such a deployment, even though the file on
+disk is perfectly valid UTF-8 JSON.
+
+**Widening the sweep**: a grep for the same bare `path.read_text()`
+pattern across the codebase turned up seven more call sites sharing
+the identical gap -- `config.py`'s `load_config`, `cli.py`'s
+`_read_text_or_exit`, `memory/longterm.py` (all three read sites),
+`providers/registry.py` (`models.yaml`/`routing.yaml`, both call
+sites), `providers/foundry_provider.py` (checkpoint `config.json`,
+both call sites), and the foundry tokenizer's own `config.json` load
+-- every one paired with a write path that already forces UTF-8
+explicitly, the identical write/read asymmetry, just never
+centralized or propagated past the two tools that happened to get it
+first (or never fixed there at all).
+
+**Fixed** uniformly: all nine call sites now pass `encoding="utf-8"`
+explicitly, matching the discipline every corresponding write path
+already has.
+
+**Verified live**: the WriteFileTool/ReadFileTool and SessionStore
+save/load round trips both survive a non-ASCII payload (`"café Ω
+日本語"`).
+
+**Verified by reverting** `agent/tools.py`/`memory/session.py` alone
+and watching both new tests fail with the literal old bug's own
+shape -- a spy asserting `read_text()` is called with
+`encoding="utf-8"` catches the missing argument directly, rather than
+depending on the OS's actual locale (unreliable to simulate portably
+in-process) to reproduce it.
+
+**2 new tests, 750 -> 752 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+subsection directly after the CRLF-preservation fix chapter for
+`EditFileTool` -- the same file, the same underlying discipline
+(explicit bytes/encoding instead of trusting `Path.read_text()`'s
+defaults), found and fixed a second time for a different reason.
+
+**Forty-seven of the last forty-eight rounds (46-67, 70-92) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+sixth instance of a fix that shipped for some members of a sibling
+group never propagating to all of them -- this one notably widened by
+the round itself, from one tool to nine call sites across the whole
+codebase, once the underlying pattern (bare `read_text()`, no
+explicit encoding, next to a write path that already got this right)
+was named. Worth treating a fix discovered in one function as a
+prompt to grep the whole codebase for its exact code shape, not just
+its named siblings.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

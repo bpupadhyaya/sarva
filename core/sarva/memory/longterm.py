@@ -137,7 +137,7 @@ class LongTermMemoryStore:
         stripped_topic = topic.strip()
         with exclusive_lock(lock_path):
             file_exists = path.is_file()
-            existing = path.read_text() if file_exists else f"# {stripped_topic}\n"
+            existing = path.read_text(encoding="utf-8") if file_exists else f"# {stripped_topic}\n"
             original_topic = existing.splitlines()[0].removeprefix("#").strip()
             timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
             heading = (
@@ -152,7 +152,7 @@ class LongTermMemoryStore:
 
     def read(self, topic: str) -> str | None:
         path = self._path_for(topic)
-        return path.read_text() if path.is_file() else None
+        return path.read_text(encoding="utf-8") if path.is_file() else None
 
     def list_topics(self) -> list[str]:
         return sorted(p.stem for p in self._directory.glob("*.md"))
@@ -165,7 +165,7 @@ class LongTermMemoryStore:
         query_lower = query.lower()
         matches: list[NoteMatch] = []
         for path in sorted(self._directory.glob("*.md")):
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
             idx = text.lower().find(query_lower)
             if idx == -1:
                 continue

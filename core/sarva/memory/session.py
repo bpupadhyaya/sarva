@@ -104,7 +104,22 @@ class SessionStore:
         path = self._path(name)
         if not path.exists():
             return []
-        return _MESSAGES_ADAPTER.validate_json(path.read_text())
+        # A real bug found by a fresh-eyes sweep of read_text() call
+        # sites across the codebase: no `encoding=` means
+        # locale.getpreferredencoding(False), not UTF-8, on this
+        # project's own minimum Python -- genuinely locale-dependent on
+        # musl-libc containers, Windows without UTF-8 mode, or
+        # PYTHONCOERCECLOCALE=0. `save()` always writes UTF-8 (pydantic's
+        # dump_json via atomic_write_bytes), so this is the read side of
+        # the exact ReadFileTool gap fixed in agent/tools.py, just with a
+        # worse failure mode: UnicodeDecodeError is a ValueError
+        # subclass, so it's silently swallowed by the `except ValueError`
+        # handlers in cli.py/server/app.py and reported as a generic
+        # "invalid session" -- any previously-saved conversation
+        # containing non-ASCII text becomes permanently unloadable on
+        # such a deployment, even though the file on disk is perfectly
+        # valid UTF-8 JSON. Confirmed live before this fix.
+        return _MESSAGES_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
 
     def save(self, name: str, messages: list[Message]) -> None:
         # A real bug found by actually simulating an interrupted write:

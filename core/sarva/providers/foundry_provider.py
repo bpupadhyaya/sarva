@@ -212,7 +212,7 @@ def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:
     if cached is not None:
         return cached
 
-    config_data = json.loads((directory / "config.json").read_text())
+    config_data = json.loads((directory / "config.json").read_text(encoding="utf-8"))
     moe_data = config_data.pop("moe", None)
     rope_scaling_data = config_data.pop("rope_scaling", None)
     config_data["moe"] = mods.MoEConfig(**moe_data) if moe_data is not None else None
@@ -275,7 +275,7 @@ def model_info_for_bundle(name: str, path: Path) -> ModelInfo:
     even on a plain-core install where it isn't actually loadable/runnable
     yet (the CLI's `models` command already marks unavailable models with
     an empty checkbox for exactly this kind of case)."""
-    config_data = json.loads((path / "config.json").read_text())
+    config_data = json.loads((path / "config.json").read_text(encoding="utf-8"))
     return ModelInfo(
         id=f"foundry/{name}",
         provider="foundry",

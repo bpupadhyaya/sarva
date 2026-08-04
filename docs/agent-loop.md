@@ -172,6 +172,50 @@ live that the identical repro now produces
 `line1\r\nLINE2\r\nline3\r\n` — only the edited line's content
 changed, every CRLF preserved exactly.
 
+### `ReadFileTool`, the plainest of the three file tools, never got the equivalent explicit-encoding fix — a systemic gap across nine call sites, not just this one
+
+A much later fresh-eyes sweep found a sibling gap in `ReadFileTool`
+itself, this time not about newline translation but about *which*
+encoding `Path.read_text()` assumes with no `encoding=` argument: not
+UTF-8, but `locale.getpreferredencoding(False)` — genuinely
+locale-dependent on this project's own minimum Python (3.12; PEP 686's
+default-UTF-8 mode doesn't land until 3.15). On a musl-libc container
+(Alpine), on Windows without UTF-8 mode enabled, or with
+`PYTHONCOERCECLOCALE=0` — all realistic `sarva serve`/`sarva run`
+deployment targets, not adversarial ones — that's not UTF-8 at all.
+Confirmed live: a file `WriteFileTool` had just written (always UTF-8
+via `atomic_write_text`) crashed with `UnicodeDecodeError` reading it
+straight back, despite `ReadFileTool`'s own description promising
+"Read a UTF-8 text file." `WriteFileTool`/`EditFileTool` (the CRLF fix
+above) both already force UTF-8 explicitly; `ReadFileTool`, the
+plainest and first of the three, never got either fix.
+
+Widening the sweep past this one tool turned up the identical bare
+`path.read_text()` pattern at eight more call sites across the
+codebase — `SessionStore.load` (worse: `UnicodeDecodeError` is a
+`ValueError` subclass, so it's silently swallowed by the `except
+ValueError` handlers in `cli.py`/`server/app.py` and reported as a
+generic "invalid session," making any previously-saved conversation
+containing non-ASCII text permanently unloadable on such a deployment),
+`config.py`'s `load_config`, `cli.py`'s `_read_text_or_exit`,
+`memory/longterm.py` (all three read sites), `providers/registry.py`
+(`models.yaml`/`routing.yaml`), `providers/foundry_provider.py`
+(checkpoint `config.json`, both call sites), and the foundry
+tokenizer's own `config.json` load — every one of them paired with a
+write path that *already* forces UTF-8 explicitly
+(`atomic_write_text`/`atomic_write_bytes`/pydantic's `dump_json`), the
+identical write/read asymmetry, just never centralized or propagated
+past the two tools that happened to get it first. Fixed uniformly:
+every one of the nine sites now passes `encoding="utf-8"` explicitly.
+Verified live the WriteFileTool/ReadFileTool and SessionStore
+save/load round trips both survive a non-ASCII payload
+(`"café Ω 日本語"`) even under a simulated non-UTF-8 locale. Verified
+by reverting `agent/tools.py`/`memory/session.py` and watching both
+new tests fail with the literal old bug's own shape — a spy asserting
+`read_text()` is called with `encoding="utf-8"` catches the missing
+argument directly, rather than depending on the OS's actual locale to
+reproduce it. 2 new tests, 750 → 752 Python tests.
+
 ### `replace_all` was never actually validated as a boolean -- a stringified `"false"` did the exact opposite of what was asked
 
 A much later fresh-eyes sweep, applying the same lens round 86 had
