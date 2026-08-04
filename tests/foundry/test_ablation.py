@@ -42,6 +42,47 @@ def test_arm_result_computes_real_mean_and_stdev_across_seeds():
     assert abs(result.stdev_final_loss - 1.0) < 1e-9  # sample stdev of [1,2,3] is exactly 1.0
 
 
+def test_arm_result_stdev_is_nan_not_a_crash_when_a_seed_diverged():
+    # A real bug found by giving this module's own statistics their own
+    # fresh-eyes sweep: an ablation's whole job is comparing an
+    # unproven architecture idea against a baseline, and a diverging
+    # (NaN) final loss is one of the most ORDINARY real outcomes of
+    # that comparison, not a contrived input. statistics.mean
+    # propagates NaN silently (confirmed by reading its own
+    # implementation), but statistics.stdev does not: confirmed live,
+    # it raised a bare AttributeError ('float' object has no attribute
+    # 'numerator') from deep inside its own exact-fraction arithmetic
+    # instead of returning NaN, crashing any comparison touching a
+    # diverged arm with an opaque, internal-implementation-detail
+    # exception -- the same shape this module already fixed once for
+    # get()'s bare StopIteration.
+    import math
+
+    result = ArmResult(
+        name="diverged", final_losses=[float("nan"), 1.0, 2.0], loss_curves=[[]], param_count=10
+    )
+    assert math.isnan(result.stdev_final_loss)
+
+
+def test_is_difference_trustworthy_returns_false_not_a_crash_when_an_arm_diverged():
+    # The real, end-to-end proof the fix above actually closes the gap
+    # at the one method this module's docstring frames as its core API,
+    # not just that the property alone stops crashing.
+    good = ArmResult(name="baseline", final_losses=[1.0, 1.1, 0.9], loss_curves=[[]], param_count=1)
+    diverged = ArmResult(
+        name="unstable",
+        final_losses=[float("nan"), float("nan"), float("nan")],
+        loss_curves=[[]],
+        param_count=1,
+    )
+    result = AblationResult(arms=[good, diverged])
+
+    # diff > NaN is False under IEEE-754 (every comparison against NaN
+    # is) -- an honest "not established as trustworthy by this specific
+    # statistic," not a crash and not a false claim the arms are similar.
+    assert result.is_difference_trustworthy("baseline", "unstable") is False
+
+
 def test_ablation_result_ranked_orders_by_mean_final_loss_ascending():
     good = ArmResult(name="good", final_losses=[0.1], loss_curves=[[]], param_count=1)
     bad = ArmResult(name="bad", final_losses=[9.0], loss_curves=[[]], param_count=1)

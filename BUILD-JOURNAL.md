@@ -11847,3 +11847,76 @@ Round 61. Spent time first on `openai_provider.py`'s streaming tool-call accumul
 **Sixteen consecutive rounds now (46-61)** have found real bugs. This round is a useful reminder that "the response-parsing side has been swept N times" doesn't mean the request-BUILDING side has been swept at all -- every adapter translates in both directions, and this streak had, until now, only ever looked at one of them.
 
 **Next:** the completeness-audit backlog remains at three items needing external-dependency/scope decisions from the author (a code-execution sandbox tool, web search, image generation). The three infra-blocked items remain deferred (Tauri `csp: null`, RL harness sandboxing, inference batching); the quantization/`Budget` NaN-validation and explicit-partial-`Budget` gaps remain real-but-unreachable. Checked the identical "multiple ToolResultBlocks in one Message" shape against the other three real adapters before closing this round out: all confirmed clean, and clean for the same structural reason -- Anthropic, OpenAI, and Google each append one distinct wire-format entry per `ToolResultBlock` (a separate dict in a list, a separate `role="tool"` message, a separate `FunctionResponse` part, respectively), never a single shared, joined string the way Ollama's `_to_ollama_message` uniquely does. This bug shape genuinely couldn't exist in the other three adapters' current translation approach.
+
+
+## `ArmResult.stdev_final_loss` crashed with an opaque stdlib AttributeError whenever an ablation arm's training diverged -- exactly the scenario this harness exists to help researchers catch
+
+Round 62. Checked `core/sarva/providers/registry.py` (`Router.pick()`/
+model registry loading) -- routing-chain-references-unknown-model-id
+and override-bypasses-availability are both either unreachable via the
+real `build_router()` path or an intentionally documented design
+choice. Checked `foundry/sarva_foundry/data/` (corpus/dataset/
+provenance) -- dedup/filter/chunking/manifest-loading all read clean;
+no multi-source interleaving code exists yet to have a bug in. Checked
+`foundry/sarva_foundry/train/` (trainer/schedule/dpo/rl/sft) --
+checkpoint save/resume genuinely restores optimizer state, step count,
+and schedule position correctly against the project's own
+bit-identical-resume tests; no gradient-accumulation logic exists to
+have an off-by-one in; batch-construction mask/shift alignment is
+correct. The desktop app has no session-switching UI at all yet
+(single hardcoded session), so that candidate didn't apply either.
+Swept `foundry/sarva_foundry/ablation.py`'s own statistics instead --
+it had one prior fix (`AblationResult.get()`'s bare `StopIteration`),
+but never its own numerical edge cases.
+
+`ArmResult.stdev_final_loss` calls `statistics.stdev(self.final_losses)`
+whenever there's more than one seed. `statistics.mean` propagates NaN
+silently (confirmed by reading its own implementation), but
+`statistics.stdev` does not -- confirmed live, it raises a bare
+`AttributeError: 'float' object has no attribute 'numerator'` from deep
+inside its own exact-fraction internal arithmetic instead. This isn't
+a contrived input: an ablation harness's whole job is comparing an
+unproven architecture idea against a baseline, and training divergence
+(NaN final loss) is one of the most ORDINARY real outcomes of that
+comparison, especially at small scale with an aggressive setting --
+not a rare edge case. Because `is_difference_trustworthy` (the method
+this module's own docstring frames as its core "trustworthy
+comparison" API) calls `stdev_final_loss` on both arms and sums them,
+the crash reached every caller of that method too, exactly when a
+researcher most needed a usable answer, not just when everything was
+numerically well-behaved.
+
+**Confirmed live** two ways: a real end-to-end training comparison
+(baseline vs. a deliberately too-aggressive learning rate) diverged to
+`[nan, nan, nan]` and crashed `is_difference_trustworthy` with the
+literal `AttributeError`; and, isolated further, even a single diverged
+seed mixed with two healthy ones (`[nan, 1.0, 2.0]`) triggers the
+identical crash via `statistics.stdev` directly.
+
+**Fixed** by checking for NaN first and returning it directly, matching
+`mean_final_loss`'s own NaN-propagating behavior -- a diverged arm's
+`stdev_final_loss` is now an honest `NaN` instead of a crash. Because
+every comparison against NaN is `False` under IEEE-754,
+`is_difference_trustworthy` now returns a clean `False` for a diverged
+arm -- documented explicitly in the method's own docstring as an honest
+"not established as trustworthy by this specific statistic," not a
+false claim the two arms are actually similar; a caller looking at a
+visibly diverged arm already has `mean_final_loss`/`final_losses`
+themselves as the obvious signal.
+
+**Verified live** both fixes hold: no crash, `stdev_final_loss` returns
+NaN, `is_difference_trustworthy` returns `False`. **Verified by
+reverting** and watching both new tests fail with the literal old bug's
+own `AttributeError` reproducing itself. 2 new tests, 711 -> 713
+Python tests, all passing, `ruff check`/`format --check` clean.
+`docs/foundry/ablation.md` gained a new subsection directly under the
+existing `get()`/`StopIteration` fix, the module's own first bug.
+
+**Seventeen consecutive rounds now (46-62)** have found real bugs.
+
+**Next:** the completeness-audit backlog remains at three items needing
+external-dependency/scope decisions from the author (a code-execution
+sandbox tool, web search, image generation). The three infra-blocked
+items remain deferred (Tauri `csp: null`, RL harness sandboxing,
+inference batching); the quantization/`Budget` NaN-validation and
+explicit-partial-`Budget` gaps remain real-but-unreachable.

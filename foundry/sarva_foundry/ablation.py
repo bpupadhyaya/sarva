@@ -35,6 +35,7 @@ GPU pricing elsewhere.
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 
@@ -68,7 +69,27 @@ class ArmResult:
     def stdev_final_loss(self) -> float:
         # A single seed has no defined variance -- 0.0, not a crash from
         # statistics.stdev's own minimum-two-points requirement.
-        return statistics.stdev(self.final_losses) if len(self.final_losses) > 1 else 0.0
+        if len(self.final_losses) <= 1:
+            return 0.0
+        # A real bug found by actually running a comparison where one
+        # arm's training genuinely diverged -- an ordinary, not
+        # contrived, outcome for this harness's own stated purpose of
+        # testing unproven architecture ideas against a baseline, not a
+        # rare edge case. `statistics.mean` propagates NaN silently
+        # (confirmed by reading its own implementation), but
+        # `statistics.stdev` does not: confirmed live, it raises a bare,
+        # internal-implementation-detail `AttributeError` ('float'
+        # object has no attribute 'numerator') from deep inside its own
+        # exact-fraction arithmetic instead of returning NaN, the exact
+        # "confusing internal-implementation-detail" shape this module
+        # already fixed once for `AblationResult.get()`'s bare
+        # `StopIteration`. Checking for NaN first and returning it
+        # directly matches `mean_final_loss`'s own NaN-propagating
+        # behavior, so a diverged arm surfaces as an honest NaN standard
+        # deviation instead of an opaque stdlib crash.
+        if any(math.isnan(x) for x in self.final_losses):
+            return float("nan")
+        return statistics.stdev(self.final_losses)
 
 
 @dataclass(frozen=True)
@@ -98,7 +119,17 @@ class AblationResult:
     def is_difference_trustworthy(self, arm_a: str, arm_b: str) -> bool:
         """True iff the two arms' mean final losses differ by more than
         their combined standard deviation — see the module docstring for
-        exactly what this claims and, as importantly, what it doesn't."""
+        exactly what this claims and, as importantly, what it doesn't.
+
+        If either arm diverged (any seed's final loss is NaN),
+        `stdev_final_loss` is NaN too, `diff > NaN` is `False` under
+        IEEE-754 (every comparison against NaN is), so this returns
+        `False` for a diverged arm -- an honest "not established as
+        trustworthy by this specific statistic," not a false claim that
+        the two arms are actually similar. A visibly diverged arm is
+        its own obvious signal a caller should already be looking at
+        `mean_final_loss`/`final_losses` directly for, not something
+        this one boolean is meant to detect on its own."""
         a, b = self.get(arm_a), self.get(arm_b)
         diff = abs(a.mean_final_loss - b.mean_final_loss)
         combined_std = a.stdev_final_loss + b.stdev_final_loss

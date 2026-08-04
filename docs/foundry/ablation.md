@@ -64,6 +64,35 @@ that's actually available, the same "tell the caller what went wrong
 and what their real options were" discipline `FoundryProvider._resolve`'s
 own `ModelNotFoundError` already applies.
 
+**A second real bug, found by a later fresh-eyes sweep of this same
+module's own statistics:** `ArmResult.stdev_final_loss` crashed with an
+opaque `AttributeError: 'float' object has no attribute 'numerator'` —
+raised from deep inside `statistics.stdev`'s own exact-fraction
+internal arithmetic — whenever any seed's final loss was `NaN`. This
+isn't a contrived input: an ablation's whole job is comparing an
+unproven architecture idea against a baseline, and training divergence
+(NaN loss) is one of the most *ordinary* real outcomes of that
+comparison, especially at small scale with an aggressive setting.
+`statistics.mean` propagates `NaN` silently (confirmed by reading its
+own implementation); `statistics.stdev` does not — an asymmetry that
+meant `is_difference_trustworthy`, the method this module's own
+docstring frames as its core "trustworthy comparison" API, crashed
+exactly when a researcher most needed an answer, not just when
+everything was numerically well-behaved. Fixed by checking for `NaN`
+first and returning it directly, matching `mean_final_loss`'s own
+propagating behavior — a diverged arm's `stdev_final_loss` is now an
+honest `NaN` rather than a crash. Because every comparison against
+`NaN` is `False` under IEEE-754, `is_difference_trustworthy` now
+returns a clean `False` for a diverged arm — an honest "not
+established as trustworthy by this specific statistic," not a false
+claim the two arms are actually similar; a caller comparing a visibly
+diverged arm already has `mean_final_loss`/`final_losses` themselves as
+the obvious, un-missable signal. Verified live both fixes hold: no
+crash, `stdev_final_loss` returns `NaN`, `is_difference_trustworthy`
+returns `False`. Verified by reverting and watching both new tests fail
+with the literal old bug's own `AttributeError` reproducing itself. 2
+new tests, 711 → 713 Python tests.
+
 ## Two real comparisons, run end to end
 
 `examples/18_ablation_harness.py` runs both kinds of result on purpose,
