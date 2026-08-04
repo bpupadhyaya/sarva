@@ -12083,3 +12083,89 @@ fields; `sessions list`'s printed session name can never contain
 markup characters at all, since `SessionStore`'s own `_sanitize()`
 rejects any name outside `[letters, digits, -, _]` at creation time.
 No further gap found in this file.
+
+
+## `eval`/`distill` had the SAME markup-swallowing gap round 65 just fixed for `sarva models` -- a fifth AND sixth instance of the bug class
+
+Round 66. Checked `core/sarva/server/app.py` against the "unescaped
+external text" angle -- came back clean: no logging at all in the
+server module, every response goes through pydantic/FastAPI's
+`JSONResponse`/`response_model` machinery (always properly JSON-
+encoded, no Rich-markup analogue), and every raw WebSocket JSON field
+funnels into pydantic validation that raises a caught `ValidationError`.
+Checked `apps/desktop/src/` for the same angle in React -- no
+`dangerouslySetInnerHTML`/`innerHTML` anywhere, confirmed by grep
+across every `.tsx`/`.ts` file, so React's own default escaping is the
+only rendering path. Pivoted to the exact same lens round 65 itself
+used, applied to the two commands round 65's own closing note
+explicitly admitted weren't checked: `sarva eval`/`sarva distill`.
+
+Both commands echo a model id into `console.print(f"...")` with no
+`escape()` call, at four separate sites: `_require_known_model`'s own
+"unknown model" error (shared by both commands), `eval`'s
+"skip (provider not configured)" line, `eval`'s per-model accuracy
+line, and `distill`'s "provider not configured"/"Distilling N
+prompts..." lines. These model ids are the identical untrusted source
+round 65 already fixed for `sarva models`: a local foundry checkpoint's
+id comes straight from the checkpoint bundle's own DIRECTORY NAME,
+fully user-controlled, not sanitized anywhere.
+
+**Confirmed live** with this project's own `CliRunner`/fake-router test
+pattern: running `sarva eval` with no `--model` filter (the documented
+default -- grade every available model) against a foundry checkpoint
+named `chatbot-v2 [draft]` silently dropped `[draft]` from the printed
+"skip" line -- reachable through completely ordinary, default use, no
+flag opt-in required. Confirmed at all four sites: the "unknown model"
+error (both for `eval --model` and `distill --model`), the "skip"
+line, the accuracy line, and the "provider not configured"/"Distilling
+N prompts" lines in `distill`.
+
+**Fixed** by escaping all four sites, matching the identical pattern
+`sarva models` just established one round earlier. While verifying
+this fix's own completeness (grepping every remaining `console.print(f`
+call site in `cli.py` to check for a further unaudited instance),
+found a SIXTH, differently-sourced instance in the same command:
+`distill`'s `DistillationError` handler (`console.print(f"[red]{e}
+[/red]")`) embeds the underlying `ProviderError`'s own text verbatim
+(`sarva.distill.distill`'s own f-string) -- genuinely external text
+(whatever a real provider SDK/API actually said) this project doesn't
+control the shape of, not a checkpoint directory name this time.
+**Confirmed live** the identical way: a provider error containing
+`[bold red]...[/bold red]` was silently swallowed with no `escape()`
+call. Fixed the same way.
+
+**Verified live** all six sites now render their bracket-laden text
+literally. **Verified by reverting** and watching all four new tests
+fail with the exact swallowed values reproducing themselves --
+`"not-a-real-model [draft]"` missing its bracket, `"foundry/chatbot-v2
+[draft]"` missing its bracket in the "skip" line, `"[bold red]
+INJECTED[/bold red]"` missing both tags in the distill-error case. 4
+new tests, 716 -> 720 Python tests, all passing, `ruff check`/`format
+--check` clean. `docs/packaging.md` gained a follow-up paragraph
+directly under round 65's own `sarva models` fix.
+
+**Twenty-one consecutive rounds now (46-66)** have found real bugs.
+This is the SECOND round in a row to find another instance of the
+identical bug class -- round 65 was the fourth instance, this round
+found the fifth AND sixth by not stopping at the first fix and instead
+re-grepping for a next one immediately after. Worth stating even more
+explicitly now: a bug class found once is worth a deliberate,
+exhaustive sweep of every call site sharing its shape, not just the
+first site that happened to be checked, and not stopping after finding
+just one more instance either.
+
+**Next:** grepped every remaining `console.print(f` call site across
+the whole of `cli.py` one more time after fixing all six -- `config
+show`/`config set`/`config unset` print CLI-flag-derived and env-var
+NAMES (a small, fixed, developer-controlled set, e.g.
+`ANTHROPIC_API_KEY`), never externally-influenced values;
+`speak`/`transcribe` print byte counts and fixed paths; every
+remaining site is now either a static string, an escaped value, or
+genuinely internal/fixed data. This bug class is now believed
+exhausted across `cli.py`. The completeness-audit backlog remains at
+three items needing external-dependency/scope decisions from the
+author (a code-execution sandbox tool, web search, image generation).
+The three infra-blocked items remain deferred (Tauri `csp: null`, RL
+harness sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable.

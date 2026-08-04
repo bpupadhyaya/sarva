@@ -639,8 +639,17 @@ def _require_known_model(router: Any, model_id: str) -> Any:
     try:
         return router.registry.get(model_id)
     except KeyError:
+        # escape(): a local foundry checkpoint's model id comes straight
+        # from the checkpoint bundle's own directory name -- fully
+        # user-controlled, not this project's own validated data. Same
+        # fix as `sarva models` (round 65): confirmed live, a real
+        # checkpoint directory named "chatbot-v2 [draft]" (an ordinary,
+        # non-adversarial naming choice) had "[draft]" silently
+        # swallowed here too, since Rich interpreted it as an unknown
+        # style tag.
         console.print(
-            f"[red]unknown model {model_id!r} -- see 'sarva models' for the full list[/red]"
+            f"[red]unknown model {escape(repr(model_id))} -- "
+            "see 'sarva models' for the full list[/red]"
         )
         raise typer.Exit(1) from None
 
@@ -669,14 +678,21 @@ async def _eval(model_filter: str | None) -> None:
     for model_id in model_ids:
         info = router.registry.get(model_id)
         provider = providers.get(info.provider)
+        # escape(): model_id/info.provider can both trace back to a
+        # local foundry checkpoint's own directory name -- see
+        # _require_known_model's own comment above for the confirmed
+        # live repro this mirrors.
         if provider is None:
             console.print(
-                f"[yellow]skip[/yellow]  {model_id} (provider {info.provider!r} not configured)"
+                f"[yellow]skip[/yellow]  {escape(model_id)} "
+                f"(provider {escape(repr(info.provider))} not configured)"
             )
             continue
         report = await run_benchmark(ARITHMETIC, provider, model=model_id)
         correct = sum(r.correct for r in report.results)
-        console.print(f"{model_id:25s} {report.accuracy:.0%}  ({correct}/{len(report.results)})")
+        console.print(
+            f"{escape(model_id):25s} {report.accuracy:.0%}  ({correct}/{len(report.results)})"
+        )
 
 
 @app.command("distill")
@@ -700,15 +716,20 @@ async def _distill(prompts_file: Path, model: str, out: Path, system: str | None
     providers = _build_providers()
     info = _require_known_model(router, model)
     provider = providers.get(info.provider)
+    # escape(): model/info.provider can both trace back to a local
+    # foundry checkpoint's own directory name -- see
+    # _require_known_model's own comment above for the confirmed live
+    # repro this mirrors.
     if provider is None:
         console.print(
-            f"[red]provider {info.provider!r} for model {model!r} is not configured[/red]"
+            f"[red]provider {escape(repr(info.provider))} for model "
+            f"{escape(repr(model))} is not configured[/red]"
         )
         raise typer.Exit(1)
 
     prompts_text = _read_text_or_exit(prompts_file, "prompts file")
     prompts = [line.strip() for line in prompts_text.splitlines() if line.strip()]
-    console.print(f"Distilling {len(prompts)} prompts from {model}...")
+    console.print(f"Distilling {len(prompts)} prompts from {escape(model)}...")
     try:
         records = await distill(prompts, provider, model=model, system=system)
     except DistillationError as e:
@@ -721,7 +742,18 @@ async def _distill(prompts_file: Path, model: str, out: Path, system: str | None
         # side. distill() now raises DistillationError carrying every
         # completion it managed before the failure, so those aren't lost
         # just because a later prompt in the same batch failed.
-        console.print(f"[red]{e}[/red]")
+        #
+        # escape(): DistillationError's own message embeds the
+        # underlying ProviderError's text verbatim
+        # (`sarva.distill.distill`'s own f-string), which traces back to
+        # whatever a real provider SDK/API actually said -- genuinely
+        # external text this project doesn't control the shape of.
+        # Confirmed live: a provider error containing "[bold red]..."
+        # was silently swallowed here with no escape() call, the same
+        # bug class as the model-id sites above, just from a different
+        # untrusted source (a real API error message, not a checkpoint
+        # directory name).
+        console.print(f"[red]{escape(str(e))}[/red]")
         if e.partial_records:
             try:
                 save_jsonl(e.partial_records, out)

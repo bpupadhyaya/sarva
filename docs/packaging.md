@@ -231,6 +231,31 @@ name now renders literally. Verified by reverting and watching the new
 test fail with the exact swallowed value reproducing itself. 1 new
 test, 715 → 716 Python tests.
 
+**A fifth and sixth instance, found one round later by giving
+`eval`/`distill` the identical sweep `sarva models` just got:** four
+call sites echoed a model id back with no `escape()` call —
+`_require_known_model`'s own "unknown model" error (shared by both
+commands), `eval`'s "skip (provider not configured)" line, `eval`'s
+per-model accuracy line, and `distill`'s "provider not configured"/
+"Distilling N prompts from..." lines — the same untrusted foundry-
+checkpoint-directory-name source as the `sarva models` fix directly
+above. Confirmed live: running `sarva eval` with no `--model` filter
+(the documented default: grade every available model) against a
+foundry checkpoint named `chatbot-v2 [draft]` silently dropped
+`[draft]` from the printed "skip" line — reachable through completely
+ordinary, default use, not a flag a user has to opt into. A further
+check while verifying this fix's own completeness found a sixth,
+differently-sourced instance in the same command: `distill`'s
+`DistillationError` handler embeds the underlying `ProviderError`'s
+own text verbatim — genuinely external text (whatever a real provider
+SDK/API actually said) this project doesn't control the shape of, not
+a checkpoint name this time. Confirmed live the identical way: a
+provider error containing `[bold red]...[/bold red]` was silently
+swallowed. Fixed by escaping all six sites. Verified live each one now
+renders its bracket-laden text literally. Verified by reverting and
+watching all four new tests fail with the exact swallowed values
+reproducing themselves. 4 new tests, 716 → 720 Python tests.
+
 ## The server: `sarva.server.app`
 
 Two different endpoints for two different needs, and the module's own

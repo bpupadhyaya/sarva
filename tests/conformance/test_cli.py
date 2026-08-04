@@ -767,6 +767,41 @@ def test_distill_saves_already_generated_records_when_a_later_prompt_fails(monke
     assert json.loads(lines[0])["prompt"] == "p1"
 
 
+def test_distill_error_message_escapes_markup_from_the_underlying_provider_error(
+    monkeypatch, tmp_path
+):
+    # A sixth real instance of the same bug class as the model-id sites
+    # above, from a different untrusted source: DistillationError's own
+    # message embeds the underlying ProviderError's text verbatim
+    # (sarva.distill.distill's own f-string), which traces back to
+    # whatever a real provider SDK/API actually said -- genuinely
+    # external text this project doesn't control the shape of, not
+    # sanitized anywhere before this. Confirmed live before the fix: a
+    # provider error containing "[bold red]..." was silently swallowed
+    # here with no escape() call.
+    import sarva.distill as distill_module
+
+    _clear_provider_env(monkeypatch)
+    prompts_file = tmp_path / "prompts.txt"
+    prompts_file.write_text("p1\n")
+    out_file = tmp_path / "out.jsonl"
+
+    async def fake_distill(prompts, provider, model, system=None):
+        raise distill_module.DistillationError(
+            "generation failed after 0/1 prompts: [bold red]INJECTED[/bold red] provider said so",
+            partial_records=[],
+        )
+
+    monkeypatch.setattr(distill_module, "distill", fake_distill)
+
+    result = runner.invoke(
+        app, ["distill", str(prompts_file), "--model", "mock", "--out", str(out_file)]
+    )
+
+    assert result.exit_code == 1
+    assert "[bold red]INJECTED[/bold red]" in result.stdout
+
+
 def test_distill_fails_cleanly_for_a_provider_that_is_not_configured(monkeypatch, tmp_path):
     _clear_provider_env(monkeypatch)
     prompts_file = tmp_path / "prompts.txt"
@@ -802,6 +837,83 @@ def test_eval_with_an_unknown_model_fails_cleanly_instead_of_a_raw_traceback(mon
     assert result.exit_code != 0
     assert "unknown model 'not-a-real-model'" in result.stdout
     assert "KeyError" not in result.stdout
+
+
+def test_eval_with_an_unknown_model_containing_markup_is_escaped_not_swallowed(monkeypatch):
+    # A real bug found by giving `eval`/`distill` the same fresh-eyes
+    # sweep round 65 gave `sarva models`: a local foundry checkpoint's
+    # model id comes straight from the checkpoint bundle's own
+    # DIRECTORY NAME -- fully user-controlled, not this project's own
+    # validated data (an ordinary, non-adversarial naming habit like
+    # "chatbot-v2 [draft]" or "[final]", not a contrived attack).
+    # `_require_known_model`'s own error message had no escape() call,
+    # so a bracket in an (unknown, here) model id was silently
+    # swallowed by Rich instead of shown to the user verbatim -- round
+    # 65's own closing note admitted `eval`/`distill` hadn't been
+    # checked against this exact bug class yet.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["eval", "--model", "not-a-real-model [draft]"])
+
+    assert result.exit_code != 0
+    assert "not-a-real-model [draft]" in result.stdout
+
+
+def test_distill_with_an_unknown_model_containing_markup_is_escaped_not_swallowed(
+    monkeypatch, tmp_path
+):
+    _clear_provider_env(monkeypatch)
+    prompts_file = tmp_path / "prompts.txt"
+    prompts_file.write_text("hi\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "distill",
+            str(prompts_file),
+            "--model",
+            "not-a-real-model [draft]",
+            "--out",
+            str(tmp_path / "out.jsonl"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "not-a-real-model [draft]" in result.stdout
+
+
+def test_eval_skip_and_provider_not_configured_messages_escape_markup_in_a_model_id(
+    monkeypatch,
+):
+    # The other two real call sites for the identical gap: eval's
+    # "skip" line (a known model id whose provider isn't configured)
+    # and its accuracy-report line both echoed the model id back
+    # unescaped too.
+    _clear_provider_env(monkeypatch)
+
+    class _FakeModel:
+        id = "foundry/chatbot-v2 [draft]"
+        provider = "foundry"
+
+    class _FakeRegistry:
+        def get(self, model_id):
+            return _FakeModel()
+
+    class _FakeRouter:
+        registry = _FakeRegistry()
+        available = {"foundry/chatbot-v2 [draft]"}
+
+    class _FakeProviders:
+        def get(self, name):
+            return None  # "not configured"
+
+    monkeypatch.setattr(cli_module, "_build_router", lambda: _FakeRouter())
+    monkeypatch.setattr(cli_module, "_build_providers", lambda: _FakeProviders())
+
+    result = runner.invoke(app, ["eval"])
+
+    assert result.exit_code == 0, result.output
+    assert "foundry/chatbot-v2 [draft]" in result.stdout
 
 
 def test_distill_with_an_unknown_model_fails_cleanly_instead_of_a_raw_traceback(
