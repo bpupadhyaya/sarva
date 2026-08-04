@@ -981,6 +981,23 @@ def transcribe(
         # crashed with a raw traceback on the identical failures instead.
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
+    except ValueError as e:
+        # A real bug found by a fresh-eyes sweep: `--model-size` is a
+        # free-text string option with no validation at all (a plausible
+        # real mistake -- a typo like "large-v4", misremembering
+        # "xlarge", a stale copy-pasted model name) -- faster_whisper's
+        # own WhisperModel(model_size, ...) raises a plain ValueError for
+        # anything that isn't a recognized size shorthand or an HF repo
+        # id, confirmed live with a real WAV file and a bad size string.
+        # AudioToTextDegrader never hits this (it always calls
+        # transcribe() with the function's own default model_size, never
+        # a caller-supplied one), so this was reachable only here -- the
+        # one place a real person runs `sarva transcribe` directly with a
+        # size they typed themselves -- and crashed with a raw traceback
+        # instead of the same clean message every other failure mode
+        # from this same call already gets.
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     # The transcript is externally-derived text (real speech, not this
     # project's own strings) -- never markup-parsed, same discipline
     # chat/run already apply to model output.

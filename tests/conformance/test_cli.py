@@ -1376,6 +1376,36 @@ def test_transcribe_fails_cleanly_on_a_runtime_error_not_a_traceback(tmp_path, m
     assert "Traceback" not in result.stdout
 
 
+def test_transcribe_fails_cleanly_on_an_invalid_model_size_not_a_traceback(tmp_path, monkeypatch):
+    # A real bug found by a fresh-eyes sweep: `--model-size` is a
+    # free-text string option with no validation at all -- a plausible
+    # real mistake (a typo like "large-v4", misremembering "xlarge", a
+    # stale copy-pasted model name). faster_whisper's own
+    # WhisperModel(model_size, ...) raises a plain ValueError for
+    # anything that isn't a recognized size shorthand or HF repo id,
+    # confirmed live with a real WAV file and a bad size string -- this
+    # command caught ImportError and RuntimeError from the identical
+    # call but never ValueError, so a bad --model-size crashed with a
+    # raw traceback instead of the same clean message every other
+    # failure mode already gets.
+    import sarva.audio as audio_module
+
+    def _raise(*args, **kwargs):
+        raise ValueError(
+            "Invalid model size 'not-a-real-size', expected one of: tiny, base, small, ..."
+        )
+
+    monkeypatch.setattr(audio_module, "transcribe", _raise)
+    audio_path = tmp_path / "clip.wav"
+    audio_path.write_bytes(b"irrelevant, never actually decoded")
+
+    result = runner.invoke(app, ["transcribe", str(audio_path), "--model-size", "not-a-real-size"])
+
+    assert result.exit_code == 1
+    assert "Invalid model size" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_transcribe_with_a_nonexistent_audio_file_fails_cleanly_not_a_traceback(tmp_path):
     # A real bug found by actually running `sarva transcribe
     # /nonexistent/audio.wav`: Path.read_bytes() raised a raw

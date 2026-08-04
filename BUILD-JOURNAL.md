@@ -13132,3 +13132,94 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A third exception type from the same call, missed by the same already-partially-fixed command: `sarva transcribe --model-size <typo>` crashed with a raw traceback
+
+Round 76. Delegated a fresh-eyes sweep to a subagent, steered away
+from the tokenizer (round 70), provider registry/routing/degradation
+(round 71), `runtime.py`/server event-loop blocking (round 72),
+`foundry_provider.py`/`generate.py` (round 73), `openai_provider.py`
+(round 74), and `agent/tools.py` memory tools (round 75). After
+extensive fuzzing/review across `memory/vector.py`, `session.py`,
+`agent/subagents.py`, the multimodal degraders, `mcp_client.py`,
+`config.py`, `ollama_provider.py`, several `foundry/` training files,
+and the desktop app's TS/Rust turned up nothing new (every candidate
+already had this exact bug class fixed, evidenced by extensive
+in-code documentation of prior rounds' work), targeted reasoning --
+tracing every exception type a call chain can raise against exactly
+what the calling code catches -- found a real, live gap in
+`core/sarva/cli.py`'s `transcribe` command.
+
+**The bug:** `--model-size` is a free-text `str` CLI option with no
+validation, no enum constraint (default `"tiny"`), passed straight
+through to `sarva.audio.transcribe()` -> `_whisper_model(model_size)`
+-> `WhisperModel(model_size, ...)`. `faster_whisper`'s own
+`download_model()` raises a plain `ValueError` for any string that
+isn't a recognized whisper-size shorthand and doesn't look like a HF
+repo id. The `transcribe` command's `try/except` caught `ImportError`
+and `RuntimeError` -- both real, previously-fixed gaps from this exact
+same underlying call -- but never `ValueError`, so a mistyped model
+size (`large-v4`, "xlarge," a stale copy-pasted name -- all completely
+plausible real mistakes, not contrived attacks) propagated all the way
+out as a raw, unhandled Python traceback instead of the same clean
+`[red]...[/red]` message every other failure mode from this command
+already gets.
+
+**Confirmed live**: a real, valid 1-second silent WAV plus
+`model_size="not-a-real-size"` raised `ValueError: Invalid model size
+'not-a-real-size', expected one of: tiny.en, tiny, base.en, ...`
+straight out of `sarva.audio.transcribe()`, uncaught anywhere in the
+CLI command. Confirmed `AudioToTextDegrader` never hits this at all --
+it always calls `transcribe()` with the function's own default
+`model_size`, never threading a caller-supplied one through -- so the
+gap was reachable *only* via `sarva transcribe`'s own `--model-size`
+flag, the one real user-facing surface for this parameter.
+
+**Why this particular gap is a striking shape for a round to find:**
+it isn't just "an exception type nobody thought to catch" in the
+abstract -- it's the *third* exception type from the exact same
+underlying call (`WhisperModel(model_size, ...)` inside
+`_whisper_model`), in a command whose own `except` clause had already
+been widened once before, specifically for this same call, to add
+`RuntimeError` handling. That earlier fix's own comment even names the
+pattern explicitly ("a real, adjacent gap found while adding the
+duration-cap fix... this CLI command... crashed with a raw traceback
+on the identical failures instead") -- the fix generalized to "every
+`RuntimeError` this function can raise," but a `ValueError` from a
+different failure mode of the identical constructor call wasn't a
+`RuntimeError` and so wasn't swept up by that generalization.
+
+**Fixed** by adding one more `except ValueError as e:` clause,
+matching the existing `ImportError`/`RuntimeError` handlers exactly.
+
+**Verified by reverting** `cli.py` alone and watching the new test
+fail with the exact old bug's own shape: `result.stdout` came back
+empty (Typer's `CliRunner` captured the raised, unprinted exception)
+instead of the clean error message.
+
+**1 new test, 730 -> 731 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+paragraph directly after the `RuntimeError` fix it follows up on,
+naming the "third exception type from the identical call, missed by
+the same command" shape explicitly.
+
+**Thirty of the last thirty-one rounds (46-67, 70-76) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** A sixth
+consecutive round (after 71-75) where the actual defect sat directly
+adjacent to a prior round's own fix -- this one perhaps the cleanest
+example yet of the general pattern this run of rounds keeps
+surfacing: a fix that correctly generalizes across every instance of
+ONE failure mode (every `RuntimeError` a function can raise) can still
+leave a completely different failure mode (a `ValueError` from the
+same call) sitting right next to it, uncovered, because the
+generalization was scoped to the exception type actually seen at fix
+time, not to "every way this call can fail."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

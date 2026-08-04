@@ -879,6 +879,25 @@ the fix made the same test spend over a minute genuinely transcribing
 the whole file rather than rejecting it early, confirming the check
 fires for the real reason, not a contrived one.
 
+**A third exception type from the identical call, missed by the same
+command, found by a much later fresh-eyes sweep.** `--model-size` is a
+free-text string option with no validation at all — a plausible real
+mistake (a typo like `large-v4`, misremembering "xlarge", a stale
+copy-pasted model name), not a contrived attack. `WhisperModel
+(model_size, ...)` (inside `_whisper_model`) raises a plain
+`ValueError` for anything that isn't a recognized size shorthand or a
+Hugging Face repo id, confirmed live with a real WAV file and a bad
+size string. `AudioToTextDegrader` never hits this at all — it always
+calls `transcribe()` with the function's own default `model_size`,
+never a caller-supplied one — so this was reachable only through
+`sarva transcribe` itself, the one command whose `except` clause the
+`RuntimeError` fix right above had already widened once for this exact
+same underlying call, and still didn't cover every exception type it
+can raise. Fixed with one more `except ValueError` clause alongside the
+existing two, same clean-message treatment. Verified by reverting and
+watching the new test fail exactly as the original bug would have —
+empty output where the clean error message belongs.
+
 **`synthesize()` itself could crash with a raw subprocess error, found
 by actually running it against the real `espeak-ng` binary with a bad
 `--voice`.** `espeak-ng` genuinely exits 1 for an unrecognized voice
