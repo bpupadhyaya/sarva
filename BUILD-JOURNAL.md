@@ -13752,3 +13752,104 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The lazy-construction fix that RememberTool/RecallMemoryTool got the very round after NoteTool's own flock fix never made its way back to NoteTool -- the tool that originally inspired the whole chapter
+
+Round 83. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across rounds 70-82, and explicitly
+alerted to the "fix shipped in one sibling, never propagated to
+another" pattern the last three rounds kept surfacing. It found
+exactly that shape again, in `core/sarva/agent/tools.py`'s
+`NoteTool.run()`.
+
+**The bug:** `NoteTool.run()` wrote `path = await asyncio.to_thread
+(self._get_store().write, args["topic"], args["content"])` --
+`self._get_store()` is a plain Python expression, evaluated eagerly on
+the event loop *before* `asyncio.to_thread` ever gets control; only
+the subsequent `.write` call is actually dispatched to a thread. On a
+process's first `note` call, `_get_store()`'s own lazy construction
+(`LongTermMemoryStore(...)`) does real, blocking filesystem I/O
+(`Path.mkdir(parents=True, exist_ok=True)` + `os.chmod`).
+
+**Why this is the exact same mistake already found and fixed once in
+this same file, for a sibling tool:** `RememberTool`/`RecallMemoryTool`
+had the identical gap -- their own `_get_store()`'s lazy construction
+(a `VectorMemoryStore(...)` call doing `CREATE TABLE IF NOT EXISTS` +
+`commit()`) was just as capable of blocking as the store method call
+itself, and that fix (folding lazy construction and the method call
+together into one `asyncio.to_thread` dispatch, via `_add`/`_search`
+helpers) shipped in the round *immediately after* `NoteTool`'s own
+flock-contention fix -- explicitly modeled on `NoteTool`'s fix, per
+that round's own docstring comments. It just never got applied
+backward to `NoteTool` itself, the tool whose original bug inspired
+the whole fix pattern in the first place.
+
+**Confirmed live**, using the exact heartbeat methodology this
+codebase already established for this bug class: a deliberately
+slowed `LongTermMemoryStore.__init__` (simulating a contended or
+network-mounted filesystem -- this project's own `sarva.config`
+docstring names "shared dev servers, lab machines, CI runners with
+persistent home directories" as a real scenario) froze the event loop
+for the whole ~1s construction, 1 of ~20 expected heartbeat ticks
+landing.
+
+**Why the existing test for this tool never caught it:** the pre-
+existing contended-lock regression test constructs `NoteTool(store=
+store)` with a *pre-built* store, deliberately bypassing
+`_get_store()`'s lazy-construction path entirely so the test could
+isolate `write()`'s own lock contention -- exactly the isolation that
+made this gap invisible to it. `RememberTool`'s own contended-lock
+test, by contrast, explicitly constructs its tool with no store
+argument specifically to exercise the lazy path -- the asymmetry
+between the two tests' setup is itself a small, honest artifact of
+which bug each was originally written to catch.
+
+**Fixed identically to `RememberTool`'s own shape**: a `_write` helper
+wraps both the lazy `_get_store()` construction and the `write()` call
+together, dispatched as one unit through `asyncio.to_thread`.
+
+**Real call path:** `note` is a real `BUILTIN_TOOLS` entry, wired into
+every real agent run via the CLI and the server's `/ws/chat` handler.
+Since `BUILTIN_TOOLS` instances are process-lifetime singletons, any
+real model call to `note` -- specifically the *first* one in a `sarva
+serve`/`sarva run` process's lifetime -- would have frozen the entire
+event loop for as long as `~/.sarva/memory`'s directory creation took,
+blocking every other concurrent `/chat`/`/ws/chat` turn in that
+process.
+
+**Verified live** after the fix: the identical slowed-construction
+repro now lands 20 of 20 expected heartbeat ticks, event loop fully
+responsive throughout.
+
+**Verified by reverting** `tools.py` alone and watching the new test
+fail with the literal old bug's own near-zero number reproducing
+itself (`1` tick instead of the required minimum of `10`).
+
+**1 new test, 738 -> 739 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new
+subsection directly after the `RememberTool`/`RecallMemoryTool`
+lazy-construction fix chapter, explicitly naming that the fix
+originated as a response to `NoteTool`'s own bug and yet never made
+its way back to it.
+
+**Thirty-seven of the last thirty-eight rounds (46-67, 70-83) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** A fourth consecutive round (after 80, 81, 82) finding a
+fix that shipped in one sibling function never propagating to
+another -- specifically flagged as a pattern to watch for in this
+round's own sweep instructions, and it found another instance
+immediately. Worth treating this less as a surprising coincidence and
+more as a structural property of this codebase's own documentation
+style: writing "mirrors X" or "the same mistake Y already fixed" into
+a docstring records the intent to stay in sync, but doesn't enforce
+it -- only a fresh, deliberate re-check of each named sibling does
+that.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

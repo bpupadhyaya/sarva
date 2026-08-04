@@ -651,6 +651,9 @@ class NoteTool:
             self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
         return self._store
 
+    def _write(self, topic: str, content: str) -> Path:
+        return self._get_store().write(topic, content)
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
         # A real bug found by actually racing a genuine second OS process
         # holding the per-topic flock (see LongTermMemoryStore.write's own
@@ -671,8 +674,30 @@ class NoteTool:
         # still blocked the event loop the same way via its own
         # synchronous file I/O -- see its own comment; "no lock
         # contention" turned out not to mean "no blocking I/O."
+        #
+        # A second, independent instance of the identical mistake, found
+        # by a much later fresh-eyes sweep comparing this tool against
+        # `RememberTool`'s own `_add` helper: `self._get_store()` used to
+        # be called directly as an argument expression here, evaluated
+        # eagerly on the event loop *before* `asyncio.to_thread` ever got
+        # control -- only the subsequent `.write` call was actually
+        # dispatched to a thread. On a process's first `note` call,
+        # `_get_store()`'s own lazy construction does real, blocking
+        # filesystem I/O (`Path.mkdir` + `os.chmod`), which can be slow on
+        # a contended or network-mounted filesystem (this project's own
+        # `sarva.config` docstring names "shared dev servers, lab
+        # machines, CI runners with persistent home directories" as a
+        # real, not hypothetical, scenario). Confirmed live: a
+        # deliberately slowed `LongTermMemoryStore.__init__` (simulating
+        # exactly that) froze the event loop for the whole construction,
+        # near-zero heartbeat ticks during a 1s call. `RememberTool`'s own
+        # `_add`/`RecallMemoryTool`'s own `_search` helpers already wrap
+        # BOTH the lazy `_get_store()` construction and the store call
+        # together for exactly this reason -- that fix never propagated
+        # to this sibling tool. Fixed identically: `_write` wraps both,
+        # dispatched together through `asyncio.to_thread`.
         try:
-            path = await asyncio.to_thread(self._get_store().write, args["topic"], args["content"])
+            path = await asyncio.to_thread(self._write, args["topic"], args["content"])
         except LongTermMemoryError as e:
             return ToolResultBlock(tool_call_id="", content=[TextBlock(text=str(e))], is_error=True)
         return ToolResultBlock(

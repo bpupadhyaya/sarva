@@ -584,6 +584,41 @@ reverting and watching the new test fail with the literal old bug's
 own number — `0` ticks — reproducing itself. 1 new test, 698 -> 699
 total.
 
+### The lazy-construction fix caught above, for `remember`/`recall_memory`, never made its way back to `note` — the tool that originally inspired this whole chapter
+
+A much later fresh-eyes sweep, comparing `NoteTool` against its own
+sibling `RememberTool`, found the gap directly: the "second, genuinely
+separate bug" fixed above — folding a tool's lazy `_get_store()`
+construction together with its store call into one `asyncio.to_thread`
+dispatch, since the construction itself does real blocking I/O — was
+discovered and fixed for `RememberTool`/`RecallMemoryTool` in the very
+round *after* `NoteTool`'s own flock-contention fix shipped, but never
+propagated backward into `NoteTool` itself, even though it's the tool
+whose original fix this whole chapter is built around.
+`NoteTool.run()` still called `self._get_store()` as a plain argument
+expression, evaluated eagerly on the event loop *before*
+`asyncio.to_thread` ever got control — only the subsequent `.write`
+call was actually dispatched to a thread. `LongTermMemoryStore.
+__init__` does real, blocking filesystem I/O (`Path.mkdir` + `os.
+chmod`), which can be slow on a contended or network-mounted
+filesystem — this project's own `sarva.config` docstring names "shared
+dev servers, lab machines, CI runners with persistent home
+directories" as a real, not hypothetical, scenario. Confirmed live: a
+deliberately slowed `LongTermMemoryStore.__init__` (simulating exactly
+that) froze the event loop for the whole ~1s construction — a
+heartbeat coroutine that should tick roughly every 0.05s recorded
+essentially zero ticks. The existing contended-lock test for this tool
+passes a pre-built `store=store`, bypassing `_get_store()`'s lazy
+construction entirely and only exercising `write()`'s own lock
+contention — exactly why this gap slipped past it undetected the whole
+time. Fixed identically to `RememberTool`'s own shape: a `_write`
+helper wraps both the lazy construction and the `write()` call
+together, dispatched as one unit through `asyncio.to_thread`. Verified
+live the fix brings the heartbeat count back up to 20 of 20 expected
+ticks across the same slowed-construction window. Verified by
+reverting and watching the new test fail with the literal old bug's
+own near-zero number reproducing itself. 1 new test, 738 -> 739 total.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools
