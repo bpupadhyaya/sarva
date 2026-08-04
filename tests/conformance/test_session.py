@@ -142,6 +142,22 @@ def test_session_name_with_invalid_characters_is_rejected(store):
         store.save("my session!", [])
 
 
+def test_session_name_past_the_filesystem_length_limit_is_rejected(store):
+    # A real bug found by a fresh-eyes sweep: _sanitize()'s character
+    # check said nothing about length, so a session name past the
+    # filesystem's max filename length reached os.open() (in `locked`'s
+    # `_acquire`) and raised a raw OSError (ENAMETOOLONG) -- a
+    # completely different exception type than the ValueError every real
+    # call site (cli.py, server/app.py) catches specifically because
+    # that's the only exception type _sanitize() was ever documented to
+    # raise. Confirmed live before this fix: POST /chat with a
+    # 300-character session name crashed with a raw 500. `save()` here
+    # (not `locked()`) proves the fix at the same layer every OTHER
+    # invalid-name test in this file already uses.
+    with pytest.raises(ValueError, match="session name too long"):
+        store.save("a" * 300, [])
+
+
 async def test_locked_is_a_noop_for_a_session_less_turn(store):
     # A session-less turn has nothing to protect -- locking on a shared
     # "no session" key would needlessly serialize every anonymous

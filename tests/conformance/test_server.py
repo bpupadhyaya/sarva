@@ -392,6 +392,31 @@ def test_chat_with_an_invalid_session_name_fails_cleanly_not_a_500(monkeypatch):
     assert "invalid session name" in body["detail"]
 
 
+def test_chat_with_an_overly_long_session_name_fails_cleanly_not_a_500(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: SessionStore._sanitize()
+    # validated a session name's characters but never its length, so a
+    # name past the filesystem's max filename length reached os.open()
+    # (inside store.locked()'s _acquire) and raised a raw OSError
+    # (ENAMETOOLONG) -- a completely different exception type than the
+    # ValueError this endpoint's except clause catches, since that's the
+    # only exception type _sanitize() was ever documented to raise.
+    # Confirmed live before the fix: this exact request crashed with a
+    # raw 500 (`OSError: [Errno 63] File name too long`), not the clean
+    # ChatResponse(state=failed) shape every other invalid-session-name
+    # case already gets. ChatRequest.session has no length constraint,
+    # so this is reachable through the server's real public REST
+    # surface -- a buggy session-id generator or a very long user-typed
+    # name, no adversarial intent needed.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post("/chat", json={"message": "hi", "session": "a" * 300})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert "session name too long" in body["detail"]
+
+
 def test_chat_with_malformed_image_base64_fails_cleanly_not_a_500(monkeypatch):
     # A real bug found by actually POSTing {"image_base64": "not valid
     # base64!!!", ...}: base64.b64decode() raises binascii.Error (a

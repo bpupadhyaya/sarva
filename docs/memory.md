@@ -65,6 +65,36 @@ produces, so `/ws/chat` clients (including the desktop app, via the
 `state_changed`-detail fix from a few milestones back) show it with no
 client-side changes needed.
 
+**`_sanitize()`'s character check said nothing about length — a much
+later fresh-eyes sweep found the identical "raw OS error instead of a
+clean validation error" shape the long-term-memory topic-name fix
+below closes for a completely different tier.** A session name past
+the filesystem's max filename length reached `os.open()` (inside
+`locked()`'s `_acquire`) and raised a raw `OSError` (`ENAMETOOLONG`)
+— a completely different exception type than the `ValueError` every
+real call site above catches, since that was the only exception type
+`_sanitize()` was ever documented to raise. Confirmed live: `POST
+/chat` with a 300-character session name crashed with a raw 500
+(`OSError: [Errno 63] File name too long`); `/ws/chat`'s equivalent
+crash was worse — the ASGI call died with no frame sent at all, not
+even the clean failure pair this handler sends for every other
+validation error covered above. `ChatRequest.session` has no length
+constraint and the WS frame is raw schema-less JSON, so this is
+reachable through the server's real public REST/WS surface — a buggy
+session-id generator, a proxy that mangles a session parameter, or
+simply a long user-typed name, no adversarial intent needed. Fixed at
+the source, in `_sanitize()` itself, with a 200-character limit
+(comfortably under every common filesystem's ~255-byte filename limit
+even after the `.lock`/`.json` suffix, and an exact byte bound since
+`_VALID_NAME`'s charset is single-byte ASCII) — every existing `except
+ValueError` already in place at the call sites above gets this for
+free, rather than patching each one individually. Verified live after
+the fix: the same request now returns a clean `state=failed` with
+`"session name too long (300 chars, max 200): ..."`. Verified by
+reverting and watching the new tests fail with the literal old bug's
+own exception reproducing itself: `OSError: [Errno 63] File name too
+long`. 2 new tests, 733 → 735 Python tests.
+
 **`save()` itself used to be able to destroy a previously-good session
 on an interrupted write — a real bug found by actually simulating one,
 not a theoretical concern.** The permissions fix above wrote the new

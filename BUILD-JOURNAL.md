@@ -13317,3 +13317,97 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `_sanitize()` validated a session name's characters but never its length — the identical "raw OS error instead of a clean validation error" shape already fixed once for long-term-memory topic names, unfixed here
+
+Round 78. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across rounds 70-77 (tokenizer,
+registry/routing/degradation, `runtime.py`/server event-loop
+blocking, `foundry_provider.py`/`generate.py`, `openai_provider.py`,
+`agent/tools.py` memory tools, `cli.py`'s `transcribe`, and
+`runtime.py`'s Ollama probe a second time). It found a real one in
+`core/sarva/memory/session.py`, verified and shipped directly this
+round.
+
+**The bug:** `SessionStore._sanitize()` validates a session name's
+*characters* (`^[A-Za-z0-9_-]+$`) but never its *length*. `store.
+locked(name)` builds a lock-file path from the raw name and calls
+`os.open(lock_path, os.O_CREAT | os.O_RDWR)` inside a thread. A
+session name long enough to exceed the filesystem's max filename
+length raises a plain `OSError` (`ENAMETOOLONG`) -- a completely
+different exception type than the `ValueError` `_sanitize()` raises
+for a bad character. Every real call site (`cli.py`'s five, `server/
+app.py`'s two) only catches `ValueError`/`TypeError` around this
+exact block, modeled specifically on `_sanitize()`'s own documented
+`ValueError` contract, so the `OSError` propagates fully uncaught.
+
+**Confirmed live**, via the real FastAPI app (not a mock): `POST
+/chat` with `session="a" * 300` crashed with a raw, plain-text 500 --
+`OSError: [Errno 63] File name too long: '.../aaa...a.lock'`, traced
+straight through `session.py:176` (`_acquire`) and `app.py:211`
+(`async with store.locked(req.session):`). `/ws/chat`'s equivalent
+crash is worse: the ASGI call dies with no frame sent at all, not even
+the clean `state_changed`+`run_done` failure pair this same handler
+already sends for every other validation error (bad session
+characters, malformed `image_base64`, corrupted config, a non-string
+model). `ChatRequest.session` has no length constraint and the WS
+frame is raw schema-less JSON, so this is reachable through the
+server's real public REST/WS surface -- a buggy session-id generator,
+a proxy that mangles a session parameter, or simply a long user-typed
+name, no adversarial intent needed.
+
+**Why this is a striking shape for a round to find:** it's the exact
+same "raw OS error instead of a clean validation error" pattern this
+project already found and fixed once, for a different tier entirely
+-- `LongTermMemoryStore`'s topic-name validation (see this same
+file's sibling doc chapter on the notes/topics tier) had an identical
+gap: an overlong topic name leaked a raw OS error, path and all,
+before that fix added the missing length check. The session tier's
+own `_sanitize()` never got the equivalent treatment, even though both
+functions exist for the identical reason (turning a caller-supplied
+string into a safe filename) and sit in sibling files within the same
+`sarva.memory` package.
+
+**Fixed at the source**, in `_sanitize()` itself, with a 200-character
+limit -- comfortably under every common filesystem's ~255-byte
+filename limit even after the `.lock`/`.json` suffix, and an exact
+byte-length bound since `_VALID_NAME`'s charset is entirely single-byte
+ASCII. Fixing the root validator rather than patching each of the
+seven existing call sites individually means every one of them gets
+this fix for free through their own existing `except ValueError`, and
+any future caller of `_sanitize()` automatically inherits it too --
+deliberately avoiding the "patch this one call site, miss the next"
+cycle several recent rounds have been finding elsewhere in this
+project.
+
+**Verified live** after the fix: the identical repro now returns a
+clean `state=failed` with `"session name too long (300 chars, max
+200): ..."` on both `/chat` and `/ws/chat`.
+
+**Verified by reverting** `session.py` alone and watching both new
+tests fail with the literal old bug's own exception reproducing
+itself: `OSError: [Errno 63] File name too long`.
+
+**2 new tests, 733 -> 735 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new
+paragraph directly after the existing invalid-session-name fix
+chapter, explicitly naming the parallel to the sibling topic-name fix
+elsewhere in the same file.
+
+**Thirty-two of the last thirty-three rounds (46-67, 70-78) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** A seventh consecutive round (after 71-77) where the actual
+defect echoed a pattern this project had already named and fixed
+somewhere else -- this one perhaps the most literal instance yet,
+since the exact fix (character validation without length validation,
+leaking a raw OS error) had already been applied to a sibling function
+in a neighboring file, just never generalized across to this one.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

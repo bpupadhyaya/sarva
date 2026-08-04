@@ -47,6 +47,11 @@ _MESSAGES_ADAPTER: TypeAdapter[list[Message]] = TypeAdapter(list[Message])
 DEFAULT_SESSIONS_DIR = Path.home() / ".sarva" / "sessions"
 
 _VALID_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+# Comfortably under every common filesystem's ~255-byte filename limit even
+# after this module's longest suffix (".lock") is appended -- every
+# character in _VALID_NAME's charset is a single ASCII byte, so this is
+# also an exact byte-length bound, not just a character-count heuristic.
+_MAX_NAME_LENGTH = 200
 
 
 def _sanitize(name: str) -> str:
@@ -55,6 +60,31 @@ def _sanitize(name: str) -> str:
     # the same file, which would corrupt one or the other's history.
     if not _VALID_NAME.match(name):
         raise ValueError(f"invalid session name: {name!r} (use only letters, digits, '-', and '_')")
+    # A real bug found by a fresh-eyes sweep: the character check above
+    # says nothing about length, so a session name past the filesystem's
+    # max filename length reached os.open() (in `locked`'s `_acquire`)
+    # and raised a raw OSError (ENAMETOOLONG) -- a completely different
+    # exception type than the ValueError every real call site (cli.py,
+    # server/app.py) catches specifically because that's the only
+    # exception type _sanitize() was ever documented to raise. Confirmed
+    # live: POST /chat with a 300-character session name crashed with a
+    # raw 500 (`OSError: [Errno 63] File name too long`); /ws/chat's
+    # equivalent crash was worse -- the ASGI call died with no frame sent
+    # at all, not even the clean failure pair this handler already sends
+    # for every other validation error. Reachable through the server's
+    # real public REST/WS surface: ChatRequest.session has no length
+    # constraint, and the WS frame is raw schema-less JSON -- a buggy
+    # session-id generator, a proxy that mangles a session parameter, or
+    # simply a very long user-typed name all trigger this with no
+    # adversarial intent needed. Fixed at the source, in _sanitize()
+    # itself, rather than patching each of the many call sites
+    # individually (cli.py alone has five) -- every existing `except
+    # ValueError` already in place gets this fix for free, and any
+    # future caller of _sanitize() automatically inherits it too.
+    if len(name) > _MAX_NAME_LENGTH:
+        raise ValueError(
+            f"session name too long ({len(name)} chars, max {_MAX_NAME_LENGTH}): {name[:50]!r}..."
+        )
     return name
 
 
