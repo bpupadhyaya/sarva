@@ -3,11 +3,23 @@ import { SarvaApiError, SarvaChatStream, SarvaClient } from "../src/client.js";
 import { textFromContent } from "../src/types.js";
 
 function fakeFetch(status: number, body: unknown): typeof fetch {
-  return vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
-  }) as unknown as typeof fetch;
+  // A real Response (not a partial { json: ... } stand-in): requestJson()
+  // now reads the body via .text() first (see its own comment on the
+  // real bug this closes -- calling .json() unconditionally, before
+  // checking response.ok, threw a raw SyntaxError on any non-JSON error
+  // body instead of the documented SarvaApiError). A hand-built object
+  // exposing only .json() would silently mask that exact regression
+  // returning here, the same way it did before this fix existed.
+  //
+  // mockImplementation, not mockResolvedValue: a real Response's body
+  // can only be read once -- a shared mockResolvedValue instance reused
+  // across multiple calls to the same mock (some tests below call the
+  // client twice against one fakeFetch) would throw "Body is unusable:
+  // Body has already been read" on the second call. A fresh Response
+  // per invocation matches how a real server actually behaves.
+  return vi
+    .fn()
+    .mockImplementation(async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
 }
 
 describe("SarvaClient REST methods", () => {
@@ -38,6 +50,32 @@ describe("SarvaClient REST methods", () => {
       body: errorBody,
     });
     await expect(client.chat({ message: "hello" })).rejects.toBeInstanceOf(SarvaApiError);
+  });
+
+  it("chat() rejects with SarvaApiError, not a raw SyntaxError, on a non-JSON error body", async () => {
+    // A real bug found by actually running the compiled SDK against a
+    // real server response: requestJson() used to call response.json()
+    // unconditionally, before response.ok was ever checked. The
+    // server's own global exception handler only covers ConfigError --
+    // any OTHER unhandled exception (e.g. a real PermissionError from
+    // save_config() when ~/.sarva isn't writable) falls through to
+    // Starlette's default handler, which returns a PLAIN-TEXT 500 body,
+    // not JSON. Calling .json() on that raised a raw SyntaxError
+    // instead of the documented SarvaApiError every caller is meant to
+    // catch, discarding the real status/message entirely. Confirmed
+    // live against the real compiled dist/ before this fix.
+    const fetchImpl = vi
+      .fn()
+      .mockImplementation(
+        async () => new Response("Internal Server Error", { status: 500 }),
+      ) as unknown as typeof fetch;
+    const client = new SarvaClient({ baseUrl: "http://example.com", fetchImpl });
+
+    const error = await client.chat({ message: "hello" }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SarvaApiError);
+    expect((error as SarvaApiError).status).toBe(500);
+    expect((error as SarvaApiError).body).toBe("Internal Server Error");
   });
 
   it("models() hits GET /models and returns the parsed list", async () => {

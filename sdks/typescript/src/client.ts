@@ -164,7 +164,29 @@ export class SarvaClient {
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     });
-    const body: unknown = await response.json();
+    // A real bug found by actually running the compiled SDK against a
+    // real server response: `response.json()` used to run unconditionally,
+    // before `response.ok` was ever checked. The server's own global
+    // exception handler only covers ConfigError (sarva.server.app) --
+    // any OTHER unhandled exception (e.g. a PermissionError from
+    // save_config() when ~/.sarva isn't writable, a realistic real-world
+    // condition, not contrived) falls through to Starlette's default
+    // handler, which returns a PLAIN-TEXT 500 body, not JSON. Calling
+    // `.json()` on that raised a raw SyntaxError instead of the
+    // documented SarvaApiError every caller is meant to catch --
+    // discarding the real HTTP status and message entirely. Fixed by
+    // reading the body as text exactly once, then trying to parse it as
+    // JSON and falling back to the raw text on failure -- an error
+    // response with a JSON body (the common case) still gets its parsed
+    // object as `SarvaApiError.body`; a non-JSON body (this bug's case)
+    // gets the raw string instead of an opaque parse error.
+    const raw = await response.text();
+    let body: unknown;
+    try {
+      body = raw ? JSON.parse(raw) : undefined;
+    } catch {
+      body = raw;
+    }
     if (!response.ok) {
       throw new SarvaApiError(response.status, body);
     }

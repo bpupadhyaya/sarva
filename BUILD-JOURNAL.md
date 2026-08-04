@@ -13488,3 +13488,96 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The standalone TypeScript SDK swallowed real server errors behind a raw JSON-parse SyntaxError — the identical shape already fixed once for the desktop app's own WebSocket frame parsing
+
+Round 80. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across rounds 70-79 (specifically flagged
+to check whether a prior investigation's own passing mention of
+`sdks/typescript`'s `requestJson()` calling `response.json()` before
+`response.ok` was actually true, since it had never been directly
+confirmed live or fixed). It confirmed it live and traced a concrete
+reachable trigger; verified and shipped directly this round.
+
+**The bug:** `requestJson()` — the shared helper every REST method
+(`health`, `models`, `doctor`, `saveConfig`, `chat`) routes through —
+called `response.json()` unconditionally, before ever checking
+`response.ok`. `sarva.server.app` registers a global exception handler
+for exactly one exception type, `ConfigError`; any other unhandled
+exception falls through to Starlette's own default handler, which
+returns a plain-text 500 body, not JSON.
+
+**Confirmed live end to end, not just reasoned about:** a scratch
+`~/.sarva` directory made read-only (`chmod 500`), a real `sarva
+serve` process started against it, `POST /config` (which has no
+exception handling of its own around `save_config()`, and whose
+`_exclusive_lock` -> `os.open()` raises a plain `PermissionError` --
+an `OSError`, not `ConfigError` -- whenever `~/.sarva` isn't writable)
+returning the real raw traceback as a `text/plain` 500. Then the
+actual *compiled* SDK (`dist/index.js`, not just source) calling
+`client.saveConfig(...)` against that same real server threw a raw
+`SyntaxError` instead of the documented `SarvaApiError` class every
+caller is meant to catch -- discarding the real status code and
+message entirely. `saveConfig()` is the design doc's own desktop
+first-run "paste an API key" flow, a documented first-class method,
+not an obscure corner.
+
+**Why this echoes a pattern already named once elsewhere in the same
+project:** the desktop app's own WebSocket frame-parsing had the
+identical shape of bug, already found and fixed -- a `JSON.parse`
+throw inside `onmessage` silently escaping instead of being caught and
+converted into a clean error state. This round's finding is the same
+"raw parse exception instead of the documented error type" gap,
+independently present in the separate, standalone SDK package that
+never got the equivalent treatment.
+
+**Fixed** by reading the response body as text exactly once, then
+trying to parse it as JSON and falling back to the raw text on
+failure, *before* checking `response.ok` -- an error response with a
+JSON body (the common case) still gets its parsed object as
+`SarvaApiError.body`; a non-JSON body (this bug's case) gets the raw
+string instead of an opaque parse error, and either way
+`SarvaApiError` is always what's actually thrown.
+
+**Fixing this also surfaced a real gap in the SDK's own test
+fixtures:** the existing `fakeFetch` test helper hand-built a partial
+object exposing only `.json()` -- which would have silently masked
+this exact regression returning in the future, since it could never
+exercise the `.text()`-based code path at all. Replaced with a real
+`Response` instance (matching what real `fetch` actually returns),
+constructed via `mockImplementation` rather than a shared
+`mockResolvedValue`, since a real response body can only be read once
+-- a subtlety the fix's own first test run caught directly (`Body is
+unusable: Body has already been read` on a test that calls the client
+twice against one mocked fetch).
+
+**Verified live** with the compiled SDK against both a JSON error body
+(existing behavior preserved) and a plain-text error body (the bug's
+case, now correctly `SarvaApiError`), plus the ordinary success path.
+
+**Verified by reverting** `client.ts` alone and watching the new test
+fail with the literal old bug reproducing itself: a raw `SyntaxError`
+instead of `SarvaApiError`.
+
+**1 new test, 18 -> 19 TypeScript SDK tests, all passing.** No Python
+changes this round (736 Python tests, unaffected, confirmed still
+green). `docs/packaging.md` gained a new subsection directly after the
+desktop app's own analogous frame-parsing fix, naming the parallel
+explicitly.
+
+**Thirty-four of the last thirty-five rounds (46-67, 70-80) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** The first round in this run of ten to find a bug entirely
+outside the Python codebase -- worth noting as a reminder that this
+project's "fresh-eyes sweep" methodology generalizes cleanly across
+languages/packages within the same monorepo, not just within
+`core`/`foundry`.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -530,6 +530,55 @@ via `StaticFiles(..., html=True)` so `sarva serve` alone gives a
 complete browser experience; if it doesn't exist, the server is simply
 API-only, with nothing breaking either way.
 
+### The standalone TypeScript SDK had the identical shape of gap the desktop app's own frame-parsing fix (above) had already closed — a raw parse error instead of the documented error type
+
+`sdks/typescript/src/client.ts`'s `requestJson()` — the shared helper
+every REST method (`health`, `models`, `doctor`, `saveConfig`, `chat`)
+routes through — called `response.json()` unconditionally, *before*
+`response.ok` was ever checked. `sarva.server.app` registers a global
+exception handler for exactly one exception type, `ConfigError`; any
+other unhandled exception falls through to Starlette's own default
+handler, which returns a **plain-text** 500 body, not JSON — a real,
+reachable case, not a hypothetical one: `POST /config` → `save_config_
+route` has no exception handling of its own around `save_config()`,
+and `save_config()` → `config.py`'s `_exclusive_lock` → `os.open()`
+raises a plain `PermissionError` (an `OSError`, not `ConfigError`)
+whenever `~/.sarva` isn't writable — a read-only home directory, a
+container mount, an ordinary permissions issue, no adversarial intent
+needed. Calling `.json()` on that plain-text body raised a raw
+`SyntaxError` instead of constructing the documented `SarvaApiError`
+class every caller is meant to catch to get the real `status`/`body` —
+discarding both entirely.
+
+Confirmed live end to end, not just reasoned about: a scratch
+`~/.sarva` directory `chmod 500`'d (read-only), a real `sarva serve`
+process started against it, `curl -i -X POST /config` returning the
+real raw traceback and a `text/plain` 500, then the actual *compiled*
+SDK (`dist/index.js`, not just the source) calling `client.saveConfig
+(...)` against that same real server and throwing `SyntaxError`
+instead of `SarvaApiError`. `saveConfig()` is a documented, first-class
+`SarvaClient` method (the design doc's own desktop first-run "paste an
+API key" flow), and the SDK's own pre-existing test suite only ever
+exercised the JSON-error-body case, so this gap in the non-JSON case
+was never caught.
+
+Fixed by reading the response body as text exactly once, then trying
+to parse it as JSON and falling back to the raw text on failure,
+*before* checking `response.ok` — an error response with a JSON body
+(the common case) still gets its parsed object as `SarvaApiError.
+body`; a non-JSON body (this bug's case) gets the raw string instead of
+an opaque parse error, and either way `SarvaApiError` is always the
+type actually thrown. Fixing this also surfaced a real gap in the
+SDK's own test fixtures: the existing `fakeFetch` helper hand-built a
+partial object exposing only `.json()`, which would have silently
+masked this exact regression returning in the future — replaced with a
+real `Response` instance (matching what real `fetch` actually returns),
+built via `mockImplementation` rather than a shared `mockResolvedValue`
+since a real response body can only be read once. Verified the new
+test is real: reverted the fix and watched it fail with the literal
+old bug reproducing itself, a raw `SyntaxError` instead of
+`SarvaApiError`. 1 new test, 18 → 19 TypeScript SDK tests.
+
 ## First-run guided setup — a real gap between what was promised and what shipped
 
 T4's own definition of done, and the README's own quickstart text, have
