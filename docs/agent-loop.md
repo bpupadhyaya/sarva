@@ -547,6 +547,39 @@ still got a raw PIL exception instead of the documented
 `ImageDecodeError`. `except` widened once more, to
 `(UnidentifiedImageError, OSError, Image.DecompressionBombError)`.
 
+**A fourth bug, upstream of all three above and far more severe: the
+fallback never triggered at all for the single most common real case.**
+`Router.pick()` (`sarva.providers.registry`) returns the first routing-
+chain candidate that both supports the needed modalities and is
+`available` — and the `mock` model's own registry entry
+(`models.yaml`) had declared `image` (and `document`) support since
+this project's very first scaffold commit. `MockProvider` is always
+`available` (`build_router()` seeds `available = {"mock"}`
+unconditionally) and sits last in every routing chain by design — so
+for the ordinary, explicitly-marketed "local Ollama only, no cloud
+key" setup, `pick(TaskClass.MAIN, needs={TEXT, IMAGE})` resolved
+straight to `mock` instead of ever raising the `LookupError` this
+entire degradation mechanism exists to catch. `MockProvider.generate()`
+doesn't actually look at images at all — it just echoes text — so the
+real image was silently discarded with no signal anywhere: `sarva chat
+"describe this" --image photo.png` completed with a clean-looking
+`state=done` and text like `"[mock] received: describe this"`, as if
+the request had simply been answered. Confirmed live before fixing,
+using the real shipped `models.yaml`/`routing.yaml`, not a synthetic
+test double. Fixed by removing `image`/`document` from `mock`'s
+`modalities_in` — `document` sits in the same reachable bucket even
+though no CLI flag constructs one yet (a `DocumentToTextDegrader`
+already exists), so it's closed proactively rather than waiting for
+that flag to ship and reproduce the same bug. `audio`/`video` stay:
+routing.yaml's `audio` chain is `[mock]` alone with no real model ahead
+of it to preempt, so mock resolving audio isn't defeating a better
+available path — it's the last-resort, zero-config guarantee the
+routing file's own header comment promises, working as intended. Two
+existing tests had encoded the buggy behavior as the expectation
+(`mock's own capabilities include image` was their literal premise)
+and needed rewriting to use a genuinely vision-capable test model
+instead of relying on mock's now-corrected claim.
+
 ## Failure handling, named explicitly rather than left implicit
 
 - A provider crash (any exception escaping `provider.generate()`, not

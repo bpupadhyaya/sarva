@@ -77,21 +77,37 @@ models:
     display_name: Mock Provider (offline, deterministic)
     local: true
     capabilities:
-      # A real bug found by giving routing.yaml its own fresh-eyes
-      # sweep: routing.yaml's own header comment promises "mock is
-      # always last so the CLI and test suite work with zero config,"
-      # but its `audio: [mock]` chain -- the ONLY entry in that chain --
-      # could never actually resolve, since mock didn't declare `audio`
-      # here. Confirmed live: `Router.pick(TaskClass.AUDIO, needs=
-      # {Modality.AUDIO})` against the real shipped YAML raised
-      # LookupError even with mock available, the one case that
-      # "always available" is supposed to guarantee never happens.
-      # MockProvider.generate() doesn't actually inspect modality at
-      # all (it just echoes the last user text), so there's no real
-      # technical limitation being papered over -- audio (and video,
-      # for the same reason, ahead of any future TaskClass.VIDEO)
-      # belong here for the promise to actually hold.
-      modalities_in: [text, image, document, audio, video]
+      # A real bug found by property-based fuzzing of the tokenizer
+      # led to a fresh-eyes sweep of this file: `image` and `document`
+      # were declared here since the very first T0/T1 scaffold commit,
+      # and it looked harmless -- MockProvider.generate() doesn't
+      # actually inspect modality at all, it just echoes text, so
+      # nothing crashes. But `Router.pick()` (registry.py) returns the
+      # FIRST candidate in a routing chain that satisfies the needed
+      # modalities, and `main`'s chain is `[claude-opus-4-8,
+      # ollama/qwen3:8b, mock]` -- with mock claiming `image` support,
+      # `pick(MAIN, needs={TEXT, IMAGE})` resolved straight to mock
+      # instead of ever raising LookupError, which is the ONLY thing
+      # that triggers AgentLoop's degradation-fallback branch
+      # (loop.py). Confirmed live: a completely ordinary "local Ollama
+      # only, no cloud key" setup (`available={"mock",
+      # "ollama/qwen3:8b"}`) sending `sarva chat "describe this" --image
+      # photo.png` completed with `state=done` and mock's fake
+      # "[mock] received: describe this" text -- the real image
+      # silently discarded, never even converted via
+      # ImageToTextDegrader and handed to the real (if text-only)
+      # qwen3:8b model the degradation path exists specifically to use
+      # instead. `document` sits in the same `main`-reachable bucket
+      # (a real DocumentToTextDegrader already exists, just not yet
+      # wired to a CLI flag) so it's removed for the same reason,
+      # proactively, before it ships a flag and reproduces the same
+      # bug. `audio`/`video` are NOT part of this bug class and stay:
+      # routing.yaml's `audio` chain is `[mock]` alone, with no real
+      # model ahead of it to preempt -- mock resolving audio isn't
+      # defeating a better available path, it's the last-resort,
+      # zero-config guarantee routing.yaml's own header comment
+      # promises, working exactly as intended.
+      modalities_in: [text, audio, video]
       modalities_out: [text]
       tool_use: true
       thinking: true

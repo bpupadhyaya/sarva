@@ -13,10 +13,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sarva.memory import session as session_module
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import ImageBlock, ToolCallBlock
-from sarva.providers.base import GenerateRequest
+from sarva.multimodal.content import ImageBlock, Modality, ToolCallBlock
+from sarva.providers.base import GenerateRequest, ModelCapabilities, ModelCost, ModelInfo
 from sarva.providers.mock import MockProvider, ScriptedTurn
-from sarva.providers.registry import Registry, Router, load_routing
+from sarva.providers.registry import Registry, Router, TaskClass, load_routing
 from sarva.server import app as app_module
 from sarva.server.app import create_app
 
@@ -64,6 +64,42 @@ def _use_capturing_mock(monkeypatch) -> _CapturingProvider:
     provider = _CapturingProvider()
     monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
     monkeypatch.setattr(app_module, "build_router", _mock_only_router)
+    return provider
+
+
+def _vision_capable_mock_router() -> Router:
+    """A router whose sole "mock" entry genuinely declares IMAGE support
+    -- unlike the real production registry's mock entry (see models.yaml's
+    own comment on the bug this fix closes), which no longer does, since
+    that lie was what silently defeated AgentLoop's degradation-fallback
+    for every real image attachment. The two tests using this router only
+    care whether image_base64/image_media_type on the wire correctly
+    becomes a real ImageBlock that reaches provider.generate() unmodified
+    -- not about routing/degradation policy -- so they get their own
+    router with a genuinely vision-capable "mock" id instead of relying on
+    the real registry's (now honest) capabilities."""
+    model = ModelInfo(
+        id="mock",
+        provider="mock",
+        display_name="Vision-capable mock (test-only)",
+        capabilities=ModelCapabilities(
+            modalities_in={Modality.TEXT, Modality.IMAGE},
+            modalities_out={Modality.TEXT},
+            tool_use=True,
+            thinking=False,
+            context_window=100_000,
+            max_output=8_000,
+        ),
+        cost=ModelCost(),
+    )
+    registry = Registry(models={"mock": model})
+    return Router(registry, routing={TaskClass.MAIN: ["mock"]}, available={"mock"})
+
+
+def _use_capturing_vision_mock(monkeypatch) -> _CapturingProvider:
+    provider = _CapturingProvider()
+    monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
+    monkeypatch.setattr(app_module, "build_router", _vision_capable_mock_router)
     return provider
 
 
@@ -343,7 +379,12 @@ def test_chat_with_a_corrupted_config_file_fails_cleanly_not_a_500_traceback(mon
 
 
 def test_chat_with_an_attached_image_reaches_the_provider_as_a_real_image_block(monkeypatch):
-    provider = _use_capturing_mock(monkeypatch)
+    # Uses a vision-capable test router, not _mock_only_router -- with the
+    # real production registry's mock entry now honestly declining IMAGE
+    # (see models.yaml), an all-mock available set degrades any image
+    # away before it reaches the provider at all. This test is about the
+    # image_base64 -> ImageBlock wiring, not routing/degradation policy.
+    provider = _use_capturing_vision_mock(monkeypatch)
     raw = b"\x89PNG\r\n\x1a\nreal enough bytes for this test"
 
     resp = _client().post(
@@ -446,7 +487,10 @@ def test_websocket_with_an_attached_image_reaches_the_provider_as_a_real_image_b
     # ws_chat never read image_base64/image_media_type from the frame at
     # all, so there was genuinely no way to send an image through the web
     # UI despite the CLI and /chat both already supporting it.
-    provider = _use_capturing_mock(monkeypatch)
+    # Same vision-capable test router as the /chat version above, for the
+    # same reason -- the real registry's mock entry no longer lies about
+    # IMAGE support, so this test needs its own genuinely capable model.
+    provider = _use_capturing_vision_mock(monkeypatch)
     raw = b"\x89PNG\r\n\x1a\nreal enough bytes for this websocket test"
 
     client = _client()

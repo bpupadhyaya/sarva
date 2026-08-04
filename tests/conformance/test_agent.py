@@ -87,6 +87,29 @@ def _text_only_router() -> Router:
     return Router(registry, routing={TaskClass.MAIN: ["text-only"]}, available={"text-only"})
 
 
+def _vision_capable_model() -> ModelInfo:
+    return ModelInfo(
+        id="vision-model",
+        provider="mock",
+        display_name="Vision-Capable Mock",
+        capabilities=ModelCapabilities(
+            modalities_in={Modality.TEXT, Modality.IMAGE},
+            modalities_out={Modality.TEXT},
+            tool_use=True,
+            thinking=False,
+            context_window=100_000,
+            max_output=8_000,
+        ),
+        cost=ModelCost(),
+    )
+
+
+def _vision_capable_router() -> Router:
+    model = _vision_capable_model()
+    registry = Registry(models={model.id: model})
+    return Router(registry, routing={TaskClass.MAIN: ["vision-model"]}, available={"vision-model"})
+
+
 class _EchoTool:
     spec = ToolSpec(
         name="echo",
@@ -725,14 +748,18 @@ async def test_degradation_fallback_reports_cleanly_for_a_truncated_real_image(r
 
 @pytest.mark.asyncio
 async def test_degradation_fallback_not_triggered_when_a_supporting_model_exists(run_root):
-    """Regression guard: with a vision-capable model actually available
-    (the registry's `mock` entry supports image input directly — see
-    models.yaml), the degradation path must never trigger — the original
-    ImageBlock should reach the model unmodified, not a degraded
-    placeholder, exactly as before this feature existed."""
+    """Regression guard: with a genuinely vision-capable model available
+    (a test-only router — see _vision_capable_router; the real registry's
+    `mock` entry no longer claims image support at all, since that was
+    the bug: MockProvider doesn't actually look at images, so declaring
+    support for one silently defeated this exact degradation-fallback
+    path for every real image attachment, see models.yaml's own comment),
+    the degradation path must never trigger — the original ImageBlock
+    should reach the model unmodified, not a degraded placeholder, exactly
+    as before this feature existed."""
     provider = MockProvider()  # echo mode
     loop = AgentLoop(
-        router=_router(),  # available={"mock"}; mock's own capabilities include image
+        router=_vision_capable_router(),  # available={"vision-model"}; genuinely supports image
         providers={"mock": provider},
         run_root=run_root,
         degraders={Modality.IMAGE: ImageToTextDegrader()},
@@ -744,6 +771,44 @@ async def test_degradation_fallback_not_triggered_when_a_supporting_model_exists
     assert events[-1].state == AgentState.DONE
     echoed = events[-1].final_message.text()
     assert "could not be described" not in echoed
+
+
+@pytest.mark.asyncio
+async def test_real_registry_degrades_an_image_instead_of_silently_dropping_it_via_mock(run_root):
+    # The actual end-to-end bug, using the REAL production registry/
+    # routing data (models.yaml/routing.yaml), not a synthetic test
+    # router: mock's own capabilities entry used to (mis)declare `image`
+    # support, so `main`'s routing chain -- [claude-opus-4-8,
+    # ollama/qwen3:8b, mock] -- resolved straight to mock for any image
+    # attachment in a completely ordinary "no cloud key, no Ollama
+    # reachable" setup, since mock was always "available" and (falsely)
+    # claimed to support every modality checked here. That silently
+    # skipped AgentLoop's entire degradation-fallback branch (it only
+    # triggers on LookupError from router.pick()), so the real image was
+    # discarded with no signal at all -- MockProvider.generate() never
+    # actually inspects image content, it just echoes text. Confirmed
+    # live before fixing: this exact setup completed with
+    # state=AgentState.DONE and final text "[mock] received: describe
+    # this photo", the image silently gone. Fixed by removing `image`
+    # from mock's modalities_in in models.yaml -- see its own comment.
+    provider = MockProvider()  # echo mode
+    loop = AgentLoop(
+        router=_router(),  # real models.yaml/routing.yaml; available={"mock"} only
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+    image = ImageBlock(media_type="image/png", data=_real_png_bytes())
+
+    events = [e async for e in loop.run("describe this photo", extra_content=[image])]
+
+    assert events[-1].state == AgentState.DONE
+    echoed = events[-1].final_message.text()
+    # The question survives (degradation only replaces the image block),
+    # and the response honestly says the image itself couldn't be seen --
+    # not a confident-looking answer that silently never looked at it.
+    assert "describe this photo" in echoed
+    assert "could not be described" in echoed
 
 
 @pytest.mark.asyncio

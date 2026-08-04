@@ -12623,3 +12623,129 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## Mock's own capabilities lied about supporting images since the T0/T1 scaffold commit, silently defeating the entire degradation-fallback feature for the exact setup this project markets
+
+Round 71. Delegated a fresh-eyes sweep to a subagent, deliberately
+pointed away from the tokenizer (just fuzzed thoroughly in round 70)
+and toward areas not yet exhausted: provider response parsing, memory/
+session serialization, the RL harness, the remaining agent tools. It
+found a real one in `sarva.providers.registry`/`models.yaml`, and this
+round verified, fixed, tested, and shipped it directly.
+
+**The bug:** `Router.pick()` returns the first routing-chain candidate
+that both supports the needed modalities and is `available`. The
+`mock` model's own `models.yaml` entry declared `modalities_in: [text,
+image, document, ...]` -- and it turns out `image`/`document` were
+there since this project's very first T0/T1 scaffold commit, not
+something a later round introduced. `MockProvider` is unconditionally
+`available` (`build_router()` seeds `available = {"mock"}` no matter
+what) and sits last in every routing chain by design ("mock is always
+last so the CLI and test suite work with zero config," per
+`routing.yaml`'s own header comment). Combine those two facts: for the
+`main` chain (`[claude-opus-4-8, ollama/qwen3:8b, mock]`) under the
+exact, explicitly-marketed "local Ollama only, no cloud key" setup,
+`pick(TaskClass.MAIN, needs={TEXT, IMAGE})` resolved straight to
+`mock` -- never once raising the `LookupError` that `AgentLoop`'s
+entire opt-in degradation-fallback mechanism (built and tested over
+several earlier rounds) exists to catch.
+
+**Why it's severe:** `MockProvider.generate()` doesn't actually
+inspect image content at all -- it just echoes the last user text. So
+the real image was silently discarded with zero signal anywhere in the
+response. Confirmed live, before fixing, using the real shipped
+`models.yaml`/`routing.yaml` (not a synthetic test double):
+`AgentLoop.run("describe this photo", extra_content=[image])` against
+`available={"mock"}` completed with a clean-looking `state=done` and
+final text `"[mock] received: describe this photo"` -- exactly as if
+the request had been genuinely answered. `sarva chat "describe this"
+--image photo.png` or the equivalent `/chat`/`/ws/chat` call would hit
+this identically. This is worse than the degradation feature not
+existing at all: it *looks* like a normal, successful response,
+concealing that the image was never seen by anything.
+
+**Fixed** by removing `image` and `document` from mock's
+`modalities_in` in `models.yaml`. `document` is included in the fix
+even though no CLI flag constructs a `DocumentBlock` yet (a
+`DocumentToTextDegrader` already exists in the codebase) -- closed
+proactively so the same bug can't resurface the moment that flag
+ships. `audio`/`video` deliberately stay: `routing.yaml`'s `audio`
+chain is `[mock]` alone, with no real model ahead of it that could be
+preempted -- mock resolving audio there isn't defeating a better
+available path, it's the last-resort guarantee the routing file's own
+comment promises, and it's genuinely dead code today besides (no real
+caller ever constructs an `AudioBlock`/`VideoBlock` either).
+
+**Verified live** after the fix: the same repro now produces
+`state=done` with text ending `"...could not be described"` -- the
+real, honest degradation-fallback message (image converted to a
+dimensions/format description via `ImageToTextDegrader`, handed to the
+best real available text-capable model) instead of a silent, confident-
+looking non-answer.
+
+**Ripple through five existing tests**, all of which had the buggy
+behavior baked into their own premise:
+- `test_degradation_fallback_not_triggered_when_a_supporting_model_exists`
+  (test_agent.py) literally asserted "the registry's mock entry
+  supports image input directly" as its setup comment -- rewritten to
+  use a genuinely vision-capable *test-only* router instead of relying
+  on mock's now-corrected claim, preserving the test's real intent
+  (when a real vision-capable model is available, don't degrade).
+- `test_router_never_returns_unsupported_modality` (test_provider.py)
+  only passed because mock lied about IMAGE support -- rewritten to
+  make a real vision-capable model (`claude-opus-4-8`) available
+  alongside mock, so the invariant is checked meaningfully.
+- Two server tests (`test_chat_with_an_attached_image_...`,
+  `test_websocket_with_an_attached_image_...`) used a mock-only router
+  specifically to prove an attached image reaches `provider.generate()`
+  unmodified -- now genuinely true only when a vision-capable model is
+  available, so they got their own small vision-capable test router,
+  decoupled from routing/degradation policy entirely.
+- `test_run_with_a_valid_image_completes_successfully` (test_cli.py)
+  used placeholder (non-decodable) PNG bytes, which only worked because
+  mock accepted them unconditionally without ever trying to decode
+  them. Switched to a real, valid PNG (degradation now genuinely
+  decodes it) and updated the assertion to check for the honest
+  "could not be described" outcome instead of the old silent echo.
+
+**Verified by reverting** `models.yaml` alone and watching two new
+tests -- a router-level unit test and an end-to-end `AgentLoop` test
+using the real production registry -- both fail for the exact right
+reason: the router-level test failed with "DID NOT RAISE LookupError,"
+and the end-to-end test's final text came back as the literal old
+bug's silent echo, `'[mock] received: describe this photo'`, with no
+"could not be described" anywhere in it.
+
+**New tests:** `test_router_raises_rather_than_silently_using_mock_for_a_modality_it_cant_handle`
+(test_provider.py) and
+`test_real_registry_degrades_an_image_instead_of_silently_dropping_it_via_mock`
+(test_agent.py) -- the second one deliberately uses the real
+`models.yaml`/`routing.yaml` end to end, not a synthetic router, since
+that's exactly the gap the five ripple-fixed tests' synthetic routers
+had been masking. 2 new tests, 5 existing tests updated (not just
+patched to pass -- each rewritten to test the real invariant it always
+meant to), 725 -> 726 Python tests, all passing, `ruff check`/`format
+--check` clean. `docs/agent-loop.md` gained a new subsection directly
+under the degradation-fallback chapter, right after the three sibling
+exception-handling bugs already documented there.
+
+**Twenty-five of the last twenty-six rounds (46-67, 70-71) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** This
+one predates every round in this journal -- it shipped with the very
+first scaffold commit and survived every subsequent round's sweeps,
+including the round that built and tested the degradation-fallback
+feature itself, because the test written for that feature (correctly,
+for what it was testing) happened to lean on the same false premise
+the bug depended on. A useful reminder that a feature's own test suite
+passing is not proof the feature actually fires in production -- worth
+periodically checking not just "does the fallback work when triggered"
+but "does the fallback actually get triggered when it should."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

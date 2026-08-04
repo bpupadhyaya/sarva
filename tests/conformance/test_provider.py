@@ -121,11 +121,33 @@ def test_router_respects_modality_and_availability():
 
 
 def test_router_never_returns_unsupported_modality():
+    # Genuinely exercises the invariant: makes a real vision-capable model
+    # (claude-opus-4-8) available alongside mock, and confirms pick()
+    # returns a model that actually supports IMAGE, not just one that
+    # claims to.
+    registry = Registry.load(_DATA_DIR / "models.yaml")
+    routing = load_routing(_DATA_DIR / "routing.yaml")
+    router = Router(registry, routing, available={"mock", "claude-opus-4-8"})
+    picked = router.pick(TaskClass.VISION, needs={Modality.IMAGE})
+    assert Modality.IMAGE in picked.capabilities.modalities_in
+
+
+def test_router_raises_rather_than_silently_using_mock_for_a_modality_it_cant_handle():
+    # A real bug found by a fresh-eyes sweep of models.yaml: mock's own
+    # `modalities_in` used to (mis)declare `image`, so this exact call
+    # against the real shipped registry -- with ONLY mock available, no
+    # real vision-capable model in reach -- resolved straight to mock
+    # instead of raising LookupError. MockProvider.generate() doesn't
+    # actually inspect images at all (it just echoes text), so this
+    # silently defeated AgentLoop's entire degradation-fallback branch,
+    # which only ever triggers on LookupError -- see models.yaml's own
+    # comment on the fix. Confirmed live before fixing: this exact call
+    # returned mock, not a raised LookupError.
     registry = Registry.load(_DATA_DIR / "models.yaml")
     routing = load_routing(_DATA_DIR / "routing.yaml")
     router = Router(registry, routing, available={"mock"})
-    picked = router.pick(TaskClass.VISION, needs={Modality.IMAGE})
-    assert Modality.IMAGE in picked.capabilities.modalities_in
+    with pytest.raises(LookupError):
+        router.pick(TaskClass.MAIN, needs={Modality.TEXT, Modality.IMAGE})
 
 
 def test_router_pick_resolves_audio_with_zero_config():

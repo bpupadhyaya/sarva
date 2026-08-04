@@ -10,6 +10,7 @@ provider only), the same "always works with no API keys" guarantee
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import stat
@@ -22,6 +23,7 @@ import sarva.config as config_module
 import sarva.memory.session as session_module
 import sarva.runtime as runtime
 import typer
+from PIL import Image
 from sarva.audio import stt_extra_installed, tts_engine_available
 from sarva.cli import _parse_mcp_env, _parse_mcp_headers, app
 from sarva.memory.session import SessionStore
@@ -188,16 +190,29 @@ def test_chat_with_a_nonexistent_image_path_fails_cleanly_not_a_traceback(monkey
 
 
 def test_run_with_a_valid_image_completes_successfully(tmp_path, monkeypatch):
+    # A real, decodable PNG, not placeholder bytes: with no cloud key and
+    # no reachable Ollama, mock is the only available model, and mock no
+    # longer claims image support (see models.yaml's own comment on the
+    # bug this closes), so this run now genuinely exercises the
+    # degradation-fallback path -- ImageToTextDegrader needs bytes it can
+    # actually decode to succeed, unlike the old placeholder bytes this
+    # test used before that path could ever trigger.
     _clear_provider_env(monkeypatch)
     image_path = tmp_path / "photo.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\nreal enough bytes for this test")
+    buf = io.BytesIO()
+    Image.new("RGB", (12, 8), color=(0, 128, 255)).save(buf, format="PNG")
+    image_path.write_bytes(buf.getvalue())
 
     result = runner.invoke(
         app, ["run", "what's in this image?", "--image", str(image_path), "--auto"]
     )
 
     assert result.exit_code == 0
-    assert "[mock] received: what's in this image?" in result.stdout
+    # The question text survives, plus an honest note that the image
+    # itself couldn't actually be seen -- not a silent, misleadingly
+    # confident "success" that discards the image with no signal at all.
+    assert "what's in this image?" in result.stdout
+    assert "could not be described" in result.stdout
 
 
 def test_run_with_model_forces_that_exact_model(monkeypatch, tmp_path):
