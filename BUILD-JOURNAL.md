@@ -14123,3 +14123,82 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## EditFileTool's replace_all was never validated as a boolean -- a stringified "false" silently did the exact opposite of what was asked, on a destructive tool
+
+Round 87. Delegated a fresh-eyes sweep to a subagent, explicitly
+pointed at applying round 86's own newly-established lens (unvalidated
+tool-call arguments trusting a purely-descriptive JSON schema) to
+fresh territory -- specifically suggesting `EditFileTool`'s
+`replace_all` as one candidate. It found exactly that shape,
+confirmed live, verified and shipped directly this round.
+
+**The bug:** `EditFileTool.spec.input_schema` declares `replace_all`
+as `{"type": "boolean"}`, but nothing enforces that against a real
+model's actual tool-call arguments -- `input_schema` is purely
+descriptive, never validated server-side anywhere in the dispatch
+path, exactly the same gap round 86 found and fixed for
+`RecallMemoryTool`'s `top_k`. `not replace_all` treated the raw
+argument as a plain Python truth value, and any non-empty string is
+truthy in Python.
+
+**Confirmed live**: a model emitting the JSON *string* `"false"` for
+`replace_all` (a real, plausible model mistake, not a contrived
+attack) was treated as `replace_all=True` -- the exact opposite of
+what was asked. On a real file with three occurrences of
+`old_string`, this silently rewrote all three instead of erroring on
+the ambiguity `EditFileTool`'s own docstring says it exists to
+prevent: `"cat dog cat bird cat"` with `old_string="cat"`,
+`new_string="fish"`, `replace_all="false"` came back
+`"fish dog fish bird fish"`, reported as a clean success.
+
+**Why this is more severe than round 86's own finding:** `EditFileTool`
+is a `destructive=True` tool -- the whole confirmation-gate machinery
+exists specifically to stop unwanted side effects on real files, and
+this bug defeated that guarantee at the argument-validation layer, one
+step before confirmation even runs: a model that explicitly asked for
+a single, targeted, unambiguous edit (`replace_all: "false"`) instead
+got every occurrence in a real file silently rewritten, with the tool
+reporting success and no error anywhere.
+
+**Fixed** by rejecting anything that isn't a genuine Python `bool`
+with a clear, actionable error, the same "reject, don't guess"
+treatment `RecallMemoryTool`'s `top_k` already got for the identical
+gap.
+
+**Verified live** across three cases together: the string `"false"`
+case (now rejected, file left completely unchanged), a real
+`replace_all=True` (still works exactly as before), and the omitted-
+argument default (the pre-existing ambiguous-match error, unaffected).
+
+**Verified by reverting** `tools.py` alone and watching the new test
+fail with the literal old bug reproducing itself: all three
+occurrences silently replaced, reported as success.
+
+**1 new test, 743 -> 744 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+subsection directly after `EditFileTool`'s own CRLF fix chapter,
+explicitly naming the parallel to round 86's `top_k` fix that inspired
+this round's sweep target.
+
+**Forty-two of the last forty-three rounds (46-67, 70-87) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** The
+second consecutive round applying the exact "unvalidated tool-call
+argument trusting a purely-descriptive schema" lens, this time
+deliberately suggested as the sweep target rather than discovered
+independently -- and it found a real instance, on a more severe
+(destructive) tool than the one that inspired it. Worth treating this
+as a genuinely reusable checklist item now, not just a one-off: every
+built-in tool with a non-string argument in its `input_schema` (an
+integer, a boolean, presumably eventually an enum or array) is a
+candidate for the identical gap until each one has actually been
+checked, not assumed safe by proximity to an already-fixed sibling.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

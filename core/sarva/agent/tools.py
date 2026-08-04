@@ -213,6 +213,31 @@ class EditFileTool:
         old_string = args["old_string"]
         new_string = args["new_string"]
         replace_all = args.get("replace_all", False)
+        # A real bug found by a fresh-eyes sweep, the same shape already
+        # found and fixed for RecallMemoryTool's top_k (see its own
+        # comment): `spec.input_schema` above declares `replace_all` as
+        # `{"type": "boolean"}`, but nothing enforces that against a
+        # real model's actual tool-call arguments -- input_schema is
+        # purely descriptive, never validated server-side. `not
+        # replace_all` below treats the value as a plain Python truth
+        # value, and any non-empty string is truthy -- confirmed live: a
+        # model emitting the JSON *string* `"false"` for `replace_all`
+        # (a real, plausible model mistake, not a contrived attack) was
+        # treated as `replace_all=True`, the exact opposite of what was
+        # asked. On a real file with three occurrences of `old_string`,
+        # this silently replaced all three instead of erroring on the
+        # ambiguity this tool's own docstring says it exists to prevent
+        # -- a destructive tool (`spec.destructive=True`) doing the
+        # wrong, unrequested thing with no error and no signal, not a
+        # crash. Fixed by rejecting anything that isn't a real Python
+        # bool, the same "reject, don't guess" treatment RecallMemoryTool
+        # already got for the identical gap.
+        if not isinstance(replace_all, bool):
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=f"replace_all must be a boolean, got {replace_all!r}")],
+                is_error=True,
+            )
         if not old_string:
             return ToolResultBlock(
                 tool_call_id="",

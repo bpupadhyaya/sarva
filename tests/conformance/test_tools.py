@@ -169,6 +169,34 @@ async def test_edit_replace_all_replaces_every_occurrence(ctx):
 
 
 @pytest.mark.asyncio
+async def test_edit_rejects_a_non_boolean_replace_all_instead_of_silently_replacing_all(ctx):
+    # A real bug found by a fresh-eyes sweep, the same shape already
+    # fixed for RecallMemoryTool's top_k: input_schema declares
+    # replace_all as {"type": "boolean"}, but nothing enforces that
+    # against a real model's actual tool-call arguments. `not
+    # replace_all` treated the value as a plain Python truth value, and
+    # any non-empty string is truthy -- a model emitting the JSON
+    # *string* "false" was treated as replace_all=True, the exact
+    # opposite of what was asked, silently rewriting every occurrence
+    # in the file instead of erroring on the ambiguity. Confirmed live
+    # before this fix: this exact setup replaced all three occurrences.
+    write = WriteFileTool()
+    edit = EditFileTool()
+    await write.run({"path": "file.txt", "content": "cat dog cat bird cat"}, ctx)
+
+    result = await edit.run(
+        {"path": "file.txt", "old_string": "cat", "new_string": "fish", "replace_all": "false"},
+        ctx,
+    )
+
+    assert result.is_error is True
+    assert "replace_all must be a boolean" in result.content[0].text
+    read = ReadFileTool()
+    text = (await read.run({"path": "file.txt"}, ctx)).content[0].text
+    assert text == "cat dog cat bird cat"  # untouched
+
+
+@pytest.mark.asyncio
 async def test_edit_rejects_an_empty_old_string(ctx):
     write = WriteFileTool()
     edit = EditFileTool()

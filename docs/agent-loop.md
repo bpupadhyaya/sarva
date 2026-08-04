@@ -172,6 +172,34 @@ live that the identical repro now produces
 `line1\r\nLINE2\r\nline3\r\n` — only the edited line's content
 changed, every CRLF preserved exactly.
 
+### `replace_all` was never actually validated as a boolean -- a stringified `"false"` did the exact opposite of what was asked
+
+A much later fresh-eyes sweep, applying the same lens round 86 had
+just used on `RecallMemoryTool`'s `top_k`: `spec.input_schema` above
+declares `replace_all` as `{"type": "boolean"}`, but nothing enforces
+that against a real model's actual tool-call arguments --
+`input_schema` is purely descriptive, sent to the provider so the
+model knows the expected shape, never validated server-side anywhere
+in the dispatch path. `not replace_all` treated the raw argument as a
+plain Python truth value, and any non-empty string is truthy in
+Python -- confirmed live: a model emitting the JSON *string* `"false"`
+for `replace_all` (a real, plausible model mistake, not a contrived
+attack) was treated as `replace_all=True`, the exact opposite of what
+was asked. On a real file with three occurrences of `old_string`, this
+silently rewrote all three instead of erroring on the ambiguity this
+tool's own docstring says it exists to prevent -- a destructive tool
+(`spec.destructive=True`) doing the wrong, unrequested thing with no
+error and no signal, not a crash. Fixed by rejecting anything that
+isn't a genuine Python `bool` with a clear, actionable error, the same
+"reject, don't guess" treatment `RecallMemoryTool`'s `top_k` already
+got for the identical gap. Verified live across three cases together:
+the string `"false"` case (now rejected, file unchanged), a real
+`replace_all=True` (still works exactly as before), and the omitted-
+argument default (the pre-existing ambiguous-match error, unaffected).
+Verified by reverting and watching the new test fail with the literal
+old bug reproducing itself -- all three occurrences silently replaced.
+1 new test, 743 -> 744 total.
+
 When a model turn ends in `TOOL_USE`, every requested call runs
 concurrently via `asyncio.gather` — not sequentially, and not with the
 model waiting on one before deciding about the next. **Whether a tool
