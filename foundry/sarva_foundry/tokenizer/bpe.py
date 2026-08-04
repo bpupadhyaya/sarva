@@ -36,8 +36,32 @@ from sarva_foundry.atomic_write import atomic_write_text
 # Unicode categories (e.g. combining marks split from their base letter
 # instead of attaching to it) — acceptable for a teaching implementation,
 # and documented here rather than silently assumed identical.
+#
+# A real bug found by fuzzing this pattern against hundreds of varied
+# inputs: the "everything else" (punctuation) alternative was
+# `[^\s\w]+` -- "not whitespace, not a word character" -- and Python's
+# `\w` includes `_`, so a bare underscore matched NEITHER this
+# alternative NOR the letters alternative (which also excludes `_`,
+# deliberately, to isolate real letters) NOR digits NOR whitespace. It
+# matched nothing at all, and `re.findall` silently DROPS any input
+# character no alternative matches -- not an error, not a warning,
+# just gone. Confirmed live: `encode("snake_case_variable")` decoded
+# back to `"snakecasevariable"`, every underscore silently deleted,
+# both from ordinary text passed to `encode()` and from the training
+# corpus itself (a real training run over underscore-containing code
+# would learn a permanently corrupted vocabulary with no error at any
+# layer). Real GPT-2 tokenization has no such gap: `\p{L}`/`\p{N}`
+# don't include `_` either, so a real underscore run falls through to
+# the punctuation catch-all and gets its own token(s) -- this
+# implementation's approximation of that catch-all just happened to
+# accidentally exclude the one character it most needed to include.
+# `(?:[^\s\w]|_)+` restores that: true punctuation OR underscore,
+# grouped the same way consecutive punctuation already is (so
+# `"a_b"` pretokenizes as `["a", "_", "b"]` and `"__init__"` as
+# `["__", "init", "__"]`, mirroring how any other punctuation run
+# between words is handled).
 _PRETOKENIZE_PATTERN = re.compile(
-    r"""'s|'t|'re|'ve|'m|'ll|'d| ?[^\W\d_]+| ?\d+| ?[^\s\w]+|\s+(?!\S)|\s+"""
+    r"""'s|'t|'re|'ve|'m|'ll|'d| ?[^\W\d_]+| ?\d+| ?(?:[^\s\w]|_)+|\s+(?!\S)|\s+"""
 )
 
 _NUM_BYTES = 256
@@ -71,7 +95,24 @@ _UNICODE_TO_BYTE = {v: k for k, v in _BYTE_TO_UNICODE.items()}
 
 def _text_to_symbols(text: str) -> str:
     """UTF-8 bytes of `text`, each remapped to its dedicated Unicode char."""
-    return "".join(_BYTE_TO_UNICODE[b] for b in text.encode("utf-8"))
+    # errors="replace", matching _symbols_to_text's own decode-side
+    # handling just below -- a real bug found by the same fuzzing pass
+    # that found the underscore-dropping bug above: a lone (unpaired)
+    # UTF-16 surrogate code point (e.g. "\ud800") is a real, valid
+    # Python str value -- not itself invalid input -- but has no UTF-8
+    # encoding, so the previous strict `.encode("utf-8")` raised an
+    # uncaught UnicodeEncodeError. Confirmed reachable end to end: a
+    # raw JSON request body carrying an embedded lone surrogate passes
+    # untouched through FastAPI/pydantic's real request parsing into a
+    # plain `str` field with no validator, then into
+    # FoundryProvider.generate()'s direct `tokenizer.encode()` call.
+    # AgentLoop's own broad exception handling around provider.
+    # generate() already turned this into a clean `state=failed`
+    # rather than crashing the process, but with an unhelpful raw
+    # exception string as the detail instead of the honest
+    # replacement-character behavior this tokenizer already promises
+    # on the decode side for anything it can't represent losslessly.
+    return "".join(_BYTE_TO_UNICODE[b] for b in text.encode("utf-8", errors="replace"))
 
 
 def _symbols_to_text(symbols: str) -> str:

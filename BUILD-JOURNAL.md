@@ -12498,3 +12498,128 @@ image generation). The three infra-blocked items remain deferred
 (Tauri `csp: null`, RL harness sandboxing, inference batching); the
 quantization/`Budget` NaN-validation gap has three confirmed-but-
 unreachable instances tracked together.
+
+
+## A genuinely different METHOD -- property-based fuzzing, not reasoning-then-repro -- found two real tokenizer bugs, both fixed this round
+
+Round 70. Two clean fresh-sweep rounds in a row (68-69) suggested the
+reasoning-then-targeted-repro method itself might be showing
+diminishing returns, so this round deliberately switched METHOD:
+property-based/fuzz testing against `foundry/sarva_foundry/tokenizer/
+bpe.py`'s `ByteLevelBPETokenizer` -- ~280 checks across empty/single-
+char strings, 200+ random strings mixing Latin/Arabic/CJK/emoji code
+points, 200KB+ repeated-pattern strings (stressing BPE merge logic),
+null bytes and C0 control chars, lone UTF-16 surrogates, degenerate
+training corpora, boundary vocab sizes, and thirteen kinds of
+malformed `decode()` input (negative/huge/float/str/None/bool/nested
+ids). Confirmed the module's prior round-27 fixes (OOV-id handling,
+special-token collisions) stay fixed. Two real, fixable bugs survived
+verification; both shipped this round.
+
+### Bug 1: every underscore silently vanished
+
+`_PRETOKENIZE_PATTERN`'s punctuation alternative, `[^\s\w]+` ("not
+whitespace, not a word character"), silently excluded `_` from
+matching anything at all. Python's `\w` includes underscore, so
+`[^\s\w]` excludes it -- and the letters alternative (`[^\W\d_]+`)
+*also* deliberately excludes underscore, to isolate real letters from
+the rest of `\w`. Between the two, a bare underscore matched no
+alternative in the whole pattern, and `re.findall()` doesn't error on
+an unmatched character -- it just silently skips it. Not a crash: a
+genuine, severe instance of silent data loss, exactly the failure mode
+this project's own "reject, don't guess"/no-fabrication discipline
+treats as worse than a loud error.
+
+**Confirmed live:** `encode("snake_case_variable")` decoded back to
+`"snakecasevariable"` -- every underscore gone, no exception, no
+warning. This corrupted more than one-off `encode()` calls too:
+`train()` runs the identical pretokenizer over the training corpus
+before ever counting word frequencies, so a real training run over an
+underscore-containing corpus (code, identifiers, filenames) would
+learn a permanently corrupted vocabulary that never even sees the
+character exists -- confirmed with a real 50-line training run.
+Trivially, concretely reachable through the real product:
+`FoundryProvider.generate()` calls `tokenizer.encode()` directly on
+caller-supplied prompt text from `/chat`, `/ws/chat`, or `sarva run`
+-- any ordinary prompt containing code, a filename, a `snake_case`
+identifier, or an environment-variable name would silently lose every
+underscore before the foundry model ever saw it.
+
+**Fixed** by changing the punctuation alternative to `(?:[^\s\w]|_)+`
+-- true punctuation OR underscore, grouped the same way any other
+punctuation run already is (`"a_b"` pretokenizes as `["a", "_", "b"]`,
+`"__init__"` as `["__", "init", "__"]`, matching how a punctuation run
+between two words is already handled elsewhere in this pattern). Real
+GPT-2 tokenization doesn't have this gap at all -- `\p{L}`/`\p{N}`
+don't include `_` either, so a real underscore run falls through to
+the punctuation catch-all and gets its own token(s); this
+implementation's stdlib-`re` approximation of that catch-all just
+happened to accidentally exclude the one character it most needed to
+include.
+
+**Verified live** every repro case now round-trips exactly (`a_b`,
+`_`, `snake_case_variable`, `my_file_name.py`, plus a broader smoke
+test across mixed-case/kebab-case/repeated-underscore inputs).
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own output reproducing itself (`'ab' == 'a_b'` --
+false).
+
+### Bug 2: encode() crashed on a lone UTF-16 surrogate, asymmetric with decode()'s own leniency
+
+The same fuzzing pass also found `_text_to_symbols()` calling
+`text.encode("utf-8")` strictly. A lone (unpaired) UTF-16 surrogate
+code point (e.g. `"\ud800"`) is a real, valid Python `str` value --
+not itself invalid input -- but has no UTF-8 encoding, so the strict
+encode raised an uncaught `UnicodeEncodeError`, asymmetric with
+`decode()`'s own `errors="replace"` handling a few lines below in the
+same file. **Confirmed reachable end to end:** a raw JSON request body
+carrying an embedded lone surrogate passes untouched through
+FastAPI/pydantic's real request parsing into a plain `str` field with
+no validator, then straight into `FoundryProvider.generate()`'s direct
+`tokenizer.encode()` call. `AgentLoop.run()`'s existing broad exception
+handling around `provider.generate()` already turned this into a clean
+`state=failed` rather than crashing the process, but with an
+unhelpful raw exception string as the detail instead of the graceful
+replacement-character behavior this tokenizer already promises on the
+decode side.
+
+**Fixed** by matching the decode side: `text.encode("utf-8",
+errors="replace")`. **Verified live**: `tok.encode("hello \ud800
+world")` no longer raises, and now decodes back to `"hello ? world"`
+(Python's `encode(errors="replace")` substitutes a literal `?`, unlike
+`decode(errors="replace")`'s U+FFFD -- confirmed directly, not
+assumed). **Verified by reverting** and watching the new test fail
+with the exact old `UnicodeEncodeError`.
+
+### Wrap-up
+
+2 new tests, 723 -> 725 Python tests, all passing, `ruff
+check`/`format --check` clean. `docs/foundry/tokenizer.md` gained a
+new subsection directly under "How training works" covering both
+fixes.
+
+**Twenty-four of the last twenty-five rounds (46-67, 70) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** This
+round's own fuzzing pass also checked hundreds of OTHER inputs with no
+other round-trip mismatch or crash surviving verification -- these
+were the two real findings from ~280 checks, not a symptom of a
+broader pattern, which is itself a useful signal: the METHOD (fuzzing)
+found what reasoning-then-repro hadn't in two straight attempts, but
+it also didn't find a flood of new bugs once applied -- consistent
+with the codebase being genuinely well-hardened at this point, just
+not hardened against every possible METHOD of looking for problems.
+
+**One remaining lower-priority finding from the same fuzzing pass,
+noted but not fixed this round:** `decode()` raises an uncaught
+`TypeError` on a malformed (non-int) id in its input list -- genuinely
+ungraceful, but not reachable through any current call site (the only
+caller always passes model-sampled ints), so left alone per this
+project's "don't validate for scenarios that can't happen" discipline.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

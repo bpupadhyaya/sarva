@@ -44,6 +44,28 @@ def test_roundtrip_unseen_unicode_and_emoji():
     assert tok.decode(tok.encode(text)) == text
 
 
+def test_roundtrip_preserves_underscores():
+    # A real bug found by fuzzing _PRETOKENIZE_PATTERN against hundreds
+    # of varied inputs: the punctuation alternative (`[^\s\w]+`) meant
+    # "not whitespace, not a word character" -- and Python's `\w`
+    # includes `_`, so a bare underscore matched NEITHER that
+    # alternative NOR the letters alternative (which also excludes `_`,
+    # deliberately, to isolate real letters) NOR digits NOR whitespace.
+    # It matched nothing at all, and `re.findall` silently DROPS any
+    # input character no alternative matches -- confirmed live,
+    # encode("snake_case_variable") decoded back to
+    # "snakecasevariable", every underscore silently deleted, both from
+    # ordinary text passed to encode() and from the training corpus
+    # itself. Trivially reachable through the real product:
+    # FoundryProvider.generate() encodes caller-supplied prompt text
+    # directly, and any ordinary prompt with code, filenames,
+    # snake_case identifiers, or env-var names would silently lose
+    # every underscore with no error at any layer.
+    tok = _trained()
+    for text in ("a_b", "_", "snake_case_variable", "my_file_name.py", "__init__", "a__b"):
+        assert tok.decode(tok.encode(text)) == text
+
+
 def test_empty_text_roundtrips_to_empty():
     tok = _trained()
     assert tok.encode("") == []
@@ -106,6 +128,27 @@ def test_decode_replaces_invalid_utf8_instead_of_raising():
     result = tok.decode([invalid_id])  # must not raise UnicodeDecodeError
 
     assert "�" in result  # the standard Unicode replacement character
+
+
+def test_encode_replaces_a_lone_utf16_surrogate_instead_of_raising():
+    # A real bug found by the same fuzzing pass that found the
+    # underscore-dropping bug above: a lone (unpaired) UTF-16 surrogate
+    # code point (e.g. "\ud800") is a real, valid Python str value --
+    # not itself invalid input -- but has no UTF-8 encoding, so the
+    # previous strict `.encode("utf-8")` raised an uncaught
+    # UnicodeEncodeError, asymmetric with decode()'s own
+    # errors="replace" handling one test above. Confirmed reachable end
+    # to end: a raw JSON request body carrying an embedded lone
+    # surrogate passes untouched through FastAPI/pydantic's real
+    # request parsing into a plain str field with no validator, then
+    # straight into FoundryProvider.generate()'s tokenizer.encode()
+    # call.
+    tok = _trained()
+    ids = tok.encode("hello \ud800 world")  # must not raise UnicodeEncodeError
+    # Python's own encode(errors="replace") substitutes a literal "?"
+    # for an unencodable character (unlike decode(errors="replace"),
+    # which substitutes U+FFFD) -- confirmed directly, not assumed.
+    assert tok.decode(ids) == "hello ? world"
 
 
 def test_decode_still_roundtrips_valid_text_around_invalid_bytes():

@@ -34,6 +34,79 @@ trained (earliest-learned merge wins when multiple pairs in a word are
 mergeable). Decoding is the exact inverse: token ids → symbols →
 concatenate → map back to raw bytes → UTF-8 decode.
 
+### A real bug found by fuzzing the pretokenizer, not reasoning about it: every underscore silently vanished
+
+A round dedicated to a genuinely different METHOD — property-based
+fuzzing against hundreds of varied inputs, rather than reasoning about
+a specific hypothesis first — found `_PRETOKENIZE_PATTERN`'s
+punctuation alternative, `[^\s\w]+` ("not whitespace, not a word
+character"), silently excluded `_` from matching at all. Python's `\w`
+includes underscore, so `[^\s\w]` excludes it — and the letters
+alternative (`[^\W\d_]+`) *also* deliberately excludes underscore, to
+isolate real letters from the rest of `\w`. Between the two, a bare
+underscore matched no alternative in the whole pattern, and
+`re.findall()` doesn't error on an unmatched character — it just skips
+it, silently.
+
+Confirmed live: `encode("snake_case_variable")` decoded back to
+`"snakecasevariable"` — every underscore gone, with no exception, no
+warning, at any layer. This corrupted more than one-off `encode()`
+calls too: `train()` runs the identical pretokenizer over the training
+corpus before ever counting word frequencies, so a real training run
+over an underscore-containing corpus (code, identifiers, filenames)
+would learn a permanently corrupted vocabulary that never even sees
+the character exists. Real GPT-2 tokenization doesn't have this gap —
+`\p{L}`/`\p{N}` don't include `_` either, so a real underscore run
+falls through to the punctuation catch-all and gets its own token(s);
+this implementation's `\w`-based approximation of that catch-all just
+happened to accidentally exclude the one character it most needed to
+include.
+
+Reachable through the real product, not just the tokenizer in
+isolation: `FoundryProvider.generate()` calls `tokenizer.encode()`
+directly on caller-supplied prompt text from `/chat`, `/ws/chat`, or
+`sarva run` — any ordinary prompt containing code, a filename, a
+`snake_case` identifier, or an environment-variable name would
+silently lose every underscore before the foundry model ever saw it.
+
+Fixed by changing the punctuation alternative to `(?:[^\s\w]|_)+` —
+true punctuation OR underscore, grouped the same way any other
+punctuation run already is (`"a_b"` pretokenizes as `["a", "_",
+"b"]`, `"__init__"` as `["__", "init", "__"]`, mirroring how
+punctuation between two words is handled elsewhere in this pattern).
+Verified live every repro case above now round-trips exactly, plus a
+broader smoke test across mixed-case/kebab-case/repeated-underscore
+inputs. Verified by reverting and watching the new test fail with the
+literal old bug's own output reproducing itself
+(`'ab' == 'a_b'` — false). The fuzzing pass that found this also
+checked hundreds of other inputs (CJK/Arabic/emoji mixes, 200KB+
+repeated-pattern strings, malformed-byte sequences, boundary vocab
+sizes, thirteen kinds of malformed `decode()` input) with no other
+round-trip mismatch or crash surviving verification — this was the one
+real finding, not a symptom of a broader pattern.
+
+The same fuzzing pass also found a second, smaller gap on the encode
+side: `_text_to_symbols()` called `text.encode("utf-8")` strictly, so a
+lone (unpaired) UTF-16 surrogate code point — `"\ud800"`, a real, legal
+Python `str` value with no UTF-8 encoding — raised an uncaught
+`UnicodeEncodeError` instead of encoding at all. Asymmetric with
+`decode()`'s own `errors="replace"` handling just below it in the same
+file. Reachable end to end: a raw JSON request body carrying an
+embedded lone surrogate passes untouched through FastAPI/pydantic's
+real request parsing into a plain `str` field with no validator, then
+straight into `FoundryProvider.generate()`'s `tokenizer.encode()` call
+— `AgentLoop`'s broad exception handling already turned this into a
+clean `state=failed` rather than crashing the process, but with a raw
+exception string instead of the graceful replacement behavior this
+tokenizer already promises elsewhere. Fixed by matching the decode
+side: `text.encode("utf-8", errors="replace")`. Verified live —
+`tok.encode("hello \ud800 world")` no longer raises, and now decodes
+back to `"hello ? world"` (Python's `encode(errors="replace")`
+substitutes a literal `?`, unlike `decode(errors="replace")`'s U+FFFD).
+Verified by reverting and watching the new test fail with the exact
+old `UnicodeEncodeError`. 2 new tests total this round, 723 → 725
+Python tests.
+
 ## Decoding has to survive more than valid input
 
 Encoding a real string always produces ids that decode perfectly by
