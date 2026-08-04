@@ -243,6 +243,41 @@ def test_load_checkpoint_bundle_cache_invalidates_on_a_retrained_checkpoint(tmp_
     assert not torch.equal(first_weight, second_weight)
 
 
+def test_load_checkpoint_bundle_cache_evicts_the_superseded_entry(tmp_path: Path):
+    # A real bug found by giving this cache its own fresh-eyes sweep,
+    # applying the project's own "does yesterday's fix have a bug" lens
+    # to the fix that added it: keyed on (directory, mtime) so a
+    # retrained checkpoint is picked up fresh (see the test above), but
+    # nothing ever evicted the OLD entry once a new one landed for the
+    # same directory. Confirmed live: repeated retrain/re-save/reload
+    # cycles against one checkpoint directory -- the exact "no server
+    # restart needed" workflow this cache exists to support -- left
+    # every superseded model copy resident in memory simultaneously,
+    # even though only the newest is ever reachable again through
+    # ordinary use. A directory only ever has one current mtime at a
+    # time, so an entry under a different mtime for the same resolved
+    # path is permanently unreachable the moment a new one lands.
+    from sarva.providers.foundry_provider import _bundle_cache
+
+    bundle_dir = tmp_path / "toy"
+    _make_bundle(bundle_dir)
+    tokenizer = _tiny_tokenizer()
+    config = _tiny_config(tokenizer)
+    model_pt = bundle_dir / "model.pt"
+
+    for i in range(5):
+        os.utime(model_pt, (time.time() + i + 1, time.time() + i + 1))
+        Trainer(DecoderOnlyTransformer(config)).save_checkpoint(model_pt)
+        load_checkpoint_bundle(bundle_dir)
+
+    entries_for_this_dir = [k for k in _bundle_cache if k[0] == str(bundle_dir.resolve())]
+    assert len(entries_for_this_dir) == 1, (
+        f"expected exactly 1 cache entry for this directory after 5 "
+        f"retrain/reload cycles, found {len(entries_for_this_dir)} -- the old ones "
+        "were never evicted"
+    )
+
+
 def test_discover_checkpoint_bundles_finds_only_complete_bundles(tmp_path: Path):
     _make_bundle(tmp_path / "real")
     (tmp_path / "incomplete").mkdir()

@@ -94,6 +94,34 @@ and watching the new test fail with the exact wrong count (5 calls
 instead of 1) before re-applying. 2 new tests, all 19 pre-existing
 foundry-provider tests pass unchanged.
 
+### The fix above then leaked every superseded checkpoint copy forever — found by sweeping the fix itself
+
+A much later round applied this project's own "does yesterday's fix
+have a bug" lens to `_bundle_cache` itself: keyed on `(directory,
+mtime)` so a retrained checkpoint is picked up fresh — but nothing
+anywhere ever evicted the OLD entry once a new one landed for the same
+directory. Confirmed live: repeated retrain/re-save/reload cycles
+against one checkpoint directory — the exact "no server restart
+needed" workflow this cache exists to support — left every superseded
+model copy resident in memory simultaneously (20 cycles → 20 full
+model copies, 20× a single model's real footprint), even though only
+the newest entry is ever reachable again through ordinary use. Over a
+long-running `sarva serve` process's uptime, with realistic
+(hundreds-of-MB-to-multi-GB) checkpoints, a handful of retrain
+iterations is enough to exhaust memory.
+
+Fixed by evicting every other cached entry for the same resolved
+directory path right before adding the new one — a directory only
+ever has one current mtime at a time, so any entry under a different
+mtime for that same path is permanently unreachable the moment a new
+one lands, and is now removed rather than left to accumulate. Verified
+live both properties hold: the cache stays at exactly one entry after
+20 retrain cycles on one directory, and loading two genuinely distinct
+checkpoint directories still keeps both entries — eviction is scoped
+to the same path, not global. Verified by reverting and watching the
+new test fail with the exact wrong count (5 stale entries instead of
+1). 1 new test, 714 → 715 Python tests.
+
 ## Wiring a bundle into the CLI
 
 Point `SARVA_FOUNDRY_CHECKPOINTS` at a directory of bundles (one

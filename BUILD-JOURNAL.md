@@ -11937,3 +11937,79 @@ Round 63. Checked `core/sarva/eval/benchmarks.py` (still reports honest 0.0 accu
 **Eighteen consecutive rounds now (46-63)** have found real bugs. This round is a useful reminder that a "well-tested API" claim (the `Router`/`Registry` CODE has thorough tests) doesn't cover the DATA that code reads -- `test_router_never_returns_unsupported_modality` proved the mechanism works for vision without ever proving the audio chain's own data was internally consistent.
 
 **Next:** the completeness-audit backlog remains at three items needing external-dependency/scope decisions from the author (a code-execution sandbox tool, web search, image generation). The three infra-blocked items remain deferred (Tauri `csp: null`, RL harness sandboxing, inference batching); the quantization/`Budget` NaN-validation and explicit-partial-`Budget` gaps remain real-but-unreachable. `AgentState.INTERRUPTED` (found dead-but-declared-legal this round) is worth a future look: either wire it up to something real (e.g. a clean cancellation path) or note it's deliberately reserved for a future feature -- not urgent, since a declared-but-unused legal transition is inert, not a live bug.
+
+
+## The round-44 checkpoint-caching fix itself leaked every superseded model copy forever -- found by applying this project's own "does yesterday's fix have a bug" lens to a fix many rounds old
+
+Round 64. Read carefully through `agent/budget.py`, `agent/events.py`,
+`mcp_client.py`, `cli.py`'s `models`/`doctor`/`eval`/`distill`
+commands, the desktop app, the TypeScript SDK, `quantization.py`,
+`fetch.py`'s SSRF guard, `eval/harness.py`'s grader, and the tokenizer
+-- all either already extensively hardened, or the residual edge
+cases found (a grader hyphen/period asymmetry) are low-severity,
+already-accepted tradeoffs, not newly-reachable bugs. Applied the
+project's own recurring lens one layer further back instead:
+`core/sarva/providers/foundry_provider.py`'s checkpoint-loading cache,
+added in round 44 specifically to stop reloading weights from disk on
+every request. The existing test only proves the cache INVALIDATES
+correctly when a checkpoint is retrained and re-saved (new mtime ->
+fresh weights) -- it never checked whether the OLD entry gets evicted.
+
+`_bundle_cache` is a plain, unbounded module-level dict keyed by
+`(resolved_directory_path, model.pt mtime)`, with no eviction anywhere
+in the codebase. Every time a served checkpoint is retrained and
+re-saved in place -- the exact "no server restart needed" workflow
+this cache's own docstring and the server's per-request
+`FoundryProvider` construction are designed to support -- a brand-new
+cache entry is added and the previous one (now permanently
+unreachable except through this dict) is never removed, holding its
+full model weights in memory forever.
+
+**Confirmed live:** 20 retrain/re-save/reload cycles against one
+checkpoint directory (using the project's own toy-checkpoint test
+pattern) left 20 full model copies resident in memory simultaneously
+-- 20x a single model's real footprint -- even though only the very
+latest is ever reachable again through normal use. This is a genuine
+unbounded memory leak, not a contrived input: it's reached by
+completely ordinary use of the exact deployment story this cache was
+built for -- a long-running `sarva serve` process serving a foundry
+checkpoint that gets periodically retrained/fine-tuned and re-saved in
+place, a realistic MLOps iteration loop. With realistic
+(hundreds-of-MB-to-multi-GB) checkpoint sizes, a handful of iterations
+over a server's uptime would exhaust memory and eventually OOM-kill
+`sarva serve` -- the same resource-leak shape as the already-fixed
+`AgentLoop` run-directory leak and the repeated-Ollama-probe fix, just
+one layer deeper in a mechanism that was itself a fix for a different
+problem.
+
+**Fixed** by evicting every other cached entry for the same resolved
+directory path right before adding the new one -- a directory only
+ever has one current mtime at a time, so any entry under a different
+mtime for that same path is permanently unreachable the moment a new
+one lands. **Verified live** two properties: the cache stays at
+exactly one entry after 20 retrain cycles on one directory, AND
+loading two genuinely distinct checkpoint directories still keeps both
+entries (eviction scoped to matching path, not global -- confirmed
+separately so the fix doesn't accidentally break multi-checkpoint
+deployments). **Verified by reverting** and watching the new test fail
+with the exact wrong count -- 5 stale entries instead of 1 -- for a
+5-cycle version of the same repro. 1 new test, 714 -> 715 Python
+tests, all passing, `ruff check`/`format --check` clean.
+`docs/foundry/inference.md` gained a new subsection directly under the
+original round-44 caching fix, the one this closes a gap in.
+
+**Nineteen consecutive rounds now (46-64)** have found real bugs. This
+round is a good reminder that "does yesterday's fix have a bug" isn't
+scoped to yesterday specifically -- it's worth re-applying to fixes
+from MANY rounds back too, especially ones (like a cache) whose own
+correctness has more than one dimension (this one had "invalidates
+correctly" already tested, but "doesn't leak" never was).
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable. `AgentState.INTERRUPTED` (found dead-but-legal in
+round 63) remains an open, low-priority note for a future round.
