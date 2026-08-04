@@ -21,6 +21,8 @@ from sarva.eval.harness import (
     exact_match,
     run_benchmark,
 )
+from sarva.multimodal.content import Message, TextBlock
+from sarva.providers.base import DoneEvent, StopReason, Usage
 from sarva.providers.mock import MockProvider, ScriptedTurn
 
 
@@ -156,6 +158,59 @@ async def test_run_benchmark_records_provider_errors_as_incorrect_not_a_crash():
     assert "rate limited" in report.results[0].output
     # The failure on case "a" must not prevent case "b" from running.
     assert report.results[1].correct is True
+
+
+class _EmptyStreamProvider:
+    """A minimal, structurally-valid third-party Provider (this module's
+    own docstring names grading third-party models a first-class use
+    case) whose generate() ends without ever yielding a DoneEvent or
+    StreamErrorEvent on its 2nd call -- exactly what an ordinary network
+    drop mid-stream does to a not-as-defensively-written adapter, not a
+    contrived shape."""
+
+    name = "flaky"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, request):
+        self.calls += 1
+        if self.calls == 2:
+            return
+        yield DoneEvent(
+            stop_reason=StopReason.END_TURN,
+            message=Message(role="assistant", content=[TextBlock(text="4")]),
+            usage=Usage(),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_run_benchmark_records_a_stream_that_ends_without_a_doneevent_as_incorrect():
+    # A real bug found by giving sarva.providers.base.complete()'s own
+    # callers a fresh-eyes sweep: a provider generator ending without
+    # ever yielding a DoneEvent/StreamErrorEvent raised a bare
+    # RuntimeError, not a ProviderError -- run_benchmark only ever
+    # catches ProviderError around each case, so this crashed the WHOLE
+    # benchmark run and discarded every already-graded case's result,
+    # directly contradicting this module's own "one bad case shouldn't
+    # hide every other case's real result" contract (see the
+    # rate-limited-provider test above, which this mirrors for a
+    # different failure shape).
+    benchmark = Benchmark(
+        name="tiny",
+        cases=[
+            BenchmarkCase(id="a", prompt="2+2?", expected="4"),
+            BenchmarkCase(id="b", prompt="3+3?", expected="4"),
+        ],
+    )
+
+    report = await run_benchmark(benchmark, _EmptyStreamProvider(), model="flaky")
+
+    assert report.results[0].correct is True
+    assert report.results[1].correct is False
+    assert "DoneEvent" in report.results[1].output
 
 
 def test_empty_benchmark_report_has_zero_accuracy_not_a_zerodivisionerror():

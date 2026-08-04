@@ -11592,3 +11592,77 @@ image generation). The three infra-blocked items remain deferred
 (Tauri `csp: null`, RL harness sandboxing, inference batching); the
 quantization/`Budget` NaN-validation and explicit-partial-`Budget` gaps
 remain real-but-unreachable.
+
+
+## `complete()` raised a bare RuntimeError instead of ProviderError, bypassing both the eval harness's per-case resilience AND distill()'s partial-record preservation
+
+Round 57. Checked the TypeScript SDK against a real running `sarva
+serve` instance over both REST and a genuine WebSocket (via the `ws`
+npm package) -- chat, models, doctor, chatStream end to end, invalid
+session, unknown model, all matched cleanly, no bug found. Checked
+`ablation.py` (already fixed) and `quantization.py` (a known,
+genuinely-unreachable deferred gap). Swept `core/sarva/eval/`'s shared
+provider-failure handling instead -- the grader and bundled benchmark
+cases have had prior dedicated rounds, but the harness's own shared
+`complete()` call path never had.
+
+`sarva.providers.base.complete()` (the "drain the stream, return the
+DoneEvent" helper both `run_benchmark` and `distill()` build on) raised
+a bare `RuntimeError`, not a `ProviderError`, whenever a provider's
+`generate()` async generator finished iterating without ever yielding
+a `DoneEvent` or `StreamErrorEvent`. Both real callers that promise
+per-case resilience only ever catch `ProviderError` around each
+individual call -- this exact failure shape slipped straight through
+both safety nets. Concretely reachable, not contrived:
+`sarva.eval.harness`'s own module docstring states grading third-party
+models is a first-class use case (`Provider` is a structural
+`Protocol`), and an ordinary network drop mid-stream against a
+not-as-defensively-written third-party adapter produces exactly this
+shape -- an early-ending generator, no error event, no DoneEvent.
+
+**Confirmed live, two ways.** `run_benchmark`: a 5-case benchmark
+against a provider whose 3rd call ends its stream early crashed the
+WHOLE run with `RuntimeError: provider stream ended without a
+DoneEvent`, discarding the 2 already-graded results and never
+returning a partial `BenchmarkReport` -- `sarva eval` has no wrapping
+try/except around this call either, so this was a raw, unformatted
+traceback to the user. `distill()`: the identical shape bypassed
+`DistillationError` entirely -- the safety net specifically built (one
+dedicated prior round) to preserve already-generated, real,
+potentially-expensive completions as `partial_records` instead of
+throwing them away never even fired, since the exception it catches
+for (`ProviderError`) was never what actually got raised.
+
+**Fixed** by raising `ProviderError` instead of `RuntimeError` --
+caught by both callers exactly like the adjacent `StreamErrorEvent`
+branch already is; this is the identical "stream ended abnormally"
+family, just reached a different way. **Verified live** both callers
+now degrade correctly: `run_benchmark` scores the affected case
+incorrect (`"provider stream ended without a DoneEvent"` recorded as
+its output) and keeps grading the rest; `distill()` raises
+`DistillationError` carrying every record already generated (2 of 2
+preserved in the repro). **Verified by reverting** and watching both
+new tests fail with the literal old bug's own `RuntimeError`
+propagating uncaught instead of the expected clean degradation. 2 new
+tests, 703 -> 705 Python tests, all passing, `ruff check`/`format
+--check` clean. `docs/eval.md` gained a new subsection directly under
+the "ProviderError doesn't sink the whole run" chapter this is a gap
+in.
+
+**Twelve consecutive rounds now (46-57)** have found real bugs. This
+round's finding sits at the seam between two already-hardened modules
+(`sarva.providers.base` and its two callers) -- each individually
+correct in isolation, but the contract between them (which exception
+TYPE a caller can rely on) had one unhandled gap, found only by
+tracing an actual call path end to end rather than reviewing either
+module alone.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation and explicit-partial-`Budget` gaps remain
+real-but-unreachable. A codebase-wide grep confirmed `run_benchmark`
+and `distill()` are the only two real callers of `complete()` --
+both now fixed, no third call site left unchecked.

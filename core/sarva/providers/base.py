@@ -193,4 +193,23 @@ async def complete(provider: Provider, request: GenerateRequest) -> DoneEvent:
             return event
         if isinstance(event, StreamErrorEvent):
             raise ProviderError(f"{event.code}: {event.detail}")
-    raise RuntimeError("provider stream ended without a DoneEvent")
+    # A real bug found by giving this function's own callers a
+    # fresh-eyes sweep: this was a bare RuntimeError, not a
+    # ProviderError -- but both real callers that promise per-case
+    # resilience against a misbehaving provider, `sarva.eval.harness.
+    # run_benchmark` and `sarva.distill.distill`, only ever catch
+    # `ProviderError` around each individual call. Confirmed live: a
+    # provider whose `generate()` async generator ends early with no
+    # `DoneEvent`/`StreamErrorEvent` -- exactly what an ordinary network
+    # drop mid-stream does to a not-as-defensively-written third-party
+    # adapter, and `run_benchmark`'s own module docstring states grading
+    # third-party providers is a first-class use case -- crashed the
+    # WHOLE benchmark run with a raw RuntimeError, discarding every
+    # already-graded case's result, and crashed `distill()` without ever
+    # raising the `DistillationError` it was specifically built to raise
+    # so paid-for completions already generated could be saved as
+    # partial records instead of thrown away. A `ProviderError` here is
+    # caught by both, exactly like the `StreamErrorEvent` branch just
+    # above already is -- this is the same "stream ended abnormally"
+    # family of failure, just reached a different way.
+    raise ProviderError("provider stream ended without a DoneEvent")

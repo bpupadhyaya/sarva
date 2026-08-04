@@ -12,6 +12,8 @@ import os
 
 import pytest
 from sarva.distill import DistillationError, DistillationRecord, distill, load_jsonl, save_jsonl
+from sarva.multimodal.content import Message, TextBlock
+from sarva.providers.base import DoneEvent, StopReason, Usage
 from sarva.providers.mock import MockProvider, ScriptedTurn
 
 
@@ -76,6 +78,49 @@ async def test_distill_error_carries_every_record_already_generated():
         DistillationRecord(prompt="2+2?", completion="four", model="mock"),
     ]
     assert "2/4" in str(excinfo.value)
+
+
+class _EmptyStreamProvider:
+    """A minimal, structurally-valid third-party Provider whose
+    generate() ends without ever yielding a DoneEvent/StreamErrorEvent
+    on its 2nd call -- exactly what an ordinary network drop mid-stream
+    does to a not-as-defensively-written adapter."""
+
+    name = "flaky"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, request):
+        self.calls += 1
+        if self.calls == 2:
+            return
+        yield DoneEvent(
+            stop_reason=StopReason.END_TURN,
+            message=Message(role="assistant", content=[TextBlock(text="Paris")]),
+            usage=Usage(),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_distill_raises_distillationerror_not_a_bare_runtimeerror_on_an_empty_stream():
+    # A real bug found by giving sarva.providers.base.complete()'s own
+    # callers a fresh-eyes sweep: a provider generator ending without a
+    # DoneEvent/StreamErrorEvent raised a bare RuntimeError, not a
+    # ProviderError -- distill() only ever catches ProviderError, so
+    # this bypassed DistillationError entirely, silently discarding the
+    # already-generated record instead of preserving it via
+    # partial_records the way every other real failure already does.
+    provider = _EmptyStreamProvider()
+
+    with pytest.raises(DistillationError) as excinfo:
+        await distill(["capital of France?", "this one fails"], provider, model="mock")
+
+    assert excinfo.value.partial_records == [
+        DistillationRecord(prompt="capital of France?", completion="Paris", model="mock"),
+    ]
 
 
 async def test_distill_passes_the_system_prompt_through():

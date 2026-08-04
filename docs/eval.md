@@ -117,6 +117,36 @@ case is scored incorrect with the error text recorded as its output —
 `run_benchmark()` keeps going rather than aborting the entire benchmark.
 One flaky case shouldn't hide every other case's real result.
 
+### A real gap found by a fresh-eyes sweep of `complete()`'s own callers: one failure shape bypassed that protection entirely
+
+`sarva.providers.base.complete()` (the "drain the stream, return the
+`DoneEvent`" helper both `run_benchmark` and `sarva.distill.distill`
+build on) raised a bare `RuntimeError` — not a `ProviderError` — when a
+provider's `generate()` async generator finished iterating without
+ever yielding a `DoneEvent` or `StreamErrorEvent`. Both real callers
+only ever catch `ProviderError` around each individual call, so this
+one specific failure shape slipped straight through: confirmed live, a
+structurally-valid provider (this chapter's own opening section names
+grading third-party models a first-class use case) whose stream ended
+early — exactly what an ordinary network drop mid-stream does to a
+not-as-defensively-written adapter — crashed the *entire* benchmark
+run, discarding every already-graded case's result, directly
+contradicting the section above. The identical root cause hit
+`distill()` even harder: it bypassed `DistillationError` entirely,
+silently discarding an already-generated (real, potentially expensive)
+completion instead of preserving it via `partial_records` the way
+every other failure already does.
+
+Fixed by raising `ProviderError` instead — caught by both callers
+exactly like the `StreamErrorEvent` branch immediately above it already
+is; this is the same "stream ended abnormally" family of failure, just
+reached a different way. Verified live both callers now degrade
+correctly: `run_benchmark` scores the affected case incorrect and
+keeps going, `distill()` raises `DistillationError` carrying every
+record already generated. Verified by reverting and watching both new
+tests fail with the literal old bug's own `RuntimeError` propagating
+uncaught. 2 new tests.
+
 ## Try it
 
 ```bash
