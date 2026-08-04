@@ -13944,3 +13944,97 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## Two differently-phrased topics that share a slug silently merged, with no record of which topic string a given entry actually used -- the merge is intentional, the silence wasn't
+
+Round 85. Delegated a fresh-eyes sweep to a subagent, explicitly
+steered away from the memory-tools event-loop-blocking bug class (now
+closed across all four tools in rounds 75/83/84) and toward genuinely
+fresh territory. It found a real, different-shaped bug in the same
+general area -- `LongTermMemoryStore`'s own internals, not the tool
+wrapper -- verified and shipped directly this round.
+
+**The bug:** `_slugify()` is a lossy, many-to-one normalization
+(lowercased, punctuation/whitespace collapsed to `-`) with no
+collision check against the file's own original topic string. Two
+different topic strings that happen to slugify identically silently
+share one file, and since `write()` only sets the top-level `#
+{topic}` heading when the file doesn't exist yet, every later write
+under a *differently-phrased* topic string gets filed under whichever
+heading the *first* write happened to create -- with nothing anywhere
+recording which literal string that later write actually used.
+
+**Confirmed live**: `write("Q3 Planning", "Revenue targets for Q3.")`
+then `write("q3-planning", "Unrelated: my favorite pizza topping is
+mushroom.")` landed both entries in one file, `list_topics()` only
+ever showing `q3-planning`, the pizza-topping note reading as
+permanently filed under a "Q3 Planning" heading with zero trace it
+came from a differently-named call.
+
+**Why concretely reachable, not contrived:** this tier is explicitly
+cross-session by design -- a note written in one conversation is
+visible to every future one. The same model producing "Meeting Notes"
+in one conversation and "meeting-notes" or "Meeting notes!" in a
+later, unrelated conversation is an entirely ordinary thing to happen,
+not an adversarial input someone had to construct.
+
+**Why the fix is deliberately narrow:** this project's own existing
+test for this exact collision,
+`test_two_different_topic_names_that_slugify_the_same_share_one_file`,
+already documents the *merge itself* as intentional -- a human-
+friendly slug as file identity is meant to keep near-duplicate topic
+strings from fragmenting a note across several near-identical files,
+which is more useful than harmful. Rejecting a write whose topic
+string doesn't exactly match the file's original heading (the more
+literal "reject, don't guess" analog `SessionStore._sanitize()` uses
+for a related collision shape) would add real friction to the common,
+harmless case of a model rephrasing the same topic slightly across
+calls -- a worse tradeoff than the bug it would close. So only the
+*silence* is fixed here, not the merge.
+
+**Fixed** by giving every entry its own record of the literal topic
+string it was actually written under, whenever that differs from the
+file's original heading: `## {timestamp} (topic: "{actual topic
+string}")` instead of the bare `## {timestamp}` a same-topic repeat
+write still gets. The file stays a complete, honest record of what was
+actually written and under what name, instead of quietly
+misattributing content to whichever topic string happened to create
+the file first.
+
+**Verified live** with three writes together (two under "Q3 Planning,"
+one under "q3-planning" in between): the differently-phrased entry
+alone carries the annotation, both same-topic entries stay unmarked --
+proven directly against the real file content, not just return
+values.
+
+**Verified by reverting** `longterm.py` alone and watching the new
+test fail with the literal old bug reproducing itself: the annotation
+missing entirely, the two topics' entries indistinguishable in the raw
+file text.
+
+**1 new test, 740 -> 741 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new section
+directly after the overlong-topic-name fix chapter, in the same
+`_slugify()`-adjacent family of fixes.
+
+**Thirty-nine of the last forty rounds (46-67, 70-85) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+genuinely different bug SHAPE than the last five rounds' recurring
+"sibling fix not propagated" pattern -- this one is about a lossy
+identity function's collision behavior, not an async-dispatch gap --
+found by deliberately steering a sweep away from a bug class that had
+just been closed, rather than continuing to mine the same vein. Worth
+noting as a useful complement to the "check named siblings" heuristic:
+once a specific bug class in a specific area is genuinely closed,
+moving to fresh territory can surface an entirely different class of
+problem in the same neighborhood, not just more instances of the one
+just fixed.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -476,6 +476,58 @@ for the `.md`/`.md.lock` suffix), raising the same clean, documented
 Verified live that the identical 500-character topic now produces a
 clean validation error with no local path anywhere in it.
 
+### A much later fresh-eyes sweep: two differently-phrased topics that share a slug silently merged, with no record of which topic string a given entry actually used
+
+`_slugify()` is a lossy, many-to-one normalization (lowercased,
+punctuation/whitespace collapsed to `-`) with no collision check
+against the file's own original topic string. Two different topic
+strings that happen to slugify identically — differing only in case,
+spacing, or punctuation — silently share one file, and since `write()`
+only sets the top-level `# {topic}` heading when the file doesn't
+exist yet, every later write under a *differently-phrased* topic
+string gets filed under whichever heading the *first* write happened
+to create, with nothing anywhere recording which literal string that
+later write actually used. Confirmed live:
+`write("Q3 Planning", "Revenue targets for Q3.")` then
+`write("q3-planning", "Unrelated: my favorite pizza topping is
+mushroom.")` landed both entries in one file — `list_topics()` only
+ever shows `q3-planning`, and the pizza-topping note reads as
+permanently filed under a "Q3 Planning" heading with no trace it came
+from a differently-named call. Reachable via any real agent turn: this
+tier is explicitly cross-session by design (a note written in one
+conversation is visible to every future one), so the same model
+producing "Meeting Notes" in one conversation and "meeting-notes" or
+"Meeting notes!" in a later, unrelated one is an entirely ordinary,
+non-adversarial thing to happen, not a contrived attack.
+
+This project's own existing test for this exact collision,
+`test_two_different_topic_names_that_slugify_the_same_share_one_file`,
+already documents the *merge itself* as intentional, not a bug — a
+human-friendly slug as file identity is meant to keep near-duplicate
+topic strings from fragmenting a note across several near-identical
+files, which is more useful than it is harmful. So the fix here is
+narrow on purpose: only the *silence* is closed, not the merge.
+Rejecting a write whose topic string doesn't exactly match the file's
+original heading (the more literal "reject, don't guess" analog
+`SessionStore._sanitize()` already applies to a related collision
+shape) would add real friction to the common, harmless case of a
+model rephrasing the same topic slightly across calls — a worse
+tradeoff than the bug it would close. Fixed instead by giving every
+entry its own record of the literal topic string it was actually
+written under, whenever that differs from the file's original
+heading: `## {timestamp} (topic: "{actual topic string}")` instead of
+the bare `## {timestamp}` a same-topic repeat write still gets. The
+file stays a complete, honest record of what was actually written and
+under what name, instead of quietly misattributing content to
+whichever topic string happened to create the file first. Verified
+live with three writes together (two under "Q3 Planning," one under
+"q3-planning" in between) — the differently-phrased entry alone
+carries the annotation, the two same-topic entries stay unmarked, both
+proven directly against the actual file content. Verified by reverting
+and watching the new test fail with the literal old bug reproducing
+itself — the annotation missing entirely, both entries indistinguishable
+in the raw file text. 1 new test, 740 → 741 total.
+
 ### A real bug found by a fresh-eyes sweep of a genuinely different area: `note` could freeze the whole server, not just one request
 
 After several rounds focused on the agent loop's own subagent

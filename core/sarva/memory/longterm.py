@@ -103,13 +103,49 @@ class LongTermMemoryStore:
     def write(self, topic: str, content: str) -> Path:
         """Appends a timestamped entry to `topic`'s markdown file,
         creating it (with a top-level heading naming the topic) if this
-        is the first note under that topic."""
+        is the first note under that topic.
+
+        A real bug found by a fresh-eyes sweep: `_slugify()` is a lossy,
+        many-to-one normalization (lowercased, punctuation/whitespace
+        collapsed to `-`) with no collision check against the file's own
+        original topic string -- two different topic strings that
+        happen to slugify identically (differing only in case, spacing,
+        or punctuation -- an entirely ordinary, non-adversarial thing
+        for the SAME model to produce across separate, independent
+        conversations, since this tier is explicitly cross-session)
+        silently share one file. Confirmed live: `write("Q3 Planning",
+        ...)` then `write("q3-planning", ...)` landed both entries in
+        the identical file, the second silently filed under the FIRST
+        call's original heading with no signal anywhere that a
+        differently-phrased topic string was actually used.
+        `list_topics()`/`read()` only ever see the one slug -- the
+        second topic string is completely unrecoverable after the
+        write. Merging near-duplicate topic strings onto one file is
+        the intended point of slugifying in the first place (so a model
+        doesn't accidentally fragment "Meeting Notes" across three
+        near-identical files) -- rejecting the write would defeat that
+        purpose and add real friction to the common, harmless case of a
+        model rephrasing the same topic slightly. Fixed narrowly: only
+        the *silence* is the bug, not the merge -- each entry now
+        records the literal topic string it was actually written under
+        whenever that differs from the file's own original heading, so
+        the file stays a complete, honest record instead of quietly
+        misattributing content to whichever topic string happened to
+        create the file first."""
         path = self._path_for(topic)
         lock_path = path.with_suffix(".md.lock")
+        stripped_topic = topic.strip()
         with exclusive_lock(lock_path):
-            existing = path.read_text() if path.is_file() else f"# {topic.strip()}\n"
+            file_exists = path.is_file()
+            existing = path.read_text() if file_exists else f"# {stripped_topic}\n"
+            original_topic = existing.splitlines()[0].removeprefix("#").strip()
             timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-            entry = f"## {timestamp}\n\n{content.strip()}\n"
+            heading = (
+                f"## {timestamp}"
+                if not file_exists or stripped_topic == original_topic
+                else f'## {timestamp} (topic: "{stripped_topic}")'
+            )
+            entry = f"{heading}\n\n{content.strip()}\n"
             atomic_write_text(path, existing.rstrip("\n") + "\n\n" + entry + "\n")
             os.chmod(path, 0o600)
         return path

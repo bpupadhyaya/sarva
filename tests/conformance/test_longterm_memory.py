@@ -101,6 +101,38 @@ def test_two_different_topic_names_that_slugify_the_same_share_one_file(store):
     assert "second note" in text
 
 
+def test_a_differently_phrased_topic_that_shares_a_slug_is_traceable_not_silent(store):
+    # A real bug found by a fresh-eyes sweep: the test above correctly
+    # documents that merging near-duplicate topic strings onto one file
+    # is intentional, not a bug -- but the merge used to be completely
+    # SILENT. The second write's own entry carried no record anywhere
+    # that a differently-phrased topic string ("q3-planning") was
+    # actually used -- only the file's original heading ("Q3 Planning",
+    # from the first write) survived, so the second call's real topic
+    # string was permanently unrecoverable after the write. Confirmed
+    # live before this fix: write("Q3 Planning", ...) then
+    # write("q3-planning", ...) landed both entries in one file with no
+    # way to tell, from the file alone, that the second note was
+    # actually filed under a different literal string. Fixed narrowly:
+    # only the silence is closed, not the merge -- an entry whose own
+    # topic string differs from the file's original heading now records
+    # that literal string alongside its timestamp.
+    store.write("Q3 Planning", "Revenue targets for Q3.")
+    store.write("q3-planning", "Unrelated: my favorite pizza topping is mushroom.")
+    # A same-topic repeat write must NOT get an annotation -- only a
+    # genuinely different literal topic string should.
+    store.write("Q3 Planning", "More revenue detail.")
+
+    text = store.read("Q3 Planning")
+    assert text is not None
+    assert '(topic: "q3-planning")' in text
+    lines = text.splitlines()
+    same_topic_headers = [
+        line for line in lines if line.startswith("## ") and "(topic:" not in line
+    ]
+    assert len(same_topic_headers) == 2  # the two "Q3 Planning" writes, unannotated
+
+
 @_posix_only
 def test_directory_and_files_are_owner_only(store):
     store.write("secrets", "sensitive content")
