@@ -619,6 +619,35 @@ ticks across the same slowed-construction window. Verified by
 reverting and watching the new test fail with the literal old bug's
 own near-zero number reproducing itself. 1 new test, 738 -> 739 total.
 
+### The fourth sibling had it too — `search_notes` never got the lazy-construction fix either, just one tool later in the same file
+
+The very next round applied the exact same comparison one tool
+further: `SearchNotesTool` sits right below `NoteTool` in this file,
+and its own `run()` still called `self._get_store()` as a plain
+argument expression outside the `asyncio.to_thread` dispatch — the
+identical gap `NoteTool` had just been fixed for, in the tool
+immediately preceding it. `SearchNotesTool`'s own existing comment (see
+the earlier `search_notes` fix above) correctly reasoned through
+`search()` itself needing `asyncio.to_thread`, but stopped there
+without noticing `_get_store()`'s own lazy construction needed to be
+*inside* that dispatched call too. Confirmed live with the identical
+methodology: a deliberately slowed `LongTermMemoryStore.__init__`
+froze the event loop for the whole ~1s construction on `search_notes`'s
+first real call, near-zero heartbeat ticks recorded. The existing
+large-notes-directory test for this tool passes a pre-built `store=
+store`, the same masking shape that let the `NoteTool` gap slip past
+its own contended-lock test undetected. Fixed identically: a `_search`
+helper wraps both the lazy construction and the `search()` call
+together, dispatched as one unit through `asyncio.to_thread`. Verified
+live the fix brings the heartbeat count back up to 20 of 20 expected
+ticks. Verified by reverting and watching the new test fail with the
+literal old bug's own near-zero number reproducing itself. With this
+fix, all four memory tools in this file (`remember`, `recall_memory`,
+`note`, `search_notes`) now dispatch their entire lazy-construction-
+plus-store-call path through `asyncio.to_thread` as a single unit,
+closing this exact bug shape across the whole chapter, not just three
+of its four tools. 1 new test, 739 -> 740 total.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools

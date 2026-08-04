@@ -25,6 +25,7 @@ from sarva.memory.longterm import (
     DEFAULT_LONGTERM_MEMORY_DIR,
     LongTermMemoryError,
     LongTermMemoryStore,
+    NoteMatch,
 )
 from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
 from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
@@ -732,6 +733,9 @@ class SearchNotesTool:
             self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
         return self._store
 
+    def _search(self, query: str) -> list[NoteMatch]:
+        return self._get_store().search(query)
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
         # A real bug found by a fresh-eyes sweep: NoteTool.run's own
         # comment above reasoned that this tool "only ever reads (never
@@ -752,7 +756,23 @@ class SearchNotesTool:
         # full ~360ms search, meaning every other in-flight `/chat`/
         # `/ws/chat` turn in a real `sarva serve` process would have
         # frozen too, not just this one tool call.
-        matches = await asyncio.to_thread(self._get_store().search, args["query"])
+        #
+        # A second, independent instance of the identical mistake, found
+        # by a much later fresh-eyes sweep, the same one that just found
+        # it in `NoteTool` a few lines above: `self._get_store()` was
+        # still called directly as an argument expression here, evaluated
+        # eagerly on the event loop *before* `asyncio.to_thread` ever got
+        # control -- only the subsequent `.search` call was actually
+        # dispatched to a thread. On a process's first `search_notes`
+        # call, `_get_store()`'s own lazy construction does real, blocking
+        # filesystem I/O (`Path.mkdir` + `os.chmod`), the identical gap
+        # `NoteTool._write` closes for `note`. Confirmed live: a
+        # deliberately slowed `LongTermMemoryStore.__init__` froze the
+        # event loop for the whole ~1s construction, near-zero heartbeat
+        # ticks during the call. Fixed identically: `_search` wraps both
+        # the lazy construction and the store call together, dispatched
+        # as one unit through `asyncio.to_thread`.
+        matches = await asyncio.to_thread(self._search, args["query"])
         if not matches:
             text = "No notes matched."
         else:

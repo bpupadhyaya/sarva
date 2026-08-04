@@ -13853,3 +13853,94 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The fourth sibling had it too: search_notes never got the lazy-construction fix either, one tool later in the same file as round 83's NoteTool fix
+
+Round 84. Delegated a fresh-eyes sweep to a subagent, steered toward
+fresh territory but explicitly alerted to the "fix shipped in one
+sibling, never propagated to another" pattern the last four rounds
+kept surfacing. It found exactly that shape again -- one tool further
+than round 83's own fix, in the very same file.
+
+**The bug:** `SearchNotesTool.run()` still wrote `await
+asyncio.to_thread(self._get_store().search, args["query"])` --
+`self._get_store()` evaluated eagerly on the event loop, before
+`asyncio.to_thread` ever gets control, exactly the same shape round 83
+fixed for `NoteTool` a few lines above it in this same file. On a
+process's first `search_notes` call, `_get_store()`'s own lazy
+construction (`LongTermMemoryStore(...)`) does real, blocking
+filesystem I/O.
+
+**Why this specific instance is worth naming precisely:**
+`SearchNotesTool`'s own existing comment (from round 75's fix)
+correctly reasoned through the `search()` call itself needing
+`asyncio.to_thread`, and wrapped it -- but stopped there, never
+noticing `_get_store()`'s own lazy construction needed to be *inside*
+that dispatched call too. This is a genuinely different instance from
+round 83's `NoteTool` finding, not a duplicate: round 83 fixed the
+tool immediately above this one in the same file, and this round's
+subagent was explicitly told all four memory tools were "now covered"
+-- yet found a real, live, previously-unfixed gap in the fourth one,
+one call-site pattern later.
+
+**Confirmed live**, using the identical heartbeat methodology
+established across this entire chapter of fixes: a deliberately
+slowed `LongTermMemoryStore.__init__` froze the event loop for the
+whole ~1s construction on `search_notes`'s first call, 1 of ~20
+expected heartbeat ticks landing.
+
+**Why the existing tests never caught it:** both this tool's
+contended-lock-adjacent test (the large-notes-directory test) and its
+sibling `NoteTool`'s original contended-lock test share the identical
+masking shape -- both construct their tool with a *pre-built*
+`store=store` argument, deliberately bypassing `_get_store()`'s lazy-
+construction path to isolate a different, narrower bug (file-I/O
+volume for one, flock contention for the other). Neither test's own
+narrow focus was wrong -- each caught the real bug it was written
+for -- but neither incidentally exercised the lazy-construction path
+either.
+
+**Fixed identically to `NoteTool`'s own shape**: a `_search` helper
+wraps both the lazy `_get_store()` construction and the `search()`
+call together, dispatched as one unit through `asyncio.to_thread`.
+
+**With this fix, all four memory tools in this one file** (`remember`,
+`recall_memory`, `note`, `search_notes`) now dispatch their entire
+lazy-construction-plus-store-call path through `asyncio.to_thread` as
+a single unit -- closing this exact bug shape across the whole
+chapter, not three of its four tools.
+
+**Verified live** after the fix: the identical repro now lands 20 of
+20 expected heartbeat ticks.
+
+**Verified by reverting** `tools.py` alone and watching the new test
+fail with the literal old bug's own near-zero number reproducing
+itself (`1` tick instead of the required minimum of `10`).
+
+**1 new test, 739 -> 740 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new
+subsection directly after round 83's `NoteTool` fix chapter, naming
+this as the fourth-sibling completion of the same fix across the whole
+memory-tools file.
+
+**Thirty-eight of the last thirty-nine rounds (46-67, 70-84) have
+found and shipped real fixes; rounds 68-69 were the two clean
+sweeps.** A fifth consecutive round (after 80, 81, 82, 83) finding a
+fix that shipped in one sibling never propagating to another -- and
+the second round in a row finding it within the exact same file a
+prior round had just touched, despite that file being explicitly
+marked "now covered" in this round's own sweep instructions. Worth
+continuing to note: "these N things share a pattern" is a claim about
+similarity, not a claim that a fix applied to one of them has actually
+reached all N -- checking each named sibling individually, not just
+the one a round happens to start from, is what actually closes a bug
+class instead of leaving it to be rediscovered one sibling at a time.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

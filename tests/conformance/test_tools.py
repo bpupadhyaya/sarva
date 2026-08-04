@@ -938,6 +938,60 @@ async def test_search_notes_does_not_freeze_the_event_loop_on_a_large_notes_dire
     assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
 
 
+async def test_search_notes_does_not_freeze_the_event_loop_while_lazily_constructing_its_store(
+    tmp_path, monkeypatch
+):
+    # A second, independent instance of the identical mistake found and
+    # fixed for `NoteTool` a few tests above, found by the same later
+    # fresh-eyes sweep: the large-notes-directory test above passes a
+    # PRE-BUILT `store=store`, which bypasses `_get_store()`'s own lazy
+    # construction entirely and only exercises `search()`'s own file-I/O
+    # volume -- exactly why this gap slipped past it undetected.
+    # `self._get_store()` was still called directly as an argument
+    # expression in `run()`, evaluated eagerly on the event loop *before*
+    # `asyncio.to_thread` ever got control -- only the subsequent
+    # `.search` call was actually dispatched to a thread. On a process's
+    # first `search_notes` call, `_get_store()`'s own lazy construction
+    # does real, blocking filesystem I/O (`Path.mkdir` + `os.chmod`),
+    # which can be slow on a contended or network-mounted filesystem.
+    # Confirmed live before this fix: a deliberately slowed
+    # `LongTermMemoryStore.__init__` froze the event loop for the whole
+    # ~1s construction, near-zero heartbeat ticks recorded.
+    import sarva.memory.longterm as longterm_module
+
+    real_init = longterm_module.LongTermMemoryStore.__init__
+
+    def slow_init(self, directory=longterm_module.DEFAULT_LONGTERM_MEMORY_DIR):
+        time.sleep(1.0)
+        real_init(self, directory)
+
+    monkeypatch.setattr(longterm_module.LongTermMemoryStore, "__init__", slow_init)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+    search = SearchNotesTool()  # no store given -- lazily builds one on first run()
+    ctx_obj = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+
+    result = await search.run({"query": "anything"}, ctx_obj)
+
+    hb_task.cancel()
+
+    assert not result.is_error
+    # The real, decisive assertion: while run() was blocked on the slow
+    # store construction, the event loop must have kept running other
+    # coroutines -- a near-zero tick count is the literal old bug
+    # reproducing itself (the loop frozen solid for the whole ~1s wait).
+    assert ticks >= 10, f"event loop only ticked {ticks} times -- looks frozen"
+
+
 def test_default_longterm_memory_tools_do_not_open_the_store_until_first_run():
     # Same laziness property as the memory tools above, same reason:
     # BUILTIN_TOOLS constructs these at module import time with no store
