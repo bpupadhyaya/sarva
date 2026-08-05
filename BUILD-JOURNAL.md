@@ -14778,3 +14778,74 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## The identical text/tool-call ordering bug, never propagated from the Gemini adapter to the Ollama adapter's own `generate()` loop
+
+Round 95. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~16 rounds and pointed at
+sibling-propagation gaps, buffer-then-splice patterns, overclaiming
+comments, and unwrapped blocking calls specifically -- with an explicit
+warning to stress-test any blocking-call fix for concurrency
+regressions, learned the hard way last round. It found a real one, and
+this time the pattern was a straightforward sibling-propagation gap,
+not a new concurrency trap.
+
+**The bug**: `OllamaProvider.generate()` accumulated every streamed
+text delta into one running string across the *whole* NDJSON response,
+then spliced it into the final message exactly once -- unconditionally
+first, before every tool call, regardless of when each tool call
+actually arrived relative to the text. Tool calls themselves were
+already appended in true chronological order -- the identical
+asymmetry a much earlier round already found and fixed in
+`google_provider.py`'s own `generate()` loop, just never checked for
+in this sibling adapter.
+
+**Confirmed live**: an ordinary sequential-tool-calling turn against a
+real NDJSON stream shape (reasoning text, a call, more reasoning text,
+another call -- ordinary ReAct-style behavior for local tool-using
+models served via Ollama; llama3.1/qwen2.5/mistral-nemo all support
+this, not a contrived shape) produced one `TextBlock` with both
+segments concatenated, hoisted ahead of both tool calls -- the true
+`[text, call, text, call]` order lost entirely.
+
+**Why concretely reachable**: `AgentLoop.run()` appends this exact,
+corrupted `Message` straight into `transcript_out`/`SessionStore` with
+nothing stripped or corrected, so the misleading merged/misordered
+record is persisted and resent as history on every subsequent turn --
+the identical downstream consequence the Gemini fix already named.
+
+**Fixed** with the same technique the Gemini adapter already uses:
+flush any accumulated text into its own `TextBlock`, in place,
+immediately before each tool call; the trailing flush after the
+stream ends appends rather than inserts at the front.
+
+**Verified live**: the interleaved-turn repro now produces the true
+`[text, call, text, call]` order.
+
+**Verified by reverting** `ollama_provider.py` alone and watching the
+new test fail with the literal old bug's own shape: both text segments
+merged into one block, hoisted ahead of both calls.
+
+**2 new tests, 754 -> 756 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the Gemini interleaving-fix chapter, naming
+the sibling gap explicitly.
+
+**Fifty of the last fifty-one rounds (46-67, 70-95) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** A clean,
+uncomplicated instance of this project's single most recurring bug
+class -- "a fix that shipped in one sibling never propagated to
+another" -- after last round's more dramatic case (a blocking-call fix
+that nearly reopened a different, already-fixed concurrency bug).
+Worth noting the contrast: not every found-and-fixed bug needs a
+stress test or a two-part fix: this one was a straightforward
+copy-the-established-pattern job once the sibling gap was spotted,
+verified with the project's own standard revert-and-verify discipline
+alone.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

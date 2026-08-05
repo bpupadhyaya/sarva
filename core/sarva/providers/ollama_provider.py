@@ -174,7 +174,8 @@ class OllamaProvider:
             ]
 
         text_acc = ""
-        tool_calls_seen: list[dict[str, Any]] = []
+        content: list[object] = []
+        call_index = 0
         done_reason: StopReason = StopReason.END_TURN
 
         try:
@@ -218,8 +219,43 @@ class OllamaProvider:
                     if msg.get("content"):
                         text_acc += msg["content"]
                         yield TextDeltaEvent(text=msg["content"])
+                    # A real bug found by a fresh-eyes sweep, the identical
+                    # gap already found and fixed in google_provider.py,
+                    # just never propagated here: text was accumulated
+                    # into ONE running string across the WHOLE stream and
+                    # only ever spliced into `content` once, unconditionally
+                    # first, after the loop ended -- tool calls were
+                    # appended in true chronological order, but text
+                    # occurring between or after them got silently pulled
+                    # forward and merged, ahead of every tool call, even
+                    # ones that chronologically preceded it. Confirmed
+                    # live: an ordinary sequential-tool-calling turn
+                    # (reasoning text, a call, more reasoning text, another
+                    # call -- ordinary ReAct-style behavior for local
+                    # tool-using models served via Ollama, not contrived)
+                    # produced one TextBlock with both segments concatenated,
+                    # hoisted ahead of BOTH tool calls, corrupting the
+                    # persisted Message AgentLoop appends straight to
+                    # transcript_out/SessionStore and resends as history.
+                    # Fixed by flushing any accumulated text into its own
+                    # TextBlock, in place, immediately before each tool
+                    # call -- text within one uninterrupted run still
+                    # merges into a single block, but a tool call between
+                    # two text runs no longer gets silently reordered
+                    # around.
                     for tc in msg.get("tool_calls", []) or []:
-                        tool_calls_seen.append(tc)
+                        if text_acc:
+                            content.append(TextBlock(text=text_acc))
+                            text_acc = ""
+                        fn = tc.get("function", {})
+                        call = ToolCallBlock(
+                            id=f"ollama-{call_index}",
+                            name=fn.get("name", ""),
+                            arguments=fn.get("arguments", {}),
+                        )
+                        call_index += 1
+                        content.append(call)
+                        yield ToolCallEvent(call=call)
                         done_reason = StopReason.TOOL_USE
                     if chunk.get("done"):
                         break
@@ -234,18 +270,13 @@ class OllamaProvider:
             yield StreamErrorEvent(code="network", detail=str(e), retryable=True)
             return
 
-        content: list[object] = []
+        # Appended, not inserted at the front -- any trailing text (the
+        # ordinary case: a plain END_TURN reply, or reasoning text after
+        # the last tool call in a turn) belongs after every block that
+        # chronologically preceded it, matching the flush-before-append
+        # ordering used for text preceding a tool call above.
         if text_acc:
             content.append(TextBlock(text=text_acc))
-        for i, tc in enumerate(tool_calls_seen):
-            fn = tc.get("function", {})
-            call = ToolCallBlock(
-                id=f"ollama-{i}",
-                name=fn.get("name", ""),
-                arguments=fn.get("arguments", {}),
-            )
-            content.append(call)
-            yield ToolCallEvent(call=call)
 
         yield DoneEvent(
             stop_reason=done_reason,

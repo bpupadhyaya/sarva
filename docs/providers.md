@@ -570,6 +570,39 @@ reverting and watching the new test fail with the literal old bug's
 own shape: both text segments merged into one block, hoisted ahead of
 both calls. 2 new tests, 748 → 750 Python tests.
 
+### The identical ordering bug, never propagated to the Ollama adapter's own `generate()` loop
+
+A later fresh-eyes sweep found the exact same shape one adapter over:
+`OllamaProvider.generate()` accumulated every streamed text delta into
+one running string across the *whole* NDJSON response, then spliced it
+into the final message exactly once — unconditionally first, before
+every tool call, regardless of when each tool call actually arrived
+relative to the text. Tool calls themselves were already appended in
+true chronological order, the identical asymmetry the Gemini fix above
+closed, just never checked for in this sibling adapter.
+
+Confirmed live before this fix: an ordinary sequential-tool-calling
+turn against a real NDJSON stream shape (reasoning text, a call, more
+reasoning text, another call — ordinary ReAct-style behavior for local
+tool-using models served via Ollama, llama3.1/qwen2.5/mistral-nemo all
+support this, not a contrived shape) produced one `TextBlock` with both
+segments concatenated, hoisted ahead of both tool calls — the true
+`[text, call, text, call]` order lost entirely. `AgentLoop.run()`
+appends this exact, corrupted `Message` straight into
+`transcript_out`/`SessionStore` with nothing stripped or corrected, so
+the misleading merged/misordered record is persisted and resent as
+history on every subsequent turn — the identical downstream
+consequence the Gemini fix above already named.
+
+Fixed with the same technique: flush any accumulated text into its own
+`TextBlock`, in place, immediately before each tool call; the trailing
+flush after the stream ends appends rather than inserts at the front.
+Verified live the interleaved-turn repro now produces the true
+`[text, call, text, call]` order. Verified by reverting and watching
+the new test fail with the literal old bug's own shape: both text
+segments merged into one block, hoisted ahead of both calls. 2 new
+tests, 754 → 756 Python tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with

@@ -19,7 +19,7 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from sarva.providers.base import GenerateRequest, StreamErrorEvent, TextDeltaEvent
+from sarva.providers.base import DoneEvent, GenerateRequest, StreamErrorEvent, TextDeltaEvent
 from sarva.providers.ollama_provider import OllamaProvider, _strip_local_prefix, _to_ollama_message
 
 
@@ -250,3 +250,73 @@ async def test_generate_yields_a_clean_stream_error_on_a_malformed_ndjson_line()
     assert isinstance(events[-1], StreamErrorEvent)
     assert events[-1].retryable is True
     assert "malformed streaming response" in events[-1].detail
+
+
+@pytest.mark.asyncio
+async def test_interleaved_text_and_tool_calls_keep_their_chronological_order():
+    # A real bug found by a fresh-eyes sweep, the identical gap already
+    # found and fixed in google_provider.py, just never propagated here:
+    # text was accumulated into one running string across the WHOLE
+    # stream and only ever spliced into the final message ONCE,
+    # unconditionally first -- tool calls were already appended in true
+    # chronological order, but text occurring between or after them got
+    # silently pulled forward and merged ahead of every tool call.
+    # Confirmed live before this fix: an ordinary sequential-tool-calling
+    # turn (reasoning text, a call, more reasoning text, another call --
+    # ordinary ReAct-style behavior for local tool-using models served
+    # via Ollama, not contrived) produced ONE TextBlock with both
+    # segments concatenated, hoisted ahead of BOTH tool calls --
+    # corrupting the persisted Message AgentLoop appends straight to
+    # transcript_out/SessionStore and resends as history on the next turn.
+    import json
+
+    lines = [
+        {"message": {"content": "Let me check the weather. "}, "done": False},
+        {
+            "message": {
+                "content": "",
+                "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "NYC"}}}],
+            },
+            "done": False,
+        },
+        {"message": {"content": "Now let me also check traffic."}, "done": False},
+        {
+            "message": {
+                "content": "",
+                "tool_calls": [{"function": {"name": "get_traffic", "arguments": {"city": "NYC"}}}],
+            },
+            "done": True,
+        },
+    ]
+    body = b"\n".join(json.dumps(x).encode() for x in lines) + b"\n"
+
+    events = [e async for e in _provider(body).generate(_req())]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    shapes = [
+        (type(b).__name__, getattr(b, "text", None) or getattr(b, "name", None))
+        for b in done.message.content
+    ]
+    assert shapes == [
+        ("TextBlock", "Let me check the weather. "),
+        ("ToolCallBlock", "get_weather"),
+        ("TextBlock", "Now let me also check traffic."),
+        ("ToolCallBlock", "get_traffic"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_consecutive_text_deltas_with_no_call_between_them_still_merge_into_one_block():
+    # A sibling check for the fix above: text arriving as multiple
+    # streamed deltas with nothing else interleaved must still collapse
+    # into a single TextBlock, not fragment into one block per delta.
+    body = (
+        b'{"message": {"content": "Hel"}, "done": false}\n'
+        b'{"message": {"content": "lo"}, "done": false}\n'
+        b'{"message": {"content": ", world."}, "done": true}\n'
+    )
+    events = [e async for e in _provider(body).generate(_req())]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    assert len(done.message.content) == 1
+    assert done.message.content[0].text == "Hello, world."
