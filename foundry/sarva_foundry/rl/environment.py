@@ -254,6 +254,34 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
     reader = threading.Thread(target=_pump_stdout, daemon=True)
     reader.start()
 
+    # A real bug found by a fresh-eyes sweep: stdout is drained
+    # concurrently by `_pump_stdout` above specifically so it can never
+    # back up, but stderr was only ever read via `proc.stderr.read()`
+    # AFTER `proc.wait()` returned, below. OS pipes have a small, fixed
+    # kernel buffer (64KB on Linux/macOS) -- a submission that writes
+    # more than that to stderr with nothing draining it blocks on its
+    # own write() syscall once the buffer fills, while THIS thread is
+    # simultaneously blocked inside `proc.wait(timeout=...)` waiting for
+    # a child that can now never exit: a genuine deadlock, broken only
+    # by the task's own wall-clock timeout forcibly killing the process.
+    # Confirmed live: a completely correct, trivial submission
+    # (`assert True`) that merely printed ~200KB to stderr (ordinary
+    # verbose debug logging, Python DeprecationWarnings, a logged
+    # traceback -- not adversarial) reliably hit `timed_out=True,
+    # reward=0.0` regardless of the timeout value, silently corrupting
+    # the training signal by penalizing correct work. Fixed the same way
+    # stdout already is: drained concurrently by its own thread, never
+    # left to fill the pipe while this thread waits on the process.
+    err_lines: list[str] = []
+
+    def _pump_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            err_lines.append(line)
+
+    stderr_reader = threading.Thread(target=_pump_stderr, daemon=True)
+    stderr_reader.start()
+
     deadline = time.monotonic() + timeout
 
     def _remaining() -> float:
@@ -297,8 +325,9 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
         timed_out = True
 
     reader.join(timeout=1.0)
+    stderr_reader.join(timeout=1.0)
     stdout = "".join(out_lines)
-    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    stderr = "".join(err_lines)
 
     if timed_out:
         return TaskResult(passed=False, reward=0.0, stdout=stdout, stderr=stderr, timed_out=True)

@@ -456,6 +456,32 @@ Windows) and killing the whole group on timeout (`os.killpg(...,
 SIGKILL)` on POSIX, `taskkill /F /T` on Windows) instead of just the one
 PID.
 
+**A fifth bug, this time a false-*negative* reward-corruption gap rather
+than a hacking exploit: a correct submission could deadlock and score
+`reward=0.0` for the wrong reason entirely.** `stdout` is drained
+concurrently by its own reader thread specifically so it can never back
+up, but `stderr` was only ever read via `proc.stderr.read()` *after*
+`proc.wait()` returned. OS pipes have a small, fixed kernel buffer
+(64KB on Linux/macOS) — a submission writing more than that to `stderr`
+with nothing draining it blocks on its own `write()` syscall once the
+buffer fills, while `evaluate_submission` is simultaneously blocked
+inside `proc.wait(timeout=...)` waiting for a child that can now never
+exit. A genuine deadlock, broken only by the task's own wall-clock
+timeout forcibly killing the process. Confirmed live: a completely
+correct, trivial submission that merely printed ~200KB to `stderr`
+(ordinary verbose debug logging, `DeprecationWarning`s, a logged
+traceback — not adversarial) reliably scored `timed_out=True,
+reward=0.0` regardless of the timeout value, silently corrupting the
+training signal by penalizing correct work — the opposite direction
+from every prior bug in this function, which all inflated reward for
+code that didn't deserve it. Fixed the same way `stdout` already is:
+`stderr` is now drained by its own concurrent reader thread instead of
+being left to fill the pipe while this function waits on the process.
+Verified live the same submission now completes in milliseconds with
+the full stderr captured; verified by reverting and watching the new
+test fail with the literal old bug's own shape (`timed_out=True` after
+the full 5-second timeout elapsed).
+
 `CODING_TASKS` bundles three small, real, hand-verified tasks — same
 honesty discipline as `sarva.eval.benchmarks.ARITHMETIC`: real problems
 with real, hand-checked reference solutions, not a claim to

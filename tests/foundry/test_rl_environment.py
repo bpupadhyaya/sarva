@@ -65,6 +65,40 @@ def test_infinite_loop_times_out_and_is_scored_as_a_failure():
     assert result.timed_out is True
 
 
+def test_a_correct_submission_that_writes_a_lot_to_stderr_still_passes_quickly():
+    # A real bug found by a fresh-eyes sweep: stdout is drained
+    # concurrently by its own reader thread specifically so it can never
+    # back up, but stderr was only ever read via `proc.stderr.read()`
+    # AFTER `proc.wait()` returned -- OS pipes have a small, fixed kernel
+    # buffer (64KB on Linux/macOS), so a submission writing more than
+    # that to stderr with nothing draining it blocks on its own write()
+    # once the buffer fills, while this function is simultaneously
+    # blocked inside `proc.wait(timeout=...)` waiting for a child that
+    # can now never exit -- a genuine deadlock, broken only by the
+    # task's own wall-clock timeout forcibly killing the process.
+    # Confirmed live before this fix: a completely correct, trivial
+    # submission that merely printed ~200KB to stderr (ordinary verbose
+    # debug logging, DeprecationWarnings, a logged traceback -- not
+    # adversarial) reliably hit timed_out=True/reward=0.0 regardless of
+    # the timeout value, silently penalizing correct work.
+    verbose_submission = (
+        "import sys\n"
+        "def add(a, b):\n"
+        "    for _ in range(2000):\n"
+        "        print('x' * 100, file=sys.stderr)\n"
+        "    return a + b"
+    )
+    t0 = time.monotonic()
+    result = evaluate_submission(_ADD_TASK, verbose_submission, timeout=5.0)
+    elapsed = time.monotonic() - t0
+
+    assert result.timed_out is False, "deadlocked on stderr backpressure"
+    assert result.passed is True
+    assert result.reward == 1.0
+    assert len(result.stderr) > 65536, "stderr was truncated at the OS pipe buffer size"
+    assert elapsed < 1.0, f"took {elapsed:.3f}s -- should complete in milliseconds"
+
+
 def test_a_submission_that_exits_before_test_code_runs_does_not_get_rewarded():
     # A real reward-hacking bug: the combined script is submitted_code
     # followed by task.test_code, so a "solution" that calls sys.exit(0)

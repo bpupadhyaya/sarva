@@ -14849,3 +14849,80 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `evaluate_submission` could deadlock on a correct submission's own stderr output -- a false-negative reward-corruption bug, not a hacking exploit
+
+Round 96. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~17 rounds and pointed at
+sibling-propagation gaps, buffer-then-splice patterns, overclaiming
+comments, and unwrapped blocking calls specifically -- with anthropic_
+provider.py/openai_provider.py flagged high-priority given the same
+text/tool-call ordering bug had just been found in both Ollama and
+Gemini. Neither adapter panned out this round; the sweep found
+something in a completely different area instead: `sarva_foundry.rl.
+environment`'s `evaluate_submission`, the RL coding-task harness's own
+reward function.
+
+**The bug:** `stdout` is drained concurrently by its own reader thread
+specifically so it can never back up, but `stderr` was only ever read
+via `proc.stderr.read()` *after* `proc.wait()` returned. OS pipes have
+a small, fixed kernel buffer (64KB on Linux/macOS) -- a submission
+writing more than that to `stderr` with nothing draining it blocks on
+its own `write()` syscall once the buffer fills, while
+`evaluate_submission` is simultaneously blocked inside
+`proc.wait(timeout=...)` waiting for a child that can now never exit.
+A genuine deadlock, broken only by the task's own wall-clock timeout
+forcibly killing the process.
+
+**Confirmed live**: a completely correct, trivial submission
+(`assert True`) that merely printed ~200KB to stderr (ordinary verbose
+debug logging, `DeprecationWarning`s, a logged traceback -- not
+adversarial) reliably hit `timed_out=True`, `reward=0.0` regardless of
+the timeout value (tested at both 5s and 12s, tracking the timeout
+exactly -- proving it's a true deadlock, not incidental slowness). A
+control run with only ~10KB of stderr completed in 0.016s.
+
+**Why this is the interesting one**: this file's own docstring already
+documents three prior reward-hacking bypasses in careful detail --
+all of them false-*positive* bugs, inflating reward for code that
+didn't deserve it. This is the opposite direction: a false-*negative*
+bug that silently corrupts the training signal by penalizing genuinely
+correct work, for a completely ordinary reason (verbose stderr
+logging) with zero malicious intent required.
+
+**Fixed** the same way `stdout` already is: `stderr` is now drained by
+its own concurrent reader thread instead of being left to fill the
+pipe while the function waits on the process.
+
+**Verified live**: the same 200KB-stderr submission now completes in
+0.018s instead of deadlocking, with the full stderr (202000 bytes)
+captured.
+
+**Verified by reverting** `environment.py` alone and watching the new
+test fail with the literal old bug's own shape: `timed_out=True` after
+the full 5-second timeout elapsed.
+
+**1 new test, 756 -> 757 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/training.md` gained a
+new subsection directly after the fourth documented bug in this same
+function (the grandchild-process timeout gap) -- this function's fifth
+real bug across separate rounds, the first one that corrupts reward in
+the direction of penalizing correctness rather than rewarding cheating.
+
+**Fifty-one of the last fifty-two rounds (46-67, 70-96) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** Worth
+naming: `evaluate_submission` has now accumulated five separate real
+bugs across five different rounds, each genuinely different in shape
+(two reward-hacking bypasses, a raw-fd race, an incomplete process-tree
+kill, and now this stderr-pipe deadlock) -- the same lesson this
+project's own `spawn_subagent` chapter already drew from its own
+four-bug history: "already fixed several times" is not itself evidence
+a function is now safe, especially one this deliberately exposed to
+adversarial/edge-case input by design.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
