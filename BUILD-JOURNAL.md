@@ -15022,3 +15022,75 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `POST /chat` and `/ws/chat` rejected every request that sent an explicit empty-string `session`, even though every other use of it already treats "" as no session
+
+Round 98. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~19 rounds, with
+anthropic_provider.py/openai_provider.py's own text-accumulation logic
+flagged high-priority for a third round running given the identical
+bug found in both Ollama and Gemini. Neither adapter panned out again;
+the sweep found something in the server layer instead -- a genuinely
+different failure mode than any of `server/app.py`'s several existing,
+carefully-documented session/JSON-shape fixes.
+
+**The bug:** `chat()`'s `async with store.locked(req.session):` uses
+`SessionStore.locked()`, which special-cases `name is None`
+specifically -- `""` is not `None`, so it reached `SessionStore.
+_sanitize()`'s regex (`^[A-Za-z0-9_-]+$`, requires at least one
+character) and raised `ValueError: invalid session name: ''`, before
+the agent ever ran. Every OTHER use of the same value in the same
+handler already treats `""` identically to no session at all
+(`store.load(req.session) if req.session else []`, `if req.session and
+state == DONE: store.save(...)`) -- a truthy check everywhere except
+the one identity check. `/ws/chat` has the identical pattern.
+
+**Confirmed live**: an otherwise-identical request succeeded with no
+`session` field, succeeded with `session="default"`, and failed
+outright with `session=""` -- every other field held constant, only
+`session` differed.
+
+**Why concretely reachable**: `ChatRequest.session` / the WS frame's
+`session` field are `str | None` with no non-empty constraint, fully
+caller-controlled. Any client that represents "no session yet" as an
+empty string rather than omitting the field or sending `null` -- a
+completely ordinary pattern (a form/state field initialized to `""`
+and always serialized) -- hits this on literally every chat request
+until it happens to special-case empty string away.
+
+**Fixed** by normalizing once, in each handler (`session = req.session
+or None` for `/chat`, `session = payload.get("session") or None` for
+`/ws/chat`), so every downstream use -- `locked()` included -- agrees
+on what "no session" means, instead of a truthy check in most places
+and an identity check in one.
+
+**Verified live**: both endpoints now succeed identically whether
+`session` is omitted, `null`, or `""`.
+
+**Verified by reverting** `server/app.py` alone and watching both new
+tests fail with the literal old bug's own message: `invalid session
+name: ''`.
+
+**2 new tests, 762 -> 764 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the "three more ways to crash /ws/chat"
+chapter, in the same server section as this file's several other
+documented session/JSON-shape fixes.
+
+**Fifty-three of the last fifty-four rounds (46-67, 70-98) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+genuinely fresh bug shape, distinct from every prior fix in this same
+file: not a missing type check, not an uncaught exception type, but a
+plain truthy-check-vs-identity-check mismatch between two pieces of
+code that both handle the same value but were written with different
+assumptions about what "empty" means. Worth remembering as its own
+search heuristic going forward: wherever a value is checked both `if x`
+and `x is None` in different places in the same code path, the two
+checks silently disagree on empty-but-not-None values.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -215,6 +215,23 @@ def create_app() -> FastAPI:
     @app.post("/chat", response_model=ChatResponse)
     async def chat(req: ChatRequest) -> ChatResponse:
         store = SessionStore()
+        # A real bug found by a fresh-eyes sweep: `req.session` is a
+        # caller-controlled `str | None` with no non-empty constraint
+        # (ChatRequest's own schema), and every OTHER use of it below
+        # already treats "" the same as no session at all (`store.load
+        # (req.session) if req.session else []`, `if req.session and
+        # state == DONE`) -- but `store.locked(req.session)` checks `name
+        # is None` specifically, so "" reached `SessionStore._sanitize()`
+        # and raised `ValueError: invalid session name: ''`, before the
+        # agent ever ran. Confirmed live: an otherwise-identical request
+        # succeeded with no `session` field, succeeded with
+        # `session="default"`, and failed outright with `session=""` --
+        # a very ordinary client pattern (a form/state field initialized
+        # to "" and always serialized, rather than omitted or sent as
+        # `null`) hits this on literally every chat request. Normalized
+        # once, here, so every use below -- `locked()` included -- agrees
+        # on what "no session" means.
+        session = req.session or None
         try:
             # The whole load-through-save span of the turn is inside the
             # session lock -- see SessionStore.locked's own docstring for
@@ -224,8 +241,8 @@ def create_app() -> FastAPI:
             # already relied on), so this outer except ValueError is what
             # now catches an invalid name -- entering the `async with`
             # raises before the inner try block below even starts.
-            async with store.locked(req.session):
-                history = store.load(req.session) if req.session else []
+            async with store.locked(session):
+                history = store.load(session) if session else []
                 # A real bug found by actually sending {"image_base64":
                 # "not-valid-base64!!!", ...}: base64.b64decode() raises
                 # binascii.Error (a ValueError subclass) for malformed
@@ -277,7 +294,7 @@ def create_app() -> FastAPI:
                     model_override=req.model,
                     extra_content=extra_content,
                     transcript_out=transcript,
-                    session_id=req.session,
+                    session_id=session,
                 ):
                     if event.type == "state_changed" and event.detail:
                         last_detail = event.detail
@@ -286,8 +303,8 @@ def create_app() -> FastAPI:
                         final_message = event.final_message
                         spend = event.spend
 
-                if req.session and state == AgentState.DONE:
-                    store.save(req.session, transcript)
+                if session and state == AgentState.DONE:
+                    store.save(session, transcript)
 
                 return ChatResponse(
                     state=state,
@@ -403,7 +420,14 @@ def create_app() -> FastAPI:
                 return
 
             message = payload.get("message", "")
-            session = payload.get("session")
+            # The WS counterpart to the identical real bug just fixed for
+            # /chat: raw, schema-less JSON means nothing stops a caller
+            # from sending `"session": ""` -- normalized here, the same
+            # way, so `store.locked(session)`'s `name is None` check and
+            # every truthy `if session` check below agree on what "no
+            # session" means, instead of "" reaching SessionStore.
+            # _sanitize() and raising before the agent ever ran.
+            session = payload.get("session") or None
             auto = bool(payload.get("auto", False))
             model = payload.get("model")
             verify = bool(payload.get("verify", False))

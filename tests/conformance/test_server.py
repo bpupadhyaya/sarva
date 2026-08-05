@@ -205,6 +205,29 @@ def test_chat_with_session_persists_across_requests(tmp_path, monkeypatch):
     assert len(store.load("web-test")) == 4  # 2 turns * (user + assistant)
 
 
+def test_chat_with_an_explicit_empty_session_is_treated_the_same_as_no_session(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: `session=""` reached
+    # `store.locked(req.session)` (which only special-cases `name is
+    # None`, not falsy strings) and raised `ValueError: invalid session
+    # name: ''` from SessionStore._sanitize() -- before the agent even
+    # ran -- even though every OTHER use of `req.session` in this same
+    # handler already treats "" identically to no session at all
+    # (`store.load(req.session) if req.session else []`). Confirmed live
+    # before this fix: an otherwise-identical request succeeded with no
+    # `session` field and with `session="default"`, but failed outright
+    # with `session=""` -- an ordinary client pattern (a form/state
+    # field initialized to "" and always serialized, rather than
+    # omitted or sent as null) hits this on every request.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post("/chat", json={"message": "hello", "session": ""})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "done"
+    assert "hello" in body["message"]
+
+
 async def test_two_concurrent_chat_turns_on_the_same_session_do_not_lose_a_message(
     tmp_path, monkeypatch
 ):
@@ -722,6 +745,28 @@ def test_websocket_with_an_invalid_session_name_fails_cleanly_not_a_bare_disconn
     state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
     assert "invalid session name" in state_changed["detail"]
     assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_an_explicit_empty_session_is_treated_the_same_as_no_session(monkeypatch):
+    # The WS counterpart to the identical real bug just fixed for /chat:
+    # raw, schema-less JSON means nothing stops a caller from sending
+    # `"session": ""`, which used to reach `store.locked(session)` (only
+    # special-cases `name is None`, not falsy strings) and raise the
+    # same `invalid session name: ''` the test above pins for a
+    # genuinely bad name -- even though `store.load(session) if session
+    # else []` right below it already treats "" as no session.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "session": ""})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "done"
 
 
 def test_websocket_with_malformed_image_base64_fails_cleanly_not_a_bare_disconnect(monkeypatch):

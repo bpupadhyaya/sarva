@@ -437,6 +437,31 @@ several frames deep inside `AgentLoop.run()` itself — before
 re-applying. All 29 pre-existing server tests pass unchanged. 4 new
 tests, 566 → 570 Python tests.
 
+**A much later fresh-eyes sweep found `session=""` still fell through
+every one of the fixes above** — a genuinely different failure than
+any of the three JSON-shape gaps just closed, since `""` is a
+perfectly well-typed string. `store.locked(session)` (`SessionStore.
+locked`) special-cases `name is None` specifically; `""` is not
+`None`, so it reached `SessionStore._sanitize()`'s regex and raised
+`ValueError: invalid session name: ''` — even though every OTHER use
+of the same value in both handlers (`store.load(session) if session
+else []`, `if session and state == DONE: store.save(...)`) already
+treats `""` identically to no session at all. Confirmed live: an
+otherwise-identical request succeeded with no `session` field and with
+a real named session, but failed outright with `session=""` — a
+completely ordinary client pattern (a form/state field initialized to
+`""` and always serialized, rather than omitted or sent as `null`)
+hits this on literally every chat request until a client happens to
+special-case it away. Fixed by normalizing once, in each handler
+(`session = req.session or None` for `/chat`, `session = payload.get
+("session") or None` for `/ws/chat`), so every downstream use — `locked()`
+included — agrees on what "no session" means, instead of a truthy
+check in some places and an identity check in another. Verified live
+both endpoints now succeed identically whether `session` is omitted,
+`null`, or `""`. Verified by reverting and watching both new tests
+fail with the literal old bug's own message, `invalid session name:
+''`. 2 new tests, 762 → 764 Python tests.
+
 **Both endpoints also gained an optional `model` field**, the REST/WS
 counterpart to the CLI's own `--model` (see the agent-loop/providers
 chapters for the `UnknownModelError` safety fix that motivated
