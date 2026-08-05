@@ -147,7 +147,28 @@ def answer_reward(completion_text: str, expected_answer: str) -> float:
     # `(?!\.\d)`, that only rejects a match followed by a decimal point
     # *and then another digit* -- not by a bare trailing `.`, so an
     # ordinary sentence-ending period stays matchable.
-    pattern = r"(?<![\w.-])" + re.escape(expected_answer) + r"(?!\w)(?!\.\d)"
+    #
+    # A sixth real reward-hacking exploit, introduced by the fifth
+    # bug's own fix and found by a much later fresh-eyes sweep,
+    # independently of the identical gap found and fixed in
+    # `sarva.eval.harness.contains_match`: `(?!\.\d)` rejects ANY digit
+    # right after the decimal point, including an all-zero continuation
+    # that's numerically the exact same value, not a genuinely
+    # different one -- a false NEGATIVE this time, not a false
+    # positive. Confirmed directly: `answer_reward("<think>...</think>
+    # The answer is 9.0", "9")` returned `0.0` before this fix, even
+    # though "9.0" is mathematically exactly "9" -- an entirely
+    # ordinary sampled completion shape for an undertrained model doing
+    # float-style arithmetic, not contrived. This silently denies real
+    # training reward for a genuinely correct answer, corrupting the RL
+    # signal in the opposite direction from every prior bug in this
+    # function (those all inflated reward for a wrong answer; this one
+    # deflates it for a right one). Fixed the identical way `contains_
+    # match` was: widened to `(?!\.\d*[1-9])`, which still rejects a
+    # decimal point followed by any digit sequence containing a genuine
+    # nonzero digit ("9.5", "9.05" still correctly rejected), but no
+    # longer rejects one followed only by zeros ("9.0", "9.00").
+    pattern = r"(?<![\w.-])" + re.escape(expected_answer) + r"(?!\w)(?!\.\d*[1-9])"
     return 1.0 if re.search(pattern, answer_segment) else 0.0
 
 

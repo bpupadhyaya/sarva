@@ -115,6 +115,35 @@ def test_contains_match_is_not_decimal_blind():
     assert contains_match("The answer is 0.9.", case_decimal)
 
 
+def test_contains_match_does_not_reject_an_integer_answer_formatted_as_a_float():
+    # A fourth bug, introduced by the decimal-blindness fix above and
+    # found by a much later fresh-eyes sweep: the fix's own lookahead
+    # rejected ANY digit right after the decimal point, including an
+    # all-zero continuation that's numerically the exact same value,
+    # not a genuinely different one. Confirmed live via this project's
+    # own bundled ARITHMETIC division cases again: a model answering
+    # "12.0" for div-1 (84 / 7, expected "12") or "9.0" for div-2
+    # (45 / 5, expected "9") -- an entirely ordinary response shape,
+    # since many models default to float-style output for division --
+    # was scored correct=False despite being mathematically exactly
+    # right, silently under-reporting real accuracy with no error or
+    # warning. The opposite direction from every prior bug pinned above
+    # (those all inflated a wrong answer's score; this one deflates a
+    # right answer's).
+    case_9 = BenchmarkCase(id="div-2", prompt="p", expected="9")
+    assert contains_match("9.0", case_9)
+    assert contains_match("The answer is 9.00", case_9)
+
+    case_12 = BenchmarkCase(id="div-1", prompt="p", expected="12")
+    assert contains_match("12.0", case_12)
+    assert contains_match("The answer is 12.0", case_12)
+    # A genuinely different decimal value must still be rejected -- the
+    # widened lookahead must not accidentally accept any decimal at all.
+    assert not contains_match("12.5", case_12)
+    assert not contains_match("12.05", case_12)
+    assert not contains_match("12.10", case_12)
+
+
 def test_arithmetic_benchmark_is_bundled_and_has_real_cases():
     assert ARITHMETIC.name == "arithmetic"
     assert len(ARITHMETIC.cases) == 10

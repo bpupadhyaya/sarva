@@ -136,8 +136,28 @@ def contains_match(output: str, case: BenchmarkCase) -> bool:
     bare trailing `.`, which stays allowed so an ordinary
     sentence-ending period (`"The answer is 12."`) still matches
     correctly; only a genuine decimal continuation (`"12.5"`) is now
-    rejected."""
-    pattern = r"(?<![\w.-])" + re.escape(case.expected.strip()) + r"(?!\w)(?!\.\d)"
+    rejected.
+
+    A fourth bug, introduced by the third bug's own fix and found by a
+    much later fresh-eyes sweep: the decimal-continuation lookahead
+    rejected *any* digit right after the decimal point, including an
+    all-zero continuation that's numerically the exact same value, not
+    a genuinely different one. Confirmed live via this project's own
+    bundled `ARITHMETIC` division cases again: a model answering
+    `"12.0"` for `div-1` (`84 / 7`, expected `"12"`) or `"9.0"` for
+    `div-2` (`45 / 5`, expected `"9"`) -- an entirely ordinary response
+    shape, since many models default to float-style output for division
+    -- was scored `correct=False` despite being mathematically exactly
+    right, silently under-reporting real accuracy with no error or
+    warning. The opposite direction from every prior bug in this
+    function (those all inflated a wrong answer's score; this one
+    deflates a right answer's). Fixed by widening the lookahead so it
+    still rejects a decimal point followed by any digit sequence
+    containing a genuine nonzero digit (`"12.5"`, `"12.05"`, `"12.10"`
+    all still correctly rejected), but no longer rejects one followed
+    only by zeros (`"12.0"`, `"12.00"`), since those represent the
+    identical value."""
+    pattern = r"(?<![\w.-])" + re.escape(case.expected.strip()) + r"(?!\w)(?!\.\d*[1-9])"
     return re.search(pattern, output.strip(), re.IGNORECASE) is not None
 
 

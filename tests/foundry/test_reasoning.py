@@ -160,6 +160,33 @@ def test_answer_reward_is_not_decimal_blind():
     assert answer_reward(correct, "9") == 1.0
 
 
+def test_answer_reward_does_not_deny_reward_for_an_integer_formatted_as_a_float():
+    # A sixth real reward-hacking exploit, introduced by the fifth
+    # bug's own fix and found by a much later fresh-eyes sweep,
+    # independently of the identical gap found and fixed in
+    # sarva.eval.harness.contains_match: the decimal-continuation
+    # lookahead rejected ANY digit right after the decimal point,
+    # including an all-zero continuation that's numerically the exact
+    # same value, not a genuinely different one -- a false NEGATIVE
+    # this time, not a false positive. Confirmed directly before this
+    # fix: answer_reward("<think>...</think>The answer is 9.0", "9")
+    # returned 0.0, even though "9.0" is mathematically exactly "9" --
+    # an entirely ordinary sampled completion shape for an undertrained
+    # model doing float-style arithmetic, not contrived. This silently
+    # denied real training reward for a genuinely correct answer,
+    # corrupting the RL signal in the opposite direction from every
+    # prior bug pinned above (those all inflated reward for a wrong
+    # answer; this one deflates it for a right one).
+    correct_as_float = "<think>4 plus 5</think>The answer is 9.0"
+    assert answer_reward(correct_as_float, "9") == 1.0
+    correct_as_float_padded = "<think>84 divided by 7</think>The answer is 12.00"
+    assert answer_reward(correct_as_float_padded, "12") == 1.0
+    # A genuinely different decimal value must still score zero -- the
+    # widened lookahead must not accidentally reward any decimal at all.
+    wrong_decimal = "<think>4 plus 5</think>The answer is 9.5"
+    assert answer_reward(wrong_decimal, "9") == 0.0
+
+
 def test_reasoning_reward_combines_format_and_answer_with_default_weights():
     both_right = "<think>2+3=5</think>5"
     assert reasoning_reward(both_right, "5") == 1.0  # 0.3*1 + 0.7*1

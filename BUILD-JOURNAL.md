@@ -15837,3 +15837,88 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## The eval grader's decimal-continuation fix overshot -- a mathematically correct float-formatted answer scored as wrong, in both `contains_match` and its copied sibling `answer_reward`
+
+Round 108. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the "checked too late"/subprocess argv-size heuristics from
+the last two rounds. It found something in a completely different
+area instead: `core/sarva/eval/harness.py`'s `contains_match` grader
+-- the exact function this project's own docstring already documents
+two prior real bugs in (a 30%-vs-honest-0% false-positive bug, then a
+sign-blindness bug), this time a third bug introduced by the fix that
+closed a decimal-point-adjacency gap found in an even later round.
+
+**The bug**: `contains_match`'s grading regex ends with `(?!\.\d)` --
+a negative lookahead added specifically to reject a match followed by
+a decimal point and a digit, so a wrong continuation like `"12.5"`
+doesn't score as correct for `expected="12"`. The lookahead doesn't
+distinguish "genuinely wrong decimal continuation" from "the exact
+right integer, just formatted as a float" -- `"12.0"` and `"9.0"` are
+followed by `.` and a digit too, so they're rejected identically to a
+real wrong answer, even though they're numerically exactly equal to
+the expected integer.
+
+**Confirmed live** via the project's own bundled `ARITHMETIC` division
+cases: a model answering `"12.0"` for `div-1` (`84 / 7`, expected
+`"12"`) or `"9.0"` for `div-2` (`45 / 5`, expected `"9"`) -- an
+entirely ordinary response shape, since many models default to
+float-style output for division -- was scored `correct=False` despite
+being mathematically exactly right, silently under-reporting real
+accuracy with no error or warning. Every prior bug in this function
+inflated a wrong answer's score; this one, introduced by the very fix
+meant to close the earlier decimal-point bug, deflates a right
+answer's -- the opposite failure direction, still in the same
+"accuracy number is silently wrong" call site this module's own
+docstring already names twice.
+
+**Sibling-propagation half of the fix**: the identical gap existed in
+`sarva_foundry.train.reasoning.answer_reward`'s own copy of this exact
+regex pattern -- explicitly copied from `contains_match` in an earlier
+round, before this fourth fix existed, the same "copied before the
+later fix landed" gap the sign-blindness and decimal-adjacency fixes
+already named for two earlier rounds in the same two functions. Fixing
+only `contains_match` would have left a real, silent training-reward
+false-negative live in `examples/17_reasoning_token_training.py`'s own
+RL loop, not just a benchmark-reporting gap.
+
+**Fixed** by widening the lookahead from `(?!\.\d)` to
+`(?!\.\d*[1-9])` in both places: still rejects a decimal point
+followed by any digit sequence containing a genuine nonzero digit
+(`"12.5"`, `"12.05"`, `"12.10"` all still correctly rejected), but no
+longer rejects one followed only by zeros (`"12.0"`, `"12.00"`), since
+those represent the identical value.
+
+**Verified live** in both functions: an exactly-correct float-formatted
+answer now scores correctly in each, and a genuinely wrong decimal
+continuation still doesn't in either.
+
+**Verified by reverting** both files together and watching all four
+new tests fail with the literal old bug's own shape: `contains_match
+("9.0", expected="9")` returning `False`, `answer_reward(..., "9")`
+for a `"9.0"` completion returning `0.0`.
+
+**2 new tests, 778 -> 780 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/eval.md` gained a new chapter
+directly after the third-bug (decimal-adjacency) chapter this bug is
+a direct consequence of.
+
+**Sixty-three of the last sixty-four rounds (46-67, 70-108) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+fourth real bug in the same regex, and a sixth in its copied sibling
+-- both functions have now accumulated enough separate real bugs
+across enough separate rounds to be worth naming alongside `spawn_
+subagent` and `evaluate_submission` as functions where "already fixed
+several times" is not itself evidence of safety. Notably this is the
+first bug in this pair that goes the OPPOSITE direction from every
+prior one (deflating a correct score instead of inflating a wrong
+one) -- worth remembering that a fix closing a false-positive gap can
+itself introduce a false-negative one if the boundary condition isn't
+checked from both directions.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

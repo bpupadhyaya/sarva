@@ -143,6 +143,47 @@ Verified by reverting and watching the new test fail with the literal
 old bug reproducing itself: `contains_match("0.9", expected="9")`
 returning `True`. 1 new test, 735 → 736 Python tests.
 
+## A fourth bug, introduced by the third fix's own decimal-continuation lookahead: a mathematically correct float-formatted answer scored as wrong
+
+A much later fresh-eyes sweep found that `(?!\.\d)` — the narrower
+lookahead the third fix above deliberately chose over unconditionally
+excluding `.` — overshot: it rejects a match followed by a decimal
+point and *any* digit, not just a genuinely different one. `"12.0"`
+and `"9.0"` are followed by `.` and a digit too, so they're rejected
+identically to a real wrong continuation like `"12.5"`, even though
+they're numerically exactly equal to the expected integer answer.
+Confirmed live via `ARITHMETIC`'s own bundled division cases again: a
+model answering `"12.0"` for `div-1` (`84 / 7`, expected `"12"`) or
+`"9.0"` for `div-2` (`45 / 5`, expected `"9"`) — an entirely ordinary
+response shape, since many models default to float-style output for
+division — was scored `correct=False` despite being mathematically
+exactly right, silently under-reporting real accuracy with no error or
+warning. Every prior bug in this function inflated a wrong answer's
+score; this one, introduced by the very fix meant to close the third
+bug, deflates a right answer's — the opposite failure direction, in
+the same call site the module's own docstring already flags twice for
+"the accuracy number is silently wrong."
+
+Fixed by widening the lookahead from `(?!\.\d)` to `(?!\.\d*[1-9])`:
+still rejects a decimal point followed by any digit sequence
+containing a genuine nonzero digit (`"12.5"`, `"12.05"`, `"12.10"` all
+still correctly rejected), but no longer rejects one followed only by
+zeros (`"12.0"`, `"12.00"`), since those represent the identical
+value. The identical gap existed in `sarva_foundry.train.reasoning.
+answer_reward`'s own copy of this exact pattern — copied from
+`contains_match` before this fourth fix existed, the same "copied
+before the later fix landed" propagation gap the sign-blindness and
+decimal-adjacency fixes above already named for two earlier rounds —
+fixed the same way there too, closing a real, silent training-reward
+false-negative in `examples/17_reasoning_token_training.py`'s own RL
+loop, not just a benchmark-reporting gap. Verified live in both
+places: a model's exactly-correct float-formatted answer now scores
+correctly, and a genuinely wrong decimal continuation still doesn't.
+Verified by reverting and watching the new tests fail with the literal
+old bug's own shape in both files: `contains_match("9.0", expected="9")`
+returning `False`, `answer_reward(..., "9")` for a `"9.0"` completion
+returning `0.0`. 2 new tests, 778 → 780 Python tests.
+
 ## A `ProviderError` on one case doesn't sink the whole run
 
 If a case's request fails (rate limit, auth, any `ProviderError`), that
