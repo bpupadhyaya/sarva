@@ -146,7 +146,23 @@ class ReadFileTool:
         # WriteFileTool/EditFileTool already force UTF-8 explicitly;
         # this, the plainest and first of the three, never got the same
         # fix.
-        text = p.read_text(encoding="utf-8")
+        # A real bug found by a fresh-eyes sweep: the identical
+        # `asyncio.to_thread` fix already applied four separate times in
+        # this same file (RememberTool._add, RecallMemoryTool._search,
+        # NoteTool._write, SearchNotesTool._search -- each with its own
+        # confirmed live repro of the event loop freezing solid for the
+        # duration of a slow/contended-disk or network-mounted-filesystem
+        # I/O call) never propagated to this tool, or to WriteFileTool/
+        # EditFileTool below -- the three tools an agent actually calls
+        # on essentially every file-editing turn, against arbitrary real
+        # user files, not just this project's own state. Confirmed live
+        # with a real `Path.read_text` slowed to simulate a contended
+        # disk: a heartbeat coroutine that should tick every 0.05s made
+        # ZERO ticks during the whole blocking call, meaning every OTHER
+        # concurrent user's in-flight `/chat`/`/ws/chat` turn in a real
+        # `sarva serve` process would freeze too, for as long as one file
+        # read takes.
+        text = await asyncio.to_thread(p.read_text, encoding="utf-8")
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
 
 
@@ -167,6 +183,10 @@ class WriteFileTool:
         destructive=True,
     )
 
+    def _write(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, content)
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
         # Atomic write, not a direct p.write_text(): this tool runs on
         # essentially every agent file-editing turn, against arbitrary
@@ -177,9 +197,19 @@ class WriteFileTool:
         # 5000-byte file and simulating that exact crash moment: the file
         # became 0 bytes. See sarva.atomic_write for the shared fix, the
         # same one sarva.config/sarva.memory.session already use.
+        #
+        # A real bug found by a fresh-eyes sweep, the same sibling-
+        # propagation gap fixed for ReadFileTool above: both the
+        # directory creation and the atomic write are real, synchronous
+        # filesystem I/O, called directly on the event loop with no
+        # `asyncio.to_thread` -- confirmed live with the identical
+        # zero-heartbeat-ticks repro used for ReadFileTool. `_write`
+        # bundles both calls together (mirroring NoteTool's own
+        # `_write`, which bundles its lazy store construction with its
+        # actual write for the same reason), dispatched as one unit
+        # through `asyncio.to_thread`.
         p = _within_workdir(ctx.workdir, args["path"])
-        p.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(p, args["content"])
+        await asyncio.to_thread(self._write, p, args["content"])
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=f"wrote {p}")])
 
 
@@ -281,7 +311,16 @@ class EditFileTool:
         # does no newline translation at all) preserves whatever the file
         # actually had, byte for byte, for every line this edit doesn't
         # touch.
-        text = p.read_bytes().decode("utf-8")
+        #
+        # A real bug found by a fresh-eyes sweep, the same sibling-
+        # propagation gap fixed for ReadFileTool/WriteFileTool above:
+        # this read is real, synchronous filesystem I/O, called directly
+        # on the event loop with no `asyncio.to_thread` -- confirmed live
+        # with the identical zero-heartbeat-ticks repro. Worse than
+        # ReadFileTool alone, since this tool does BOTH a blocking read
+        # here and a blocking write below in the same call.
+        raw = await asyncio.to_thread(p.read_bytes)
+        text = raw.decode("utf-8")
         count = text.count(old_string)
         if count == 0:
             return ToolResultBlock(
@@ -302,7 +341,8 @@ class EditFileTool:
             )
         n = count if replace_all else 1
         new_text = text.replace(old_string, new_string, n)
-        atomic_write_text(p, new_text)
+        # The write half of the same fix as the read above.
+        await asyncio.to_thread(atomic_write_text, p, new_text)
         plural = "s" if n != 1 else ""
         return ToolResultBlock(
             tool_call_id="", content=[TextBlock(text=f"edited {p} ({n} replacement{plural})")]

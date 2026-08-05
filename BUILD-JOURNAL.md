@@ -16581,3 +16581,77 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `ReadFileTool`/`WriteFileTool`/`EditFileTool` blocked the whole event loop -- the identical `asyncio.to_thread` fix already applied four times in this same file, never propagated to the three tools an agent calls the most
+
+Round 118. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file/bug covered in recent rounds -- explicitly time-
+boxed and capped on sub-agent fan-out this time, after round 116's
+sweep agent stalled. It found that the blocking-call-inside-`async
+def` shape this file's memory tools (`RememberTool`, `RecallMemoryTool`,
+`NoteTool`, `SearchNotesTool`) had each independently needed fixing
+for was never checked against the three built-in file tools sitting
+right above them in the same module.
+
+**The bug**: `ReadFileTool.run()`'s `p.read_text(...)`,
+`WriteFileTool.run()`'s `p.parent.mkdir(...)` + `atomic_write_text(...)`,
+and `EditFileTool.run()`'s `p.read_bytes()` + `atomic_write_text(...)`
+are all real, synchronous filesystem I/O, called directly on the event
+loop with no `asyncio.to_thread` -- despite being the three tools an
+agent actually invokes on essentially every file-editing turn, against
+arbitrary real user files, not just this project's own state.
+
+**Confirmed live** with the same heartbeat-coroutine methodology used
+for every prior instance of this bug class: a deliberately slowed
+`Path.read_text()` froze the entire event loop for the whole call --
+zero heartbeat ticks recorded (4 of ~24 expected, all from warmup/
+cooldown outside the call) instead of ~24 if non-blocking, meaning
+every *other* concurrent user's in-flight `/chat`/`/ws/chat` turn in a
+real `sarva serve` process would freeze too, for as long as one file
+read/write/edit takes. `EditFileTool` is the worst of the three: it
+does both a blocking read and a blocking write in the same call.
+
+**Fixed** identically to the memory tools' own fix: each blocking call
+(or bundle of calls that belong together, mirroring `NoteTool._write`'s
+own bundling of its lazy store construction with its actual write) now
+runs through `asyncio.to_thread`. `WriteFileTool` gained a small
+`_write` helper bundling `mkdir` + `atomic_write_text` together for the
+same reason `NoteTool._write` bundles its own two calls.
+
+**Verified live**: the identical repro now shows the event loop
+ticking throughout each call (24 of ~24 expected) instead of freezing
+solid.
+
+**Verified by reverting** and watching all three new tests fail with
+the literal old bug's own shape: zero heartbeat ticks recorded for
+`ReadFileTool`, `WriteFileTool`, and `EditFileTool` alike.
+
+**3 new tests, 796 -> 799 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+chapter directly after the `replace_all` validation chapter, in the
+same file tools section.
+
+**Seventy-three of the last seventy-four rounds (46-67, 70-118) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A striking instance of the "fix propagated to one sibling,
+never to another" heuristic: this exact bug class had already been
+found and fixed FOUR separate times in this same file's memory tools,
+each with its own extensive comment naming "shared dev servers, lab
+machines, CI runners with persistent home directories" as the
+realistic trigger -- yet the three tools sitting textually above those
+four in the same module, and called far more often in ordinary use,
+went unchecked until this round. Worth carrying forward as its own
+standing question for future sweeps: when a bug class has been fixed
+N times in one file, explicitly check every OTHER function in that
+same file for the identical shape, not just the functions that
+prompted the fix.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

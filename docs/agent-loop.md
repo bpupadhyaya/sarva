@@ -294,6 +294,48 @@ Verified by reverting and watching the new test fail with the literal
 old bug reproducing itself -- all three occurrences silently replaced.
 1 new test, 743 -> 744 total.
 
+### `ReadFileTool`/`WriteFileTool`/`EditFileTool` blocked the whole event loop -- the identical `asyncio.to_thread` fix already applied four times in this same file, never propagated to the three tools an agent calls the most
+
+A much later fresh-eyes sweep found that the blocking-call-inside-
+`async def` shape this file's memory tools (`RememberTool`,
+`RecallMemoryTool`, `NoteTool`, `SearchNotesTool` — see the memory
+chapter) had each independently needed fixing for was never checked
+against the three built-in file tools sitting right above them in the
+same module. `ReadFileTool.run()`'s `p.read_text(...)`,
+`WriteFileTool.run()`'s `p.parent.mkdir(...)` + `atomic_write_text(...)`,
+and `EditFileTool.run()`'s `p.read_bytes()` + `atomic_write_text(...)`
+are all real, synchronous filesystem I/O, called directly on the event
+loop with no `asyncio.to_thread` — despite being the three tools an
+agent actually invokes on essentially every file-editing turn, against
+arbitrary real user files, not just this project's own state.
+
+Confirmed live with the same heartbeat-coroutine methodology used for
+every prior instance of this bug class: a deliberately slowed
+`Path.read_text()` (simulating a contended or network-mounted
+filesystem — this project's own `sarva.config` docstring already names
+"shared dev servers, lab machines, CI runners with persistent home
+directories" as a real, not hypothetical, scenario) froze the entire
+event loop for the whole call — zero heartbeat ticks recorded across
+the window instead of the ~expected count, meaning every *other*
+concurrent user's in-flight `/chat`/`/ws/chat` turn in a real `sarva
+serve` process would freeze too, for as long as one file read/write/
+edit takes. `EditFileTool` is the worst of the three: it does both a
+blocking read and a blocking write in the same call.
+
+Fixed identically to the memory tools' own fix: each blocking call (or
+bundle of calls that belong together, mirroring `NoteTool._write`'s
+own bundling of its lazy store construction with its actual write) now
+runs through `asyncio.to_thread`. `WriteFileTool` gained a small
+`_write` helper bundling `mkdir` + `atomic_write_text` together for the
+same reason `NoteTool._write` bundles its own two calls — dispatching
+them as one unit avoids a window where the directory exists but the
+file write hasn't been dispatched yet. Verified live: the identical
+repro now shows the event loop ticking throughout each call instead of
+freezing solid. Verified by reverting and watching all three new tests
+fail with the literal old bug's own shape — zero heartbeat ticks
+recorded for `ReadFileTool`, `WriteFileTool`, and `EditFileTool` alike.
+3 new tests, 796 → 799 Python tests.
+
 When a model turn ends in `TOOL_USE`, every requested call runs
 concurrently via `asyncio.gather` — not sequentially, and not with the
 model waiting on one before deciding about the next. **Whether a tool

@@ -119,6 +119,116 @@ async def test_read_file_passes_an_explicit_utf8_encoding_not_locale_default(ctx
     assert result.content[0].text == "café Ω 日本語 -- bonjour!"
 
 
+async def test_read_file_does_not_freeze_the_event_loop_on_a_slow_disk(ctx, monkeypatch):
+    # A real bug found by a fresh-eyes sweep: the identical asyncio.
+    # to_thread fix already applied four separate times in this same
+    # file (RememberTool._add, RecallMemoryTool._search, NoteTool._write,
+    # SearchNotesTool._search) never propagated to this tool -- the
+    # plainest and most-called of the three file tools. p.read_text() is
+    # real, synchronous filesystem I/O, called directly on the event
+    # loop with no asyncio.to_thread. Confirmed live before this fix: a
+    # deliberately slowed read froze the ENTIRE event loop for the whole
+    # call -- a heartbeat coroutine that should tick every 0.05s
+    # recorded ZERO ticks across the full window.
+    (Path(ctx.workdir) / "big.txt").write_text("x" * 1000)
+
+    real_read_text = Path.read_text
+
+    def slow_read_text(self, *args, **kwargs):
+        time.sleep(0.3)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", slow_read_text)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+    read = ReadFileTool()
+    result = await read.run({"path": "big.txt"}, ctx)
+    hb_task.cancel()
+
+    assert not result.is_error
+    # The real, decisive assertion: while the slowed read() ran, the
+    # event loop must have kept running other coroutines -- a near-zero
+    # tick count is the literal old bug reproducing itself (the loop
+    # frozen solid for the whole call).
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
+async def test_write_file_does_not_freeze_the_event_loop_on_a_slow_disk(ctx, monkeypatch):
+    # The same sibling-propagation gap fixed for ReadFileTool above:
+    # both the directory creation and the atomic write are real,
+    # synchronous filesystem I/O, called directly on the event loop with
+    # no asyncio.to_thread. Confirmed live before this fix with the
+    # identical zero-heartbeat-ticks repro used above.
+    real_atomic_write_text = tools_module.atomic_write_text
+
+    def slow_atomic_write_text(path, content):
+        time.sleep(0.3)
+        return real_atomic_write_text(path, content)
+
+    monkeypatch.setattr(tools_module, "atomic_write_text", slow_atomic_write_text)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)
+    write = WriteFileTool()
+    result = await write.run({"path": "note.txt", "content": "hello"}, ctx)
+    hb_task.cancel()
+
+    assert not result.is_error
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
+async def test_edit_file_does_not_freeze_the_event_loop_on_a_slow_disk(ctx, monkeypatch):
+    # The same sibling-propagation gap fixed for ReadFileTool/
+    # WriteFileTool above: this tool does BOTH a blocking read
+    # (p.read_bytes()) and a blocking write (atomic_write_text()) in
+    # the same call, called directly on the event loop with no
+    # asyncio.to_thread. Confirmed live before this fix with the
+    # identical zero-heartbeat-ticks repro used above.
+    (Path(ctx.workdir) / "file.txt").write_text("the quick brown fox")
+
+    real_read_bytes = Path.read_bytes
+
+    def slow_read_bytes(self, *args, **kwargs):
+        time.sleep(0.3)
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", slow_read_bytes)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)
+    edit = EditFileTool()
+    result = await edit.run({"path": "file.txt", "old_string": "brown", "new_string": "red"}, ctx)
+    hb_task.cancel()
+
+    assert not result.is_error
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
 @pytest.mark.asyncio
 async def test_edit_replaces_the_one_exact_occurrence(ctx):
     write = WriteFileTool()
