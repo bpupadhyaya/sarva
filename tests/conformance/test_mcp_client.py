@@ -33,7 +33,7 @@ async def test_list_tools_reflects_the_real_server():
     async with _connect() as session:
         tools = await list_mcp_tools(session)
     names = {t.spec.name for t in tools}
-    assert names == {"echo", "fail", "env_var"}
+    assert names == {"echo", "structured_only", "fail", "env_var"}
     echo = next(t for t in tools if t.spec.name == "echo")
     assert echo.spec.input_schema["properties"]["text"]["type"] == "string"
 
@@ -48,6 +48,36 @@ async def test_call_tool_round_trip(tmp_path):
 
     assert not result.is_error
     assert result.content[0].text == "hello from the real client"
+
+
+@pytest.mark.asyncio
+async def test_structured_content_is_not_silently_dropped(tmp_path):
+    # A real bug found by a fresh-eyes sweep: CallToolResult has TWO
+    # separate result fields on the wire -- `content` (unstructured) and
+    # `structuredContent` (a JSON object validated against the tool's
+    # own declared outputSchema) -- and only `content` was ever read
+    # here. The MCP spec only requires a server to include
+    # structuredContent; duplicating it into `content` as backward-
+    # compat text is a SHOULD, not a MUST -- a server built on the
+    # lower-level Server.call_tool decorator (a legitimate, documented
+    # way to build an MCP server) can legitimately send `content=[]`
+    # alongside a real structuredContent, exactly what this fixture's
+    # own `structured_only` tool does (returning a real CallToolResult
+    # directly, FastMCP's own documented escape hatch, to produce this
+    # exact shape against a REAL server, not a mock). Confirmed live
+    # before this fix: the model would have seen a clean, empty success
+    # with the actual computed answer nowhere in it, no error, no signal
+    # anything was lost -- directly contradicting this same module's own
+    # _convert_content fallback, whose whole point is never silently
+    # dropping content it can't fully translate.
+    async with _connect() as session:
+        tools = await list_mcp_tools(session)
+        structured_only = next(t for t in tools if t.spec.name == "structured_only")
+        ctx = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+        result = await structured_only.run({"a": 40, "b": 2}, ctx)
+
+    assert not result.is_error
+    assert any('"sum": 42' in b.text for b in result.content)
 
 
 async def _env_var_result(env: dict[str, str] | None, tmp_path) -> str:

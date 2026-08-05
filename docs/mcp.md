@@ -226,6 +226,47 @@ content type rather than being silently dropped or raising — the same
 "report only what's verifiably known" principle the multimodal degraders
 use for content a layer can't fully consume.
 
+### A much later fresh-eyes sweep found the client only ever read one of `CallToolResult`'s two result fields
+
+`mcp.types.CallToolResult` carries `content` (unstructured) *and*
+`structuredContent` (a JSON object, validated against the tool's own
+declared `outputSchema` when it has one) as two genuinely separate
+fields — `McpToolAdapter.run()` only ever read `content`. The MCP spec
+(2025-06-18) only *requires* a server to send `structuredContent`;
+duplicating it into `content` as backward-compat text is a SHOULD, not
+a MUST. The reference `mcp` SDK auto-enforces that SHOULD only for the
+simple "tool function returns a plain dict" path — its own lower-level
+`Server.call_tool` decorator (a legitimate, documented way to build an
+MCP server) also supports returning `(unstructured_content,
+structured_content)` directly, where a server author can legitimately
+send `content=[]` alongside a real `structuredContent`.
+
+Confirmed live against a **real** MCP server, not a mock — matching
+this module's own established discipline for every claim in this
+file: `tests/fixtures/mcp_echo_server.py` gained a `structured_only`
+tool that returns a real `mcp_types.CallToolResult(content=[],
+structuredContent={"sum": a + b}, isError=False)` directly (FastMCP's
+own documented escape hatch for a tool function that wants to control
+its own result shape exactly). Before this fix, the round trip
+produced `is_error=False` with an entirely empty `content` list — a
+clean, successful-looking tool result the model would see with the
+actual computed answer nowhere in it, no error, no signal anything was
+lost. Directly contradicts this same section's own principle two
+paragraphs up: "report only what's verifiably known... rather than
+being silently dropped."
+
+Fixed by appending `structuredContent`, when present, as its own
+`TextBlock` (`[MCP tool structured result: <json>]`) — appended rather
+than replacing `content`, since a spec-compliant server may have
+already duplicated it into `content` as text, and there's no reliable
+way to detect that duplication from the client side; a harmless repeat
+is a strictly better outcome than sometimes silently losing the only
+copy. Verified live the real round trip above now surfaces `"sum": 42`
+in the returned `ToolResultBlock`. Verified by reverting and watching
+the new test fail with the literal old bug's own shape: `result.
+content` completely empty, no trace of the answer anywhere. 1 new
+test, 768 → 769 Python tests.
+
 ## Verification
 
 `tests/conformance/test_mcp_client.py` runs against a real MCP server

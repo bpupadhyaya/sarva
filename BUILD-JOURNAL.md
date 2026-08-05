@@ -15342,3 +15342,80 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `McpToolAdapter.run()` silently discarded `CallToolResult.structuredContent` -- an entire, real result field never read at all
+
+Round 102. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~23 rounds, with
+`mcp_client.py` and `memory/vector.py` flagged as high-priority since
+neither had been individually swept in over 100 rounds. It found a
+real one in `mcp_client.py` on the first genuinely fresh look at this
+file.
+
+**The bug**: `mcp.types.CallToolResult` carries two separate result
+fields on the wire -- `content` (unstructured) and `structuredContent`
+(a JSON object, validated against the tool's own declared
+`outputSchema` when it has one) -- and `McpToolAdapter.run()` only
+ever read `content`. `grep -rn "structuredContent" core/ tests/`
+returned zero hits anywhere in this project's own code or test suite
+before this round.
+
+**Why this is a real, spec-legal gap, not a hypothetical**: the MCP
+spec (2025-06-18) only *requires* a server to send `structuredContent`;
+duplicating it into `content` as backward-compat text is a SHOULD, not
+a MUST. The reference `mcp` SDK auto-enforces that SHOULD only for the
+simple "tool function returns a plain dict" path -- its own lower-
+level `Server.call_tool` decorator (a legitimate, documented way to
+build an MCP server) also supports returning `(unstructured_content,
+structured_content)` directly, where a server author can legitimately
+send `content=[]` alongside a real `structuredContent`.
+
+**Confirmed live against a real MCP server** (this project's own
+established discipline for this whole file, not a mock):
+`tests/fixtures/mcp_echo_server.py` gained a `structured_only` tool
+returning a real `mcp_types.CallToolResult(content=[],
+structuredContent={"sum": a + b}, isError=False)` directly (FastMCP's
+own documented escape hatch). Before this fix, the round trip produced
+`is_error=False` with an entirely empty `content` list -- a clean,
+successful-looking tool result the model would see with the actual
+computed answer nowhere in it, no error, no signal anything was lost.
+Directly contradicts this same module's own `_convert_content`
+fallback, whose whole stated purpose is never silently dropping
+content it can't fully translate.
+
+**Fixed** by appending `structuredContent`, when present, as its own
+`TextBlock` -- appended rather than replacing `content`, since a
+spec-compliant server may have already duplicated it into `content`
+as text and there's no reliable way to detect that duplication from
+the client side; a harmless repeat is a strictly better outcome than
+sometimes silently losing the only copy.
+
+**Verified live**: the real round trip now surfaces the structured
+answer in the returned `ToolResultBlock`.
+
+**Verified by reverting** `mcp_client.py` alone and watching the new
+test fail with the literal old bug's own shape: `result.content`
+completely empty, no trace of the answer anywhere.
+
+**1 new test, 768 -> 769 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/mcp.md` gained a new subsection
+directly after the "Content conversion, honestly scoped" chapter this
+gap directly contradicts.
+
+**Fifty-seven of the last fifty-eight rounds (46-67, 70-102) have
+found and shipped real fixes; rounds 68-69 were the two clean sweeps.**
+A genuinely fresh bug shape from a genuinely fresh file -- `mcp_client.
+py` had never received a dedicated round in this entire run, despite
+being a real, externally-facing integration surface (any MCP server a
+user connects, arbitrary and remote). Worth a standing reminder: a
+"has this file ever been individually swept" question is itself a
+useful search heuristic distinct from any specific bug-class pattern,
+and this project still has at least one more candidate
+(`core/sarva/memory/vector.py`) that has never had a dedicated round.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

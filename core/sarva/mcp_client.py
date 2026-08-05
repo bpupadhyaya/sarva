@@ -22,6 +22,7 @@ variant").
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -70,6 +71,38 @@ class McpToolAdapter:
     async def run(self, args: dict, ctx: ToolContext) -> ToolResultBlock:
         result = await self._session.call_tool(self.spec.name, args)
         content = [_convert_content(block) for block in result.content]
+        # A real bug found by a fresh-eyes sweep: `CallToolResult` has TWO
+        # separate result fields on the wire -- `content` (unstructured)
+        # and `structuredContent` (a JSON object validated against the
+        # tool's own declared `outputSchema`, when it has one) -- and only
+        # `content` was ever read here. The MCP spec (2025-06-18) only
+        # requires a server to include `structuredContent`; duplicating it
+        # into `content` as backward-compat text is a SHOULD, not a MUST
+        # -- the reference `mcp` SDK auto-enforces that SHOULD only for
+        # the simple "tool function returns a plain dict" path, but its
+        # own lower-level `Server.call_tool` decorator (a legitimate,
+        # documented way to build an MCP server) also supports returning
+        # `(unstructured_content, structured_content)` directly, where a
+        # server author can legitimately send `content=[]` alongside a
+        # real `structuredContent`. Confirmed live: a fake session
+        # returning exactly that shape (`content=[], structuredContent=
+        # {"sum": 42}, isError=False`) produced a ToolResultBlock the
+        # model sees as a clean, empty success -- the actual computed
+        # answer nowhere in it, no error, no signal anything was lost.
+        # Directly contradicts this same function's own `_convert_content`
+        # fallback two lines below, whose whole point is never silently
+        # dropping content it can't fully translate. Appended (not
+        # replacing `content`) since a spec-compliant server may
+        # legitimately have already duplicated it into `content` as text
+        # -- there's no reliable way to detect that duplication from the
+        # client side, and a harmless repeat is a strictly better outcome
+        # than the alternative of sometimes silently losing the only copy.
+        if result.structuredContent is not None:
+            content.append(
+                TextBlock(
+                    text=f"[MCP tool structured result: {json.dumps(result.structuredContent)}]"
+                )
+            )
         return ToolResultBlock(tool_call_id="", content=content, is_error=result.isError)
 
 
