@@ -156,8 +156,29 @@ def contains_match(output: str, case: BenchmarkCase) -> bool:
     containing a genuine nonzero digit (`"12.5"`, `"12.05"`, `"12.10"`
     all still correctly rejected), but no longer rejects one followed
     only by zeros (`"12.0"`, `"12.00"`), since those represent the
-    identical value."""
-    pattern = r"(?<![\w.-])" + re.escape(case.expected.strip()) + r"(?!\w)(?!\.\d*[1-9])"
+    identical value.
+
+    A fifth bug in the same boundary logic, found by a much later
+    fresh-eyes sweep: the comma thousands-separator, exactly the same
+    shape as the `-`/`.` gaps above, was never excluded either. `,` is
+    not `\\w`, so neither side of the boundary blocked it -- confirmed
+    live, both directions: `expected="200"` matched inside a wrong
+    `"1,200"` (the comma right before the match wasn't excluded by the
+    lookbehind, the same way `-` wasn't before its own fix), and
+    `expected="12"` matched inside a wrong `"12,000"` (the comma right
+    after wasn't excluded by the lookahead). Comma-grouped formatting
+    for any answer >= 1000 is completely ordinary model output, not a
+    contrived case -- and unlike the fourth bug's all-zero decimal
+    continuation, a comma-then-digits continuation is *never* the same
+    value as the bare match (`"12,000"` is really twelve thousand, not
+    twelve), so there's no all-zero-style carve-out needed here: this
+    lookahead rejects unconditionally whenever a digit follows the
+    comma. Fixed by adding `,` to the lookbehind's excluded-character
+    set (mirroring `-`/`.`) and a third lookahead, `(?!,\\d)`, that
+    rejects a match immediately followed by a comma and then a digit --
+    an ordinary trailing comma before a space or word (`"12, not 13"`)
+    stays allowed, only a genuine thousands-continuation is rejected."""
+    pattern = r"(?<![\w.,-])" + re.escape(case.expected.strip()) + r"(?!\w)(?!\.\d*[1-9])(?!,\d)"
     return re.search(pattern, output.strip(), re.IGNORECASE) is not None
 
 

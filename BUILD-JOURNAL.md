@@ -16144,3 +16144,76 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A fifth bug in `contains_match`/`answer_reward`'s boundary logic: the comma thousands-separator was never excluded
+
+Round 112. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file covered in the last several rounds, with a
+standing note that `core/sarva/memory/vector.py` is still the one file
+with no fully dedicated round of its own. It found a fifth bug in a
+function already named twice in this journal as accumulating enough
+separate real bugs to be worth watching on its own: `core/sarva/eval/
+harness.py`'s `contains_match`, and its copied sibling
+`sarva_foundry.train.reasoning.answer_reward`.
+
+**The bug**: neither function's boundary lookaround excluded the comma
+thousands-separator -- the exact same shape as the `-`/`.` gaps found
+and fixed in earlier rounds. `,` isn't `\w`, so neither side of the
+`(?<![\w.-])...(?!\w)(?!\.\d*[1-9])` pattern blocked it.
+
+**Confirmed live, both directions**: `expected="200"` matched inside a
+wrong `"1,200"` (the comma right before the match wasn't excluded by
+the lookbehind), and `expected="12"` matched inside a wrong `"12,000"`
+(the comma right after wasn't excluded by the lookahead). Both false
+positives -- a numerically wrong answer scored correct/rewarded 1.0.
+Comma-grouped formatting for any answer >= 1000 is completely ordinary
+model output, not contrived -- this harness's own docstring names
+grading real third-party/foundry models a first-class use case, and
+the identical gap in `answer_reward` corrupts the actual RL training
+signal, not just a benchmark report.
+
+**Fixed** by adding `,` to the lookbehind's excluded-character set
+(mirroring `-`/`.`) and a third lookahead, `(?!,\d)`, that rejects a
+match immediately followed by a comma and then a digit. Unlike the
+fourth bug's all-zero decimal continuation, a comma-then-digits
+continuation is *never* the same value as the bare match (`"12,000"`
+is really twelve thousand, not twelve), so no all-zero-style carve-out
+was needed -- the lookahead rejects unconditionally whenever a digit
+follows the comma. An ordinary trailing comma before a space or word
+(`"12, not 13"`) stays matchable; only a genuine thousands-continuation
+is rejected. Applied identically in both `contains_match` and
+`answer_reward`, the same propagation-gap pattern already named for
+every prior fix in this pair of functions.
+
+**Verified live** in both places: a wrong comma-formatted answer no
+longer scores/rewards as correct, and an ordinary trailing comma or a
+genuinely comma-formatted expected answer both still match correctly.
+
+**Verified by reverting** and watching the new tests fail with the
+literal old bug's own shape in both files: `contains_match("1,200",
+expected="200")` and `contains_match("12,000", expected="12")` both
+returning `True`, `answer_reward(..., "200")` for a `"1,200"`
+completion returning `1.0`.
+
+**2 new tests, 784 -> 786 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/eval.md` gained a new chapter
+directly after the fourth-bug chapter this bug sits alongside.
+
+**Sixty-seven of the last sixty-eight rounds (46-67, 70-112) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A fifth real bug in the same regex, a seventh in its copied
+sibling -- these two functions continue to be the strongest evidence
+in this project that "already fixed several times" is not itself
+evidence of safety; each fix has closed one specific adjacency
+character without ever proving the class of "characters this boundary
+logic must treat as significant" was exhaustively enumerated.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

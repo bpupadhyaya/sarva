@@ -184,6 +184,45 @@ old bug's own shape in both files: `contains_match("9.0", expected="9")`
 returning `False`, `answer_reward(..., "9")` for a `"9.0"` completion
 returning `0.0`. 2 new tests, 778 → 780 Python tests.
 
+## A fifth bug in the same boundary logic, unaddressed by any fix above: the comma thousands-separator
+
+A much later fresh-eyes sweep checked the same function a fifth time,
+rather than assuming four rounds of fixes had closed every gap in the
+boundary logic's shape. The comma thousands-separator — exactly the
+same shape as the `-`/`.` gaps found and fixed earlier — was never
+excluded either: `,` isn't `\w`, so neither side of the boundary
+blocked it. Confirmed live, both directions: `expected="200"` matched
+inside a wrong `"1,200"` (the comma right before the match wasn't
+excluded by the lookbehind, same as `-` wasn't before its own fix), and
+`expected="12"` matched inside a wrong `"12,000"` (the comma right
+after wasn't excluded by the lookahead). Comma-grouped formatting for
+any answer ≥ 1000 is completely ordinary model output — the harness's
+own opening section names grading real third-party/foundry models a
+first-class use case, not just the small bundled `ARITHMETIC`
+benchmark, whose largest expected value happens not to trigger this.
+
+Unlike the fourth bug's all-zero decimal continuation, a
+comma-then-digits continuation is *never* the same value as the bare
+match (`"12,000"` is really twelve thousand, not twelve) — so there's
+no all-zero-style carve-out needed here, unlike the decimal case just
+above. Fixed by adding `,` to the lookbehind's excluded-character set
+(mirroring `-`/`.`) and a third lookahead, `(?!,\d)`, that rejects a
+match immediately followed by a comma and then a digit — an ordinary
+trailing comma before a space or word (`"12, not 13"`) stays
+matchable, only a genuine thousands-continuation is rejected. The
+identical gap existed in `sarva_foundry.train.reasoning.answer_reward`'s
+own copy of this pattern, the same "copied before the later fix
+landed" propagation gap named for every prior fix in this function —
+fixed the same way there too. Verified live in both places: a wrong
+comma-formatted answer no longer scores/rewards as correct in either
+direction, and an ordinary trailing comma or a genuinely
+comma-formatted expected answer both still match correctly. Verified
+by reverting and watching the new tests fail with the literal old
+bug's own shape in both files: `contains_match("1,200", expected="200")`
+and `contains_match("12,000", expected="12")` both returning `True`,
+`answer_reward(..., "200")` for a `"1,200"` completion returning `1.0`.
+2 new tests, 784 → 786 Python tests.
+
 ## A `ProviderError` on one case doesn't sink the whole run
 
 If a case's request fails (rate limit, auth, any `ProviderError`), that

@@ -168,7 +168,32 @@ def answer_reward(completion_text: str, expected_answer: str) -> float:
     # decimal point followed by any digit sequence containing a genuine
     # nonzero digit ("9.5", "9.05" still correctly rejected), but no
     # longer rejects one followed only by zeros ("9.0", "9.00").
-    pattern = r"(?<![\w.-])" + re.escape(expected_answer) + r"(?!\w)(?!\.\d*[1-9])"
+    #
+    # A seventh real reward-hacking exploit, found by a much later
+    # fresh-eyes sweep, independently of the identical gap found and
+    # fixed in `sarva.eval.harness.contains_match`: the comma
+    # thousands-separator, exactly the same shape as the `-`/`.` gaps
+    # above, was never excluded either. Confirmed directly, both
+    # directions: `answer_reward("<think>...</think>The answer is
+    # 1,200", "200")` returned `1.0` (the comma right before the match
+    # wasn't excluded by the lookbehind), and `answer_reward("<think>
+    # ...</think>The answer is 12,000", "12")` also returned `1.0` (the
+    # comma right after wasn't excluded by the lookahead) -- both
+    # inflate reward for a numerically wrong completion, the same false-
+    # positive direction as the sign-blindness and decimal-adjacency
+    # bugs above. Comma-grouped formatting for any answer >= 1000 is
+    # completely ordinary sampled-completion output, not contrived.
+    # Unlike the sixth bug's all-zero decimal continuation, a
+    # comma-then-digits continuation is *never* the same value as the
+    # bare match ("12,000" is really twelve thousand, not twelve), so
+    # no all-zero-style carve-out is needed: the new lookahead rejects
+    # unconditionally whenever a digit follows the comma. Fixed the
+    # identical way `contains_match` was: `,` added to the lookbehind's
+    # excluded-character set, and a third lookahead, `(?!,\d)`, that
+    # rejects a match immediately followed by a comma and then a digit
+    # -- an ordinary trailing comma before a space or word stays
+    # matchable, only a genuine thousands-continuation is rejected.
+    pattern = r"(?<![\w.,-])" + re.escape(expected_answer) + r"(?!\w)(?!\.\d*[1-9])(?!,\d)"
     return 1.0 if re.search(pattern, answer_segment) else 0.0
 
 

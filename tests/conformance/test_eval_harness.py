@@ -144,6 +144,35 @@ def test_contains_match_does_not_reject_an_integer_answer_formatted_as_a_float()
     assert not contains_match("12.10", case_12)
 
 
+def test_contains_match_is_not_comma_blind():
+    # A fifth bug in the same boundary logic, found by a much later
+    # fresh-eyes sweep: the comma thousands-separator, exactly the same
+    # shape as the "-"/"." gaps above, was never excluded either -- ","
+    # isn't \w, so neither side of the boundary blocked it. Confirmed
+    # live, both directions: expected="200" matched inside a wrong
+    # "1,200" (the comma right before the match wasn't excluded), and
+    # expected="12" matched inside a wrong "12,000" (the comma right
+    # after wasn't excluded) -- both wrong answers scored correct=True.
+    # Comma-grouped formatting for any answer >= 1000 is completely
+    # ordinary model output, not contrived.
+    case_200 = BenchmarkCase(id="big-mul", prompt="p", expected="200")
+    assert not contains_match("Let me compute: 40 * 30 = 1,200.", case_200)
+    assert not contains_match("The total comes to 1,200,000 after tax.", case_200)
+    assert contains_match("The answer is 200.", case_200)  # the real fix must not break this
+
+    case_12 = BenchmarkCase(id="y", prompt="p", expected="12")
+    assert not contains_match("The total is 12,000 dollars.", case_12)
+    # An ordinary trailing comma before a space or word (not a genuine
+    # thousands continuation) must still match -- only a comma followed
+    # by another digit is a real thousands-group, not just any comma.
+    assert contains_match("The answer is 12, not 13.", case_12)
+
+    # A genuinely comma-formatted expected answer must still match itself.
+    case_comma = BenchmarkCase(id="fmt-1", prompt="p", expected="1,200")
+    assert contains_match("1,200", case_comma)
+    assert contains_match("The total is 1,200 dollars.", case_comma)
+
+
 def test_arithmetic_benchmark_is_bundled_and_has_real_cases():
     assert ARITHMETIC.name == "arithmetic"
     assert len(ARITHMETIC.cases) == 10

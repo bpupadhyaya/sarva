@@ -187,6 +187,33 @@ def test_answer_reward_does_not_deny_reward_for_an_integer_formatted_as_a_float(
     assert answer_reward(wrong_decimal, "9") == 0.0
 
 
+def test_answer_reward_is_not_comma_blind():
+    # A seventh real reward-hacking exploit, found by a much later
+    # fresh-eyes sweep, independently of the identical gap found and
+    # fixed in sarva.eval.harness.contains_match: the comma
+    # thousands-separator, exactly the same shape as the "-"/"." gaps
+    # above, was never excluded either. Confirmed directly, both
+    # directions: answer_reward("<think>...</think>The answer is
+    # 1,200", "200") returned 1.0 (the comma right before the match
+    # wasn't excluded), and answer_reward("<think>...</think>The answer
+    # is 12,000", "12") also returned 1.0 (the comma right after wasn't
+    # excluded) -- both inflate reward for a numerically wrong
+    # completion. Comma-grouped formatting for any answer >= 1000 is
+    # completely ordinary sampled-completion output, not contrived.
+    wrong_leading = "<think>40 times 30</think>The answer is 1,200."
+    assert answer_reward(wrong_leading, "200") == 0.0
+    wrong_trailing = "<think>a big number</think>The total is 12,000 dollars."
+    assert answer_reward(wrong_trailing, "12") == 0.0
+    # An ordinary trailing comma before a space or word (not a genuine
+    # thousands continuation) must still reward correctly.
+    correct = "<think>4 plus 8</think>The answer is 12, not 13."
+    assert answer_reward(correct, "12") == 1.0
+    # A genuinely comma-formatted expected answer must still reward
+    # itself exactly.
+    correct_comma_formatted = "<think>a big number</think>The total is 1,200 dollars."
+    assert answer_reward(correct_comma_formatted, "1,200") == 1.0
+
+
 def test_reasoning_reward_combines_format_and_answer_with_default_weights():
     both_right = "<think>2+3=5</think>5"
     assert reasoning_reward(both_right, "5") == 1.0  # 0.3*1 + 0.7*1
