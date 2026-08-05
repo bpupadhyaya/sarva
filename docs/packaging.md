@@ -107,8 +107,8 @@ at all until it was noticed missing while poking at the CLI's own
   `ValueError` per entry and reporting `NAME  (corrupt or unreadable)`
   instead of aborting, so one bad file can't take the rest of the
   listing down with it.
-- **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...]`**
-  / **`config show`** / **`config unset [--anthropic-api-key] [--openai-api-key] [--gemini-api-key]`**
+- **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...] [--google-api-key ...]`**
+  / **`config show`** / **`config unset [--anthropic-api-key] [--openai-api-key] [--gemini-api-key] [--google-api-key]`**
   — manage provider API keys in `~/.sarva/config.json` from the command
   line. `sarva.config.save_config`/`get_env` have backed the desktop
   app's first-run screen (`POST /config`) since it shipped, but a
@@ -127,6 +127,46 @@ at all until it was noticed missing while poking at the CLI's own
   short of hand-editing or deleting the whole file (losing every other
   saved key too) — a name that was never saved is a silent no-op, and
   a real environment variable is never touched, only the saved file.
+
+### `GOOGLE_API_KEY` was a fully first-class credential name everywhere except the three places a user would actually save it
+
+A much later fresh-eyes sweep found the "fully built, unreachable by a
+real user" shape recurring one layer deeper, inside `config set`/
+`config unset`/`POST /config` themselves rather than around them.
+`sarva.config.KNOWN_KEYS` has listed `GOOGLE_API_KEY` (the exact
+env-var name Google's own SDK docs have historically used) alongside
+`GEMINI_API_KEY` since it was added — `get_env`'s own Gemini fallback
+already tries both, and `config show` already correctly reports
+whichever one is set. But `server/schemas.py`'s `SaveConfigRequest`
+only ever declared three fields, `config set`/`config unset` only ever
+exposed three flags, and `POST /config`'s own route handler only ever
+built a three-entry `values` dict — `SaveConfigRequest`'s own docstring
+had said "four provider-key names" since it was written, while
+defining three.
+
+Because Pydantic ignores unknown request fields by default, `POST
+/config` with `google_api_key` set didn't error — it silently
+vanished with a `200 OK`, the exact "user thought they sent it, it got
+silently dropped" failure mode this project explicitly guards against
+elsewhere (`--mcp-header` parsing rejects a malformed entry rather
+than dropping it). Confirmed live: a real `POST /config` call with
+`google_api_key` set left the saved config file empty, and `sarva
+config set --help` showed no `--google-api-key` flag to reach the CLI
+path at all. Reachable by a completely ordinary user — anyone who
+already exported `GOOGLE_API_KEY` and tries to persist it via the
+desktop app's onboarding screen or `sarva config set`, no adversarial
+input needed.
+
+Fixed by adding the missing field/flag to all three write paths
+together — `SaveConfigRequest.google_api_key`, `POST /config`'s
+`values` dict, and `--google-api-key` on both `config set` and `config
+unset` — closing the sibling-propagation gap in one pass rather than
+one write path at a time. Verified live: the same repro now correctly
+saves, shows, and removes a `GOOGLE_API_KEY`. Verified by reverting and
+watching both new tests fail with the literal old bug's own shape: an
+empty saved config after a real `POST /config`, and a rejected,
+unrecognized `--google-api-key` CLI flag. 2 new tests, 792 → 794
+Python tests.
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
 - **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text

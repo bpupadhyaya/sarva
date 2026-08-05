@@ -16434,3 +16434,85 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `GOOGLE_API_KEY` was a fully first-class credential name everywhere except the three places a user would actually save it
+
+Round 116. The originally-dispatched sweep prioritized following up
+on round 115's own lead (the OpenAI adapter's `_STOP_REASON_MAP`), but
+its subagent stalled mid-investigation after spinning off its own
+sub-agent, which had already surfaced and fully confirmed a different,
+unrelated real bug before the stall -- the parent agent was stopped
+after 2+ hours with no further progress, and its sub-agent's own
+already-confirmed finding was independently re-verified against the
+real code and shipped as this round's fix instead of re-dispatching
+from scratch.
+
+**The bug**: `sarva.config.KNOWN_KEYS` has listed `GOOGLE_API_KEY`
+(the exact env-var name Google's own SDK docs have historically used)
+alongside `GEMINI_API_KEY` since it was added -- `get_env`'s own
+Gemini fallback already tries both, and `config show` already
+correctly reports whichever one is set. But `server/schemas.py`'s
+`SaveConfigRequest` only ever declared three fields
+(`anthropic_api_key`/`openai_api_key`/`gemini_api_key`), `config set`/
+`config unset` only ever exposed three flags, and `POST /config`'s own
+route handler only ever built a three-entry `values` dict --
+`SaveConfigRequest`'s own docstring had said "four provider-key names"
+since it was written, while defining three.
+
+**Confirmed live**: because Pydantic ignores unknown request fields by
+default, `POST /config` with `google_api_key` set didn't error -- it
+silently vanished with a `200 OK`, the exact "user thought they sent
+it, it got silently dropped" failure mode this project explicitly
+guards against elsewhere (`--mcp-header` parsing rejects a malformed
+entry rather than dropping it). A real `POST /config` call left the
+saved config file empty, and `sarva config set --help` showed no
+`--google-api-key` flag to reach the CLI path at all. Reachable by a
+completely ordinary user -- anyone who already exported
+`GOOGLE_API_KEY` and tries to persist it via the desktop app's
+onboarding screen or `sarva config set`, no adversarial input needed.
+
+**Fixed** by adding the missing field/flag to all three write paths
+together -- `SaveConfigRequest.google_api_key`, `POST /config`'s
+`values` dict, and `--google-api-key` on both `config set` and `config
+unset` -- closing the sibling-propagation gap in one pass rather than
+one write path at a time.
+
+**Verified live**: the same repro now correctly saves, shows, and
+removes a `GOOGLE_API_KEY` through both the server and CLI paths.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: an empty saved config after a real `POST
+/config`, and a rejected, unrecognized `--google-api-key` CLI flag.
+
+**2 new tests, 792 -> 794 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+chapter directly after the `config set`/`show`/`unset` section this
+bug sits inside.
+
+**Seventy-one of the last seventy-two rounds (46-67, 70-116) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** First round in this series where the dispatched sweep agent
+itself stalled (its transcript went silent for over two hours with no
+new activity, confirmed by checking the underlying file's own
+modification time rather than trusting the "running" status alone)
+and had to be stopped mid-flight rather than completing normally --
+handled by treating its own sub-agent's already-confirmed, already-
+live-verified finding as the round's result (independently re-verified
+against the real code before fixing, per the usual discipline) instead
+of discarding real, solid work or blocking indefinitely on a hung
+process. Worth remembering: a background agent's own reported
+"running" status is not itself proof of forward progress -- checking
+whether its transcript file has actually grown recently is the more
+reliable signal.
+
+**Next:** OpenAI's own `finish_reason` -> `StopReason` mapping
+(`openai_provider.py`, line ~65) still has the confirmed-but-unfixed
+unmapped-default gap named in round 115 -- carried forward again as a
+natural next-round candidate. The completeness-audit backlog remains
+at three items needing external-dependency/scope decisions from the
+author (a code-execution sandbox tool, web search, image generation).
+The three infra-blocked items remain deferred (Tauri `csp: null`, RL
+harness sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

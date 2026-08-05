@@ -840,6 +840,7 @@ def config_set(
     anthropic_api_key: str | None = typer.Option(None, "--anthropic-api-key"),
     openai_api_key: str | None = typer.Option(None, "--openai-api-key"),
     gemini_api_key: str | None = typer.Option(None, "--gemini-api-key"),
+    google_api_key: str | None = typer.Option(None, "--google-api-key"),
 ) -> None:
     """Save one or more provider API keys to ~/.sarva/config.json (owner-only
     permissions -- see `sarva.config`'s own docstring). This is the CLI's
@@ -849,19 +850,27 @@ def config_set(
     to a CLI-only user with no desktop app installed at all. A real
     environment variable of the same name always wins over whatever's
     saved here (`sarva.config.get_env`'s own documented precedence,
-    unchanged by this command)."""
+    unchanged by this command).
+
+    A real bug found by a fresh-eyes sweep: `--google-api-key` was
+    missing entirely -- `GOOGLE_API_KEY` has been a first-class entry
+    in `sarva.config.KNOWN_KEYS`/`get_env`'s own Gemini fallback (and
+    already correctly reported by `config show`, a few lines below)
+    since it was added, but no way existed to actually persist it
+    short of hand-editing `~/.sarva/config.json`."""
     from sarva.config import save_config
 
     values = {
         "ANTHROPIC_API_KEY": anthropic_api_key,
         "OPENAI_API_KEY": openai_api_key,
         "GEMINI_API_KEY": gemini_api_key,
+        "GOOGLE_API_KEY": google_api_key,
     }
     non_empty = {k: v for k, v in values.items() if v}
     if not non_empty:
         console.print(
             "[yellow]nothing to save -- pass at least one of --anthropic-api-key / "
-            "--openai-api-key / --gemini-api-key[/yellow]"
+            "--openai-api-key / --gemini-api-key / --google-api-key[/yellow]"
         )
         raise typer.Exit(1)
     try:
@@ -900,6 +909,7 @@ def config_unset(
     anthropic_api_key: bool = typer.Option(False, "--anthropic-api-key"),
     openai_api_key: bool = typer.Option(False, "--openai-api-key"),
     gemini_api_key: bool = typer.Option(False, "--gemini-api-key"),
+    google_api_key: bool = typer.Option(False, "--google-api-key"),
 ) -> None:
     """Remove one or more provider API keys from ~/.sarva/config.json --
     `set`'s missing counterpart. A real environment variable of the same
@@ -912,12 +922,13 @@ def config_unset(
         "ANTHROPIC_API_KEY": anthropic_api_key,
         "OPENAI_API_KEY": openai_api_key,
         "GEMINI_API_KEY": gemini_api_key,
+        "GOOGLE_API_KEY": google_api_key,
     }
     names = [name for name, wanted in requested.items() if wanted]
     if not names:
         console.print(
             "[yellow]nothing to remove -- pass at least one of --anthropic-api-key / "
-            "--openai-api-key / --gemini-api-key[/yellow]"
+            "--openai-api-key / --gemini-api-key / --google-api-key[/yellow]"
         )
         raise typer.Exit(1)
     try:

@@ -1201,6 +1201,34 @@ def test_post_config_persists_a_key_and_the_next_doctor_call_sees_it(tmp_path, m
     assert fresh_check["ok"] is True
 
 
+def test_post_config_persists_a_google_api_key(tmp_path, monkeypatch):
+    # A real bug found by a fresh-eyes sweep: SaveConfigRequest's own
+    # docstring says "four provider-key names" are accepted, but only
+    # three fields were ever declared -- google_api_key was missing.
+    # GOOGLE_API_KEY has been a first-class entry in sarva.config.
+    # KNOWN_KEYS/get_env's own Gemini fallback (and already correctly
+    # reported by `sarva config show`) since it was added, but nothing
+    # actually persisted it: because Pydantic ignores unknown fields by
+    # default, POSTing google_api_key didn't error, it silently
+    # vanished with a 200 OK. Confirmed live before this fix: the saved
+    # config file ended up empty.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    import sarva.config as config_module
+
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+
+    client = _client()
+    resp = client.post("/config", json={"google_api_key": "AIzaSy-server-test"})
+    assert resp.status_code == 200
+
+    saved = config_module.load_config()
+    assert saved == {"GOOGLE_API_KEY": "AIzaSy-server-test"}
+
+    saved_check = next(c for c in resp.json() if c["name"] == "Google API key")
+    assert saved_check["ok"] is True
+
+
 def test_post_config_with_no_keys_does_not_write_a_file(tmp_path, monkeypatch):
     import sarva.config as config_module
 

@@ -1090,6 +1090,36 @@ def test_config_set_writes_and_config_show_reflects_it(monkeypatch, tmp_path):
     assert "not set" in show_result.stdout
 
 
+def test_config_set_google_api_key_writes_and_config_show_reflects_it(monkeypatch, tmp_path):
+    # A real bug found by a fresh-eyes sweep: --google-api-key was
+    # missing entirely from `config set`/`config unset` -- GOOGLE_API_KEY
+    # has been a first-class entry in sarva.config.KNOWN_KEYS/get_env's
+    # own Gemini fallback (and already correctly reported by
+    # `config show`, proving this exact test's own assertion below
+    # about visibility was never the gap) since it was added, but no
+    # way existed to actually persist it short of hand-editing
+    # ~/.sarva/config.json.
+    _isolate_config(monkeypatch, tmp_path)
+
+    set_result = runner.invoke(app, ["config", "set", "--google-api-key", "AIzaSy-real-test"])
+    assert set_result.exit_code == 0
+    assert "GOOGLE_API_KEY" in set_result.stdout
+    assert "AIzaSy-real-test" not in set_result.stdout
+
+    show_result = runner.invoke(app, ["config", "show"])
+    assert "GOOGLE_API_KEY" in show_result.stdout
+    assert "saved config file" in show_result.stdout
+
+    unset_result = runner.invoke(app, ["config", "unset", "--google-api-key"])
+    assert unset_result.exit_code == 0
+    assert "GOOGLE_API_KEY" in unset_result.stdout
+
+    final_show = runner.invoke(app, ["config", "show"])
+    lines = [line for line in final_show.stdout.splitlines() if "GOOGLE_API_KEY" in line]
+    assert len(lines) == 1
+    assert "not set" in lines[0]
+
+
 def test_config_show_prefers_a_real_env_var_over_the_saved_file(monkeypatch, tmp_path):
     _isolate_config(monkeypatch, tmp_path)
     runner.invoke(app, ["config", "set", "--anthropic-api-key", "sk-from-file"])
