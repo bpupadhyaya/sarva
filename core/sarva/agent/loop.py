@@ -58,7 +58,7 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
     degrade_message,
-    modality_of,
+    required_modalities,
 )
 from sarva.providers.base import (
     DoneEvent,
@@ -207,11 +207,15 @@ async def _prune_old_runs(run_root: Path, keep: int) -> None:
 def _required_modalities(messages: list[Message]) -> set[Modality]:
     """What the routed model must support, computed from what's actually in
     the conversation so far. Always includes TEXT — every current model
-    handles it, and it keeps the set non-empty for the router's subset check."""
+    handles it, and it keeps the set non-empty for the router's subset check.
+    Delegates to `sarva.multimodal.content.required_modalities` (rather than
+    a plain top-level `modality_of()` scan) so a `ToolResultBlock` carrying
+    nested media (an MCP tool's real image result, most importantly) is
+    actually seen -- see that function's own docstring for the real bug
+    this closes."""
     needed = {Modality.TEXT}
     for m in messages:
-        for block in m.content:
-            needed.add(modality_of(block))
+        needed |= required_modalities(m.content)
     return needed
 
 
@@ -989,7 +993,59 @@ class AgentLoop:
             for result, seconds in outcomes:
                 yield await emit(ToolFinishedEvent(result=result, seconds=seconds))
 
-            messages.append(Message(role="user", content=list(results)))
+            tool_result_message = Message(role="user", content=list(results))
+
+            # A real bug found by a fresh-eyes sweep: the model is picked
+            # once, at the very start of the turn, from the INITIATING
+            # message alone -- a tool result produced mid-turn (an MCP
+            # server's real ImageBlock result, most importantly; see
+            # `sarva.multimodal.content.required_modalities`'s own
+            # docstring for the exact gap this was invisible through
+            # until now) was appended straight into `messages` with no
+            # check against what the already-picked model actually
+            # supports, and no re-degradation. Confirmed live downstream:
+            # OllamaProvider silently put the raw image bytes on the wire
+            # to a model its own registry entry says has no vision
+            # support (no error, no signal anything was lost);
+            # OpenAIProvider raised an uncaught ValueError from deep
+            # inside its own translation function, turning what should
+            # be a clean, actionable failure into a confusing internal-
+            # plumbing error. Mirrors the INIT-time fallback above:
+            # degrade against what THIS run's model actually supports if
+            # degraders are configured, otherwise fail the turn cleanly
+            # with a real, specific reason instead of letting either
+            # silent mis-send or an uncaught adapter error stand in for
+            # "this content isn't supported."
+            needed = required_modalities(tool_result_message.content)
+            if not needed <= model.capabilities.modalities_in:
+                degrade_error: Exception | None = None
+                if self._degraders:
+                    try:
+                        tool_result_message = await degrade_message(
+                            tool_result_message,
+                            supported=model.capabilities.modalities_in,
+                            degraders=self._degraders,
+                        )
+                        needed = set()
+                    except Exception as e:
+                        degrade_error = e
+                if needed - model.capabilities.modalities_in:
+                    transition(AgentState.FAILED)
+                    detail = (
+                        str(degrade_error)
+                        if degrade_error is not None
+                        else f"tool result contains {needed - model.capabilities.modalities_in} "
+                        f"content the current model ({model.id}) doesn't support, and no "
+                        "degraders are configured"
+                    )
+                    yield await emit(StateChangedEvent(state=state, detail=detail))
+                    spend.wall_seconds = time.monotonic() - started
+                    yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+                    if transcript_out is not None:
+                        transcript_out.extend(messages)
+                    return
+
+            messages.append(tool_result_message)
 
         spend.wall_seconds = time.monotonic() - started
         yield await emit(RunDoneEvent(state=state, final_message=final_message, spend=spend))

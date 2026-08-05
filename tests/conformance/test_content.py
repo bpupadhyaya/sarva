@@ -14,6 +14,7 @@ from sarva.multimodal.content import (
     ToolResultBlock,
     UnsupportedModalityError,
     degrade_message,
+    required_modalities,
 )
 
 
@@ -89,6 +90,77 @@ async def test_degradation_raises_without_a_path():
     from sarva.multimodal.content import VideoBlock
 
     msg = Message(role="user", content=[VideoBlock(media_type="video/mp4", data=b"\x00")])
+    with pytest.raises(UnsupportedModalityError):
+        await degrade_message(msg, supported={Modality.TEXT}, degraders={})
+
+
+def test_required_modalities_sees_media_nested_inside_a_tool_result():
+    # A real bug found by a fresh-eyes sweep: MODALITY_OF hard-maps
+    # "tool_result" -> Modality.TEXT unconditionally, so a plain
+    # modality_of() scan over top-level blocks always reported a
+    # ToolResultBlock as text-only, completely blind to what's actually
+    # nested inside it -- an MCP server's real ImageContent result
+    # (screenshot/browser-automation/chart-generation tools all produce
+    # this) becomes a genuine ImageBlock inside ToolResultBlock.content
+    # (mcp_client.py's own _convert_content), invisible to any caller
+    # that only checks the top-level modality.
+    blocks = [
+        ToolResultBlock(
+            tool_call_id="t1",
+            content=[
+                TextBlock(text="here's the screenshot"),
+                ImageBlock(media_type="image/png", data=b"x"),
+            ],
+        )
+    ]
+    assert required_modalities(blocks) == {Modality.TEXT, Modality.IMAGE}
+
+
+@pytest.mark.asyncio
+async def test_degrade_message_recurses_into_a_tool_results_nested_content():
+    # The degradation-side counterpart to the required_modalities fix
+    # above: without recursing into ToolResultBlock.content,
+    # _degrade_block's own modality_of() check always saw "text" for the
+    # whole block and returned it completely unmodified -- any nested
+    # media sailed straight past degradation, directly contradicting
+    # this module's own docstring guarantee ("content is never silently
+    # dropped"). Confirmed live before this fix: degrading a
+    # ToolResultBlock containing an ImageBlock against a text-only
+    # model left the raw ImageBlock completely untouched.
+    msg = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_call_id="t1",
+                content=[
+                    TextBlock(text="a screenshot"),
+                    ImageBlock(media_type="image/png", data=b"x"),
+                ],
+            )
+        ],
+    )
+    degraders = {Modality.IMAGE: _EchoDegrader(Modality.IMAGE)}
+    out = await degrade_message(msg, supported={Modality.TEXT}, degraders=degraders)
+
+    assert len(out.content) == 1
+    result = out.content[0]
+    assert isinstance(result, ToolResultBlock)
+    assert result.tool_call_id == "t1"
+    assert all(b.type == "text" for b in result.content)
+    assert any("image converted to text" in b.text for b in result.content)
+
+
+@pytest.mark.asyncio
+async def test_degrade_message_still_raises_when_a_tool_results_nested_media_has_no_path():
+    msg = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_call_id="t1",
+                content=[ImageBlock(media_type="image/png", data=b"x")],
+            )
+        ],
+    )
     with pytest.raises(UnsupportedModalityError):
         await degrade_message(msg, supported={Modality.TEXT}, degraders={})
 

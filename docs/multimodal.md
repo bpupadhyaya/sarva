@@ -192,6 +192,61 @@ of a `DocumentBlock` reaching an adapter directly (degradation skipped,
 or a model whose registry entry claims document support no adapter
 actually implements).
 
+### A much later fresh-eyes sweep found a third place "never silently drop" didn't reach: media nested inside a `ToolResultBlock`
+
+`MODALITY_OF` hard-maps `"tool_result": Modality.TEXT` unconditionally
+— `modality_of(some_tool_result_block)` always reports plain text, no
+matter what's actually inside `ToolResultBlock.content`. Both
+`_required_modalities()` (picks the turn's model, once, from the
+initiating message) and `_degrade_block()`/`degrade_message()` (the
+fallback that's supposed to convert unsupported media down to
+something the picked model can use) operated purely on this top-level
+value — a `ToolResultBlock` always registered as "already supported"
+and was returned completely unmodified, never recursed into for
+nested media. This directly contradicts this module's own opening
+docstring ("Degradation is a registry of converters, applied
+recursively... content is never silently dropped").
+
+Reachable, not hypothetical: `mcp_client.py`'s `McpToolAdapter.run()`
+builds exactly this shape today — a real MCP server's `ImageContent`
+(screenshot, browser-automation, chart-generation tools all produce
+this) becomes a genuine `ImageBlock` inside a `ToolResultBlock`.
+`AgentLoop.run()` picks its model once, at the top of the turn, based
+on the *initial* message only; a tool result produced mid-turn is
+appended straight into `messages` with no re-pick and no
+re-degradation ever attempted. Confirmed live: with a text-only router
+(so no vision-capable model was ever in play) and a tool returning an
+`ImageBlock` inside its `ToolResultBlock`, the turn ran to completion
+silently — `state == DONE`, the raw image bytes sent straight to a
+provider standing in for a model that, per its own registry entry,
+cannot see them at all. Downstream this manifests two different ways
+depending on the adapter: `OllamaProvider` silently puts the raw image
+bytes on the wire with no error at all; `OpenAIProvider` raises an
+uncaught `ValueError` from deep inside its own translation function,
+turning what should be a clean, actionable failure into a confusing
+internal-plumbing error instead.
+
+Fixed with a new `required_modalities()` helper (recursing into
+`ToolResultBlock.content`, used by `_required_modalities()` in place of
+a bare top-level scan) and a matching fix in `_degrade_block()` (a
+dedicated `ToolResultBlock` case that recurses into its own nested
+content and rebuilds the block with the degraded result, instead of
+short-circuiting on the block's own always-text top-level modality).
+The agent loop now checks the newly-appended tool-result message
+against what the run's already-picked model actually supports
+immediately after appending it: with degraders configured, it degrades
+just that message against the current model (mirroring the INIT-time
+fallback's own logic); without them, or if degradation itself fails, the
+turn fails cleanly with a specific, actionable reason instead of either
+silently mis-sending unsupported content or crashing on an uncaught
+adapter error. Verified live both paths: the same screenshot-tool
+scenario now either completes normally (with a degrader configured, the
+image degrades to a text description) or fails cleanly with a message
+naming exactly what wasn't supported (without one). Verified by
+reverting and watching the new test fail with the literal old bug's own
+shape: `state == DONE` where `FAILED` was expected. 5 new tests, 757 →
+762 Python tests.
+
 ## The fourth degrader: `DocumentToTextDegrader`
 
 The image/audio/video trio left the one modality named in `Degrader`'s

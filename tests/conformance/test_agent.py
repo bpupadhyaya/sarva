@@ -162,6 +162,29 @@ class _RaisingTool:
         raise RuntimeError("kaboom")
 
 
+class _ScreenshotTool:
+    """Returns a ToolResultBlock carrying a real ImageBlock -- the exact
+    shape McpToolAdapter.run() produces from a real MCP server's
+    ImageContent (screenshot/browser-automation/chart-generation tools
+    all produce this, not a hypothetical)."""
+
+    spec = ToolSpec(
+        name="screenshot",
+        description="take a screenshot",
+        input_schema={"type": "object", "properties": {}},
+        destructive=False,
+    )
+
+    async def run(self, args, ctx: ToolContext) -> ToolResultBlock:
+        return ToolResultBlock(
+            tool_call_id="",
+            content=[
+                TextBlock(text="here's the screenshot"),
+                ImageBlock(media_type="image/png", data=_real_png_bytes()),
+            ],
+        )
+
+
 @pytest.fixture
 def run_root(tmp_path):
     root = tmp_path / "runs"
@@ -858,6 +881,70 @@ async def test_degradation_fallback_reports_cleanly_for_a_truncated_real_image(r
     assert events[-1].state == AgentState.FAILED
     state_changed = next(e for e in events if e.type == "state_changed" and e.detail)
     assert "could not decode image for degradation" in state_changed.detail
+
+
+@pytest.mark.asyncio
+async def test_a_tool_result_carrying_media_the_current_model_cant_see_fails_cleanly(run_root):
+    # A real bug found by a fresh-eyes sweep: the model is picked once,
+    # at the very start of the turn, from the INITIATING message alone
+    # -- a tool result produced mid-turn carrying real media (an MCP
+    # server's ImageContent, most importantly -- see
+    # sarva.multimodal.content.required_modalities's own docstring for
+    # the exact blind spot this was invisible through) was appended
+    # straight into `messages` with no check against what the
+    # already-picked model actually supports. Confirmed live before this
+    # fix: with a text-only router (so no vision-capable model was ever
+    # picked), a tool returning an ImageBlock inside its ToolResultBlock
+    # ran to completion silently, `state == DONE`, the raw image bytes
+    # sent straight to a mock provider standing in for a model that, per
+    # its own registry entry, cannot see them at all.
+    call = ToolCallBlock(id="c1", name="screenshot", arguments={})
+    provider = MockProvider(
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="should never be reached")]
+    )
+    loop = AgentLoop(
+        router=_text_only_router(),
+        providers={"mock": provider},
+        tools=[_ScreenshotTool()],
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("take a screenshot")]
+
+    assert events[-1].state == AgentState.FAILED
+    assert events[-1].final_message is None
+    state_changed = next(e for e in events if e.type == "state_changed" and e.detail)
+    assert "text-only" in state_changed.detail
+    assert "image" in state_changed.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_result_carrying_media_is_degraded_mid_turn_when_a_degrader_is_configured(
+    run_root,
+):
+    # The recoverable counterpart to the test above: with a degrader
+    # configured for the missing modality, the same mid-turn tool result
+    # is degraded against the model actually in use for this run instead
+    # of failing -- the run completes normally, and the model's own
+    # (mocked) reply proves the turn actually continued past the tool
+    # call rather than the run merely happening to end in DONE for an
+    # unrelated reason.
+    call = ToolCallBlock(id="c1", name="screenshot", arguments={})
+    provider = MockProvider(
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="a blue rectangle")]
+    )
+    loop = AgentLoop(
+        router=_text_only_router(),
+        providers={"mock": provider},
+        tools=[_ScreenshotTool()],
+        run_root=run_root,
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+
+    events = [e async for e in loop.run("take a screenshot")]
+
+    assert events[-1].state == AgentState.DONE
+    assert events[-1].final_message.text() == "a blue rectangle"
 
 
 @pytest.mark.asyncio

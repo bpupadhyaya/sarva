@@ -158,6 +158,25 @@ def modality_of(block: Any) -> Modality:
     return MODALITY_OF[block.type]
 
 
+def required_modalities(blocks: list[ContentBlock]) -> set[Modality]:
+    """The full set of modalities actually present across `blocks`,
+    recursing into `ToolResultBlock.content`. A real bug found by a
+    fresh-eyes sweep: `MODALITY_OF` hard-maps `"tool_result": Modality.
+    TEXT` unconditionally, so `modality_of()` alone always reports a
+    `ToolResultBlock` as plain text no matter what's nested inside it --
+    an MCP server's `ImageContent` (screenshot/browser-automation/chart-
+    generation tools all produce this, not a hypothetical) becomes a
+    real `ImageBlock` inside `ToolResultBlock.content`
+    (`mcp_client.py`'s own `_convert_content`), completely invisible to
+    any caller checking only the top-level modality."""
+    needed: set[Modality] = set()
+    for block in blocks:
+        needed.add(modality_of(block))
+        if isinstance(block, ToolResultBlock):
+            needed |= required_modalities(block.content)
+    return needed
+
+
 # ---------- Degradation (registry of converters, never silent drops) ----------
 
 
@@ -195,6 +214,29 @@ async def _degrade_block(
     degraders: dict[Modality, Degrader],
     depth: int,
 ) -> list[Any]:
+    # A real bug found by a fresh-eyes sweep, the same blind spot
+    # `required_modalities()` above closes for the "which modalities are
+    # needed" side of this module's contract: a `ToolResultBlock` always
+    # reports as plain text via `modality_of()`, so without this special
+    # case it always short-circuited at `m in supported` below and was
+    # returned completely unmodified -- any media nested in `.content`
+    # (an MCP tool's real ImageBlock result, most importantly) sailed
+    # straight past degradation, directly contradicting this module's
+    # own docstring guarantee ("Degradation is a registry of converters,
+    # applied recursively... content is never silently dropped").
+    # Confirmed live: degrading a ToolResultBlock containing an
+    # ImageBlock against a text-only model left the raw ImageBlock
+    # completely untouched, which downstream adapters either silently
+    # mis-sent to a model with no vision support (Ollama) or crashed on
+    # with an uncaught, confusing internal error (OpenAI) instead of
+    # either degrading it or failing cleanly. Recurses into the nested
+    # content the same way the top-level loop in `degrade_message`
+    # already does, then rebuilds the block with the degraded content.
+    if isinstance(block, ToolResultBlock):
+        nested: list[Any] = []
+        for b in block.content:
+            nested.extend(await _degrade_block(b, supported, degraders, depth))
+        return [block.model_copy(update={"content": nested})]
     m = modality_of(block)
     if m in supported:
         return [block]
