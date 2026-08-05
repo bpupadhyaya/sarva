@@ -771,6 +771,49 @@ report `REFUSAL` instead of `END_TURN`. Verified by reverting and
 watching both new tests fail with the literal old bug's own shape. 2
 new tests, 794 → 796 Python tests.
 
+### A fourth instance of the same gap, in the one adapter the "closes the loop across all three" claim above didn't count
+
+A much later fresh-eyes sweep found the identical shape one adapter
+further: `ollama_provider.py` never had a stop-reason mapping at
+all — its local `done_reason` variable only ever moved away from its
+`StopReason.END_TURN` default when a tool call was seen. Unlike the
+three SDK-based adapters, Ollama has no vendor-typed enum to check
+against (this project talks to its `/api/chat` endpoint over raw
+`httpx`, not an official SDK), so this gap had gone unnoticed even
+while the other three were each independently found and fixed —
+`ollama_provider.py` simply wasn't a "real provider adapter" the
+earlier chapter's own "all three" framing had in mind, even though
+it's exactly as real a stop/finish-reason gap as the other three.
+
+Ollama's real streaming `/api/chat` response includes a `done_reason`
+field on its final chunk — `"stop"` for a normal end, `"length"` when
+generation was cut off by hitting `num_predict`/the context window,
+documented Ollama wire behavior — but nothing in this adapter ever
+read it. Confirmed live with a mocked Ollama stream whose final chunk
+says `"done_reason": "length"`: this adapter reported `StopReason.
+END_TURN` anyway, silently indistinguishable from a genuinely complete
+response — a caller branching on `StopReason.MAX_TOKENS` to retry with
+a larger budget or warn the user never gets the chance to for any real
+Ollama-served conversation that hits its own generation limit.
+
+Fixed more narrowly than the three SDK-based adapters' own fixes,
+deliberately: Ollama's `done_reason` has no closed, vendor-typed enum
+to check exhaustively against — `"stop"`/`"length"` are the only two
+values documented with confidence — so this fix maps only the
+confirmed `"length"` case to `MAX_TOKENS`, leaving every other value
+(known or not) on the existing `END_TURN` default rather than
+introducing a new fail-safe-to-`REFUSAL` default with no verified
+evidence backing it. Presence of a tool call still wins over the raw
+`done_reason`, matching every sibling adapter's own rule — Ollama
+reports `"stop"` as the `done_reason` even for a turn that ends in a
+tool call, so checking `done_reason` before the tool-call check would
+have silently misreported it. Verified live: the same repro now
+reports `MAX_TOKENS`; an ordinary `"stop"` response and a tool-call
+turn (with `done_reason="stop"`) both still report exactly what they
+did before. Verified by reverting and watching the new test fail with
+the literal old bug's own shape: `END_TURN` instead of `MAX_TOKENS`.
+3 new tests, 811 → 814 Python tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with

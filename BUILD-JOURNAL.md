@@ -17173,3 +17173,78 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A fourth instance of the stop-reason mapping gap, in the one adapter the "closes the loop across all three" claim didn't count
+
+Round 126. Rounds 122-125 had all found real bugs in `foundry/
+sarva_foundry/`, but this round's sweep, given latitude to look
+anywhere, found something back in `core/sarva/providers/` -- a shape
+this journal had already declared "closed the loop across all three
+real provider adapters" on in round 117.
+
+**The bug**: `ollama_provider.py`'s `generate()` never had a stop-
+reason mapping at all -- its local `done_reason` variable only ever
+moved away from its `StopReason.END_TURN` default when a tool call
+was seen. Unlike the three SDK-based adapters (Anthropic/OpenAI/
+Google, each independently fixed for this exact shape in rounds
+113/115/117), Ollama has no vendor-typed enum to check against --
+this project talks to its `/api/chat` endpoint over raw `httpx`, not
+an official SDK -- so this gap had gone unnoticed even while the other
+three were each found and fixed. `ollama_provider.py` simply wasn't a
+"real provider adapter" the earlier round's own "all three" framing
+had in mind, even though it's exactly as real a stop-reason gap as
+the other three.
+
+**Confirmed live**: Ollama's real streaming `/api/chat` response
+includes a `done_reason` field on its final chunk ("stop" for a
+normal end, "length" when generation was cut off by hitting
+`num_predict`/the context window -- documented Ollama wire behavior),
+but nothing here ever read it. A mocked Ollama stream whose final
+chunk says `"done_reason": "length"` was reported as `StopReason.
+END_TURN` anyway, silently indistinguishable from a genuinely complete
+response.
+
+**Fixed** more narrowly than the three SDK-based adapters' own fixes,
+deliberately: Ollama's `done_reason` has no closed, vendor-typed enum
+to check exhaustively against -- `"stop"`/`"length"` are the only two
+values documented with confidence -- so this fix maps only the
+confirmed `"length"` case to `MAX_TOKENS`, leaving every other value
+on the existing `END_TURN` default rather than introducing a new
+fail-safe-to-`REFUSAL` default with no verified evidence backing it.
+Presence of a tool call still wins over the raw `done_reason`,
+matching every sibling adapter's own rule -- Ollama reports `"stop"`
+even for a turn that ends in a tool call.
+
+**Verified live**: the same repro now reports `MAX_TOKENS`; an
+ordinary `"stop"` response and a tool-call turn (with `done_reason=
+"stop"`) both still report exactly what they did before.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `END_TURN` instead of `MAX_TOKENS`.
+
+**3 new tests, 811 -> 814 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+chapter directly after the round-117 chapter whose own "closes the
+loop across all three" claim this round corrects.
+
+**Eighty-one of the last eighty-two rounds (46-67, 70-126) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A genuinely humbling instance of this project's own
+documentation being wrong in a specific, checkable way: round 117
+declared a bug class fully closed across "all three real provider
+adapters," and that claim was true for the three it was scoped to
+check, but the scoping itself silently excluded a fourth adapter that
+had the identical bug the whole time. Worth naming as its own
+heuristic: when a fix's own docs claim "all N of X," explicitly
+enumerate every actual instance of X in the codebase before trusting
+the count, not just the ones the fix's own investigation happened to
+consider in scope.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

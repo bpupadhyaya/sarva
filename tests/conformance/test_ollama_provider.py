@@ -19,7 +19,13 @@ from sarva.multimodal.content import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from sarva.providers.base import DoneEvent, GenerateRequest, StreamErrorEvent, TextDeltaEvent
+from sarva.providers.base import (
+    DoneEvent,
+    GenerateRequest,
+    StopReason,
+    StreamErrorEvent,
+    TextDeltaEvent,
+)
 from sarva.providers.ollama_provider import OllamaProvider, _strip_local_prefix, _to_ollama_message
 
 
@@ -320,3 +326,55 @@ async def test_consecutive_text_deltas_with_no_call_between_them_still_merge_int
 
     assert len(done.message.content) == 1
     assert done.message.content[0].text == "Hello, world."
+
+
+@pytest.mark.asyncio
+async def test_generate_reports_max_tokens_when_ollama_truncates_by_length():
+    # A real bug found by a fresh-eyes sweep, the identical "sibling
+    # adapter has a real stop/finish-reason mapping, this one never got
+    # one" gap already found and fixed in all three OTHER provider
+    # adapters (anthropic_provider.py's pause_turn, openai_provider.py's
+    # function_call, google_provider.py's RECITATION/etc.): Ollama's
+    # real streaming /api/chat response includes a done_reason field on
+    # its final chunk ("length" when generation was cut off by hitting
+    # num_predict/the context window -- documented Ollama wire
+    # behavior), but nothing here ever read it. Confirmed live before
+    # this fix: this exact mocked response reported StopReason.END_TURN
+    # instead, silently indistinguishable from a genuinely complete
+    # response.
+    body = (
+        b'{"message": {"content": "this is a very long"}, "done": false}\n'
+        b'{"message": {"content": ""}, "done": true, "done_reason": "length"}\n'
+    )
+    events = [e async for e in _provider(body).generate(_req())]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    assert done.stop_reason == StopReason.MAX_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_generate_still_reports_end_turn_for_a_normal_stop():
+    # Regression guard for the fix above: an ordinary, complete
+    # response (done_reason="stop") must not be affected.
+    body = b'{"message": {"content": "hello"}, "done": true, "done_reason": "stop"}\n'
+    events = [e async for e in _provider(body).generate(_req())]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    assert done.stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.asyncio
+async def test_generate_tool_use_is_not_overridden_by_a_stop_done_reason():
+    # Ollama reports done_reason="stop" even for a turn that ends in a
+    # tool call (it has no distinct "made a tool call" reason of its
+    # own) -- presence of a tool call must still win over the raw
+    # done_reason, the same rule every sibling adapter already applies.
+    body = (
+        b'{"message": {"content": "", "tool_calls": '
+        b'[{"function": {"name": "f", "arguments": {}}}]}, "done": false}\n'
+        b'{"message": {"content": ""}, "done": true, "done_reason": "stop"}\n'
+    )
+    events = [e async for e in _provider(body).generate(_req())]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    assert done.stop_reason == StopReason.TOOL_USE

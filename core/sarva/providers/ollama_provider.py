@@ -177,6 +177,33 @@ class OllamaProvider:
         content: list[object] = []
         call_index = 0
         done_reason: StopReason = StopReason.END_TURN
+        # A real bug found by a fresh-eyes sweep, the identical
+        # "sibling adapter has a real stop/finish-reason mapping, this
+        # one never got one" gap already found and fixed in all three
+        # OTHER provider adapters (anthropic_provider.py's pause_turn,
+        # openai_provider.py's function_call, google_provider.py's
+        # RECITATION/etc.): Ollama's real streaming `/api/chat`
+        # response includes a `done_reason` field on its final chunk
+        # ("stop" for a normal end, "length" when generation was cut
+        # off by hitting num_predict/the context window -- documented
+        # Ollama wire behavior), but nothing here ever read it --
+        # `done_reason` only ever changed away from its END_TURN
+        # default when a tool call was seen. Confirmed live with a
+        # mocked Ollama stream whose final chunk says `"done_reason":
+        # "length"`: this adapter reported `StopReason.END_TURN`
+        # anyway, silently indistinguishable from a genuinely complete
+        # response -- a caller branching on `StopReason.MAX_TOKENS` to
+        # retry with a larger budget or warn the user never gets the
+        # chance to for any real Ollama-served conversation that hits
+        # its own generation limit. Deliberately narrower than the
+        # other three adapters' fixes: Ollama's `done_reason` has no
+        # closed, vendor-typed enum to check exhaustively against (`
+        # "stop"`/`"length"` are the only two values documented with
+        # confidence), so unrecognized/missing values still default to
+        # the existing END_TURN behavior rather than a new fail-safe
+        # default -- there's no verified evidence an unlisted value
+        # ever means anything other than a normal completion.
+        raw_done_reason: str | None = None
 
         try:
             async with self._client.stream(
@@ -258,6 +285,7 @@ class OllamaProvider:
                         yield ToolCallEvent(call=call)
                         done_reason = StopReason.TOOL_USE
                     if chunk.get("done"):
+                        raw_done_reason = chunk.get("done_reason")
                         break
         except httpx.ConnectError as e:
             yield StreamErrorEvent(
@@ -277,6 +305,15 @@ class OllamaProvider:
         # ordering used for text preceding a tool call above.
         if text_acc:
             content.append(TextBlock(text=text_acc))
+
+        # Presence of a tool call always wins over the raw done_reason,
+        # same as every sibling adapter's own "a tool call always means
+        # TOOL_USE regardless of what the raw finish/stop signal says"
+        # rule -- Ollama reports "stop" as the done_reason even for a
+        # turn that ended in a tool call, so checking this second would
+        # silently misreport it as END_TURN/MAX_TOKENS instead.
+        if done_reason != StopReason.TOOL_USE and raw_done_reason == "length":
+            done_reason = StopReason.MAX_TOKENS
 
         yield DoneEvent(
             stop_reason=done_reason,
