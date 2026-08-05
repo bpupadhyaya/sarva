@@ -392,6 +392,39 @@ async def test_audio_degrade_reports_unknown_duration_when_nothing_is_knowable()
     assert "unknown duration" in out[0].text
 
 
+async def test_audio_degrade_reports_a_real_zero_duration_instead_of_unknown():
+    # A real bug found by a fresh-eyes sweep: the old code combined the
+    # decoded duration with `block.duration_s` using `or`, a truthiness
+    # fallback rather than a None-check. `_decode_wav_duration` returns
+    # a legitimate `0.0` for a valid, real, zero-frame WAV -- a
+    # plausible real artifact (a client that starts and immediately
+    # stops recording, or a client bug that writes a valid header with
+    # no sample data), and `0.0` is falsy in Python, so `or` silently
+    # discarded the correctly-decoded `0.0` and fell through to
+    # `block.duration_s` (None here) instead, wrongly reporting
+    # "unknown duration" for a duration that genuinely WAS known: zero.
+    raw = _wav_bytes(duration_s=0.0)
+    block = AudioBlock(media_type="audio/wav", data=raw, duration_s=None)
+
+    out = await AudioToTextDegrader().degrade(block)
+
+    assert "0.0s" in out[0].text
+    assert "unknown duration" not in out[0].text
+
+
+async def test_audio_degrade_prefers_real_zero_duration_over_a_stale_declared_one():
+    # Same bug, other side of the same `or`: a stale/wrong caller-supplied
+    # `block.duration_s` (nonzero, so truthy) used to silently win over
+    # the correctly-decoded real `0.0` from the WAV bytes themselves.
+    raw = _wav_bytes(duration_s=0.0)
+    block = AudioBlock(media_type="audio/wav", data=raw, duration_s=42.0)
+
+    out = await AudioToTextDegrader().degrade(block)
+
+    assert "0.0s" in out[0].text
+    assert "42.0s" not in out[0].text
+
+
 async def test_audio_degrade_does_not_fabricate_content():
     raw = _wav_bytes(duration_s=1.0)
     block = AudioBlock(media_type="audio/wav", data=raw)

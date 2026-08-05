@@ -15922,3 +15922,74 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `AudioToTextDegrader` reported a real, genuinely known zero-second duration as "unknown" -- `or` is a truthiness fallback, not a None-check
+
+Round 109. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated list of recurring bug-class heuristics
+and steering away from every file already covered in the last several
+rounds, with a standing note that `core/sarva/memory/vector.py` is
+still the one file with no fully dedicated round of its own. It found
+a bug in a different, previously-covered file instead: `core/sarva/
+multimodal/degraders/audio.py`'s `AudioToTextDegrader.degrade()`, one
+line below the `asyncio.to_thread` freeze-fix already documented in
+this project's own multimodal chapter.
+
+**The bug**: `duration_s = _decode_wav_duration(raw) or block.
+duration_s`. `_decode_wav_duration` (a separate helper at the top of
+the same file) legitimately returns `0.0` for a real, valid WAV file
+with zero frames -- a plausible real artifact (a client that starts
+and immediately stops recording, or a client bug that writes a valid
+WAV header with no sample data), not a contrived edge case. `0.0` is
+falsy in Python, so `or` silently discarded that correctly-decoded
+value and fell through to `block.duration_s` instead, on both sides of
+the fallback: with no declared duration, the message wrongly said
+"unknown duration" for a duration that genuinely *was* known (zero);
+with a stale or simply wrong caller-supplied `duration_s=42.0`, the
+message reported `"42.0s"`, silently overriding the real,
+just-decoded `0.0s` with the wrong value. This text block is the
+model's *only* signal about the attachment on the text-only fallback
+path (`sarva[audio]` not installed, or transcription failed/returned
+empty) -- a wrong duration here is a wrong fact fed straight into the
+model's own context, not just a cosmetic display issue.
+
+**Confirmed live** with a real, valid, zero-frame WAV built via the
+stdlib `wave` module: `_decode_wav_duration` correctly returned `0.0`
+directly, but the degrader's own output text said "unknown duration"
+when nothing was declared, and "42.0s" when `42.0` was declared --
+never the correct "0.0s" either way.
+
+**Fixed** by replacing the `or` fallback with an explicit `is not
+None` check: `_decode_wav_duration`'s result is used whenever it
+isn't `None`, regardless of whether it happens to be `0.0`, and
+`block.duration_s` is only consulted when the real decode itself
+failed (returned `None`).
+
+**Verified live**: both cases above now correctly report "0.0s".
+
+**Verified by reverting** and watching both new tests fail with the
+exact old bug's own shape: `"unknown duration"` and `"42.0s"`
+respectively, instead of the correct `"0.0s"`.
+
+**2 new tests, 780 -> 782 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/multimodal.md` gained a new
+chapter directly after the `asyncio.to_thread` freeze-fix chapter this
+bug sits one line below.
+
+**Sixty-four of the last sixty-five rounds (46-67, 70-109) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** This is the tenth distinct recurring bug-class heuristic
+this project has now named explicitly and carried forward into every
+subsequent sweep prompt: a bare truthiness fallback (`or`, `bool(x)`)
+standing in for a strict `None`/type check silently mishandles any
+legitimate falsy-but-meaningful value (`0`, `0.0`, `""`, `False`) the
+surrounding code never actually meant to treat as absent.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

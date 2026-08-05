@@ -86,7 +86,25 @@ class AudioToTextDegrader:
             except Exception:
                 pass
 
-        duration_s = _decode_wav_duration(raw) or block.duration_s
+        # A real bug found by a fresh-eyes sweep: `or` is a truthiness
+        # fallback, not a None-check -- `_decode_wav_duration` returns a
+        # legitimate `0.0` for a valid but zero-frame WAV (an empty/
+        # broken recording: a client that starts and immediately stops
+        # recording, or a client bug that writes a valid WAV header with
+        # no sample data -- a plausible real artifact, not contrived),
+        # and `0.0` is falsy in Python. Confirmed live: a real,
+        # zero-frame WAV correctly decoded to `duration_s=0.0`, but `or`
+        # silently discarded that correct value and fell through to
+        # `block.duration_s` instead -- with no declared duration, the
+        # message wrongly said "unknown duration" for a duration that
+        # genuinely WAS known (zero); with a stale/wrong declared
+        # `duration_s=42.0`, the message reported "42.0s", silently
+        # overriding the real, just-decoded `0.0s` with a wrong caller-
+        # supplied value. This text block is the model's only signal
+        # about the attachment on the text-only fallback path, so a
+        # wrong duration is a wrong fact fed straight into its context.
+        decoded_duration = _decode_wav_duration(raw)
+        duration_s = decoded_duration if decoded_duration is not None else block.duration_s
 
         size_kb = len(raw) / 1024
         duration_text = f"{duration_s:.1f}s" if duration_s is not None else "unknown duration"

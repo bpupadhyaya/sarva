@@ -335,6 +335,44 @@ reverting and watching both new tests fail with the literal old bug's
 own number — `0` ticks — reproducing itself. 2 new tests, 707 → 709
 Python tests.
 
+### A real, genuinely known zero-second duration was reported as "unknown" — `or` is a truthiness fallback, not a None-check
+
+A much later fresh-eyes sweep found a different bug in
+`AudioToTextDegrader.degrade()`'s metadata fallback, one line below the
+`asyncio.to_thread` fix above: `duration_s = _decode_wav_duration(raw)
+or block.duration_s`. `_decode_wav_duration` legitimately returns
+`0.0` for a real, valid WAV file with zero frames — a plausible real
+artifact (a client that starts and immediately stops recording, or a
+client bug that writes a valid WAV header with no sample data), not a
+contrived edge case. `0.0` is falsy in Python, so `or` silently
+discarded that correctly-decoded value and fell through to
+`block.duration_s` instead, on both sides of the fallback: with no
+declared duration, the message wrongly said "unknown duration" for a
+duration that genuinely *was* known (zero); with a stale or simply
+wrong caller-supplied `duration_s=42.0`, the message reported
+`"42.0s"`, silently overriding the real, just-decoded `0.0s` with the
+wrong value. This text block is the model's *only* signal about the
+attachment on the text-only fallback path (`sarva[audio]` not
+installed, or transcription failed/returned empty) — a wrong duration
+here is a wrong fact fed straight into the model's own context, not
+just a cosmetic display issue.
+
+Confirmed live with a real, valid, zero-frame WAV built via the stdlib
+`wave` module: `_decode_wav_duration` correctly returned `0.0`
+directly, but the degrader's own output text said `"unknown
+duration"` when nothing was declared, and `"42.0s"` when `42.0` was
+declared — never the correct `"0.0s"` either way.
+
+Fixed by replacing the `or` fallback with an explicit `is not None`
+check: `_decode_wav_duration`'s result is used whenever it isn't
+`None`, regardless of whether it happens to be `0.0`, and
+`block.duration_s` is only consulted when the real decode itself
+failed. Verified live: both cases above now correctly report
+`"0.0s"`. Verified by reverting and watching both new tests fail with
+the exact old bug's own shape — `"unknown duration"` and `"42.0s"`
+respectively, instead of the correct `"0.0s"`. 2 new tests, 780 → 782
+Python tests.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's
