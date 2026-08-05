@@ -136,6 +136,68 @@ async def test_text_only_stream_produces_end_turn():
     assert done.message.content[0].text == "Hello, world"
 
 
+async def test_interleaved_text_and_tool_calls_keep_their_chronological_order():
+    # A real bug found by a fresh-eyes sweep, the identical gap already
+    # found and fixed in google_provider.py/ollama_provider.py, just
+    # never propagated here: text was accumulated into ONE running
+    # string across the WHOLE stream and only ever spliced into the
+    # final message once, unconditionally first -- tool calls were
+    # already assembled in true chronological order relative to each
+    # other, but text occurring between or after them got silently
+    # pulled forward and merged ahead of every tool call. Confirmed
+    # live before this fix: an ordinary sequential-tool-calling turn
+    # (reasoning text, a call, more reasoning text, another call --
+    # ordinary ReAct-style behavior, not contrived) produced ONE
+    # TextBlock with both segments concatenated, hoisted ahead of BOTH
+    # tool calls -- corrupting the persisted Message AgentLoop appends
+    # straight to transcript_out/SessionStore and resends as history.
+    chunks = [
+        _chunk(content="Let me check the weather first.\n"),
+        _chunk(tool_call_deltas=[_tc_delta(0, id="call_1", name="get_weather", arguments="{}")]),
+        _chunk(content="Now let me check the time.\n"),
+        _chunk(
+            tool_call_deltas=[_tc_delta(1, id="call_2", name="get_time", arguments="{}")],
+            finish_reason="tool_calls",
+            usage=_usage(10, 5),
+        ),
+    ]
+    provider = OpenAIProvider(client=_FakeClient(chunks))
+    req = _simple_request()
+
+    events = [e async for e in provider.generate(req)]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    shapes = [
+        (type(b).__name__, getattr(b, "text", None) or getattr(b, "name", None))
+        for b in done.message.content
+    ]
+    assert shapes == [
+        ("TextBlock", "Let me check the weather first.\n"),
+        ("ToolCallBlock", "get_weather"),
+        ("TextBlock", "Now let me check the time.\n"),
+        ("ToolCallBlock", "get_time"),
+    ]
+
+
+async def test_consecutive_text_deltas_with_no_call_between_them_still_merge_into_one_block():
+    # A sibling check for the fix above: text arriving as multiple
+    # streamed deltas with nothing else interleaved must still collapse
+    # into a single TextBlock, not fragment into one block per delta.
+    chunks = [
+        _chunk(content="Hel"),
+        _chunk(content="lo"),
+        _chunk(content=", world.", finish_reason="stop", usage=_usage(3, 2)),
+    ]
+    provider = OpenAIProvider(client=_FakeClient(chunks))
+    req = _simple_request()
+
+    events = [e async for e in provider.generate(req)]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    assert len(done.message.content) == 1
+    assert done.message.content[0].text == "Hello, world."
+
+
 async def test_malformed_tool_call_arguments_do_not_crash_the_adapter():
     # A real bug found by a fresh-eyes sweep, not by this test as
     # originally written: a tool call whose accumulated argument

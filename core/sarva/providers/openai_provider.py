@@ -208,6 +208,36 @@ class OpenAIProvider:
         tool_call_parts: dict[int, dict[str, Any]] = defaultdict(
             lambda: {"id": "", "name": "", "arguments": ""}
         )
+        # A real bug found by a fresh-eyes sweep, the identical gap
+        # already found and fixed in google_provider.py/ollama_provider.py,
+        # just never propagated here: without this, text was accumulated
+        # into ONE running string across the whole stream and only ever
+        # spliced into `blocks` once, unconditionally first, after the
+        # loop ended -- tool calls were already assembled in true
+        # chronological (first-seen) order relative to each other (Python
+        # dict insertion order on `tool_call_parts`), but any text
+        # occurring between or after them got silently pulled forward and
+        # merged ahead of every tool call. Confirmed live: an ordinary
+        # sequential-tool-calling turn (reasoning text, a call, more
+        # reasoning text, another call -- ordinary ReAct-style behavior,
+        # not contrived) produced one TextBlock with both segments
+        # concatenated, hoisted ahead of both tool calls, corrupting the
+        # persisted Message AgentLoop appends straight to transcript_out/
+        # SessionStore and resends as history. Genuinely trickier to fix
+        # here than in the sibling adapters: OpenAI streams a tool call's
+        # arguments incrementally across MANY chunks sharing one `index`,
+        # so a call isn't complete (and can't become a real ToolCallBlock)
+        # until the stream ends -- there's no single "this chunk completed
+        # a call" moment to flush against the way Ollama/Gemini's
+        # atomically-complete-per-chunk tool calls have. Fixed instead by
+        # recording an ORDERED list of markers as things first appear --
+        # a flushed text segment, or the first-seen index of a tool call
+        # (its actual ToolCallBlock is still only built once, at the end,
+        # from `tool_call_parts`) -- and replaying that order when
+        # assembling `blocks`, rather than reconstructing position from
+        # `tool_call_parts` and a single trailing text blob.
+        order: list[tuple[str, str | int]] = []
+        seen_indices: set[int] = set()
         finish_reason: str | None = None
         usage_tokens = (0, 0, 0)
 
@@ -232,6 +262,12 @@ class OpenAIProvider:
                     text_acc += delta.content
                     yield TextDeltaEvent(text=delta.content)
                 for tc in delta.tool_calls or []:
+                    if tc.index not in seen_indices:
+                        seen_indices.add(tc.index)
+                        if text_acc:
+                            order.append(("text", text_acc))
+                            text_acc = ""
+                        order.append(("tool_call", tc.index))
                     part = tool_call_parts[tc.index]
                     if tc.id:
                         part["id"] = tc.id
@@ -264,10 +300,20 @@ class OpenAIProvider:
             yield StreamErrorEvent(code="provider", detail=str(e), retryable=True)
             return
 
-        blocks: list[object] = []
+        # Trailing text (the ordinary case: a plain END_TURN reply, or
+        # reasoning text after the last tool call) belongs after every
+        # block that chronologically preceded it -- appended to `order`
+        # here, not spliced onto the front of `blocks` below.
         if text_acc:
-            blocks.append(TextBlock(text=text_acc))
-        for part in tool_call_parts.values():
+            order.append(("text", text_acc))
+            text_acc = ""
+
+        blocks: list[object] = []
+        for kind, value in order:
+            if kind == "text":
+                blocks.append(TextBlock(text=value))
+                continue
+            part = tool_call_parts[value]
             try:
                 arguments = json.loads(part["arguments"]) if part["arguments"] else {}
             except json.JSONDecodeError as e:

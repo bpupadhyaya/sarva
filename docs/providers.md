@@ -603,6 +603,56 @@ the new test fail with the literal old bug's own shape: both text
 segments merged into one block, hoisted ahead of both calls. 2 new
 tests, 754 → 756 Python tests.
 
+### The third real adapter with the identical gap, finally found in `openai_provider.py` after five rounds flagged as the likely place to check
+
+`OllamaProvider`/`GoogleProvider`'s own ordering fixes were both found
+and closed in earlier rounds; `openai_provider.py`'s own text-
+accumulation logic was named as the natural next place to check every
+round since, and kept coming back clean until a fresh-eyes sweep
+finally confirmed the identical bug there too. `OpenAIProvider.
+generate()` accumulated every streamed text delta into one running
+string across the *whole* response, then spliced it into the final
+message exactly once — unconditionally first, before every tool call —
+while tool calls themselves were already assembled in true
+chronological order relative to each other (Python dict insertion
+order on `tool_call_parts`, keyed by the SDK's own per-call `index`).
+
+Confirmed live: an ordinary sequential-tool-calling turn (reasoning
+text, a call, more reasoning text, another call) produced one
+`TextBlock` with both segments concatenated, hoisted ahead of both
+tool calls — corrupting the persisted `Message` `AgentLoop` appends
+straight to `transcript_out`/`SessionStore` and resends as history,
+the identical downstream consequence both sibling fixes above already
+named. Reachable on any OpenAI (or OpenAI-compatible — the adapter
+just wraps `openai.AsyncOpenAI()`, and many self-hosted/third-party
+endpoints speak this same SDK) tool-using model that emits explanatory
+text between two sequential tool calls in one turn — the normal
+sequential-tool-calling path, no malformed input needed.
+
+**Genuinely trickier to fix here than in either sibling adapter**:
+unlike Ollama (each tool call complete in one chunk) or Gemini (each
+function-call part is a single, complete unit), OpenAI streams a tool
+call's `arguments` string as fragments across *many* chunks sharing
+one `index` — there's no single "this chunk completed a call" moment
+to flush text against, since a call isn't a real `ToolCallBlock` until
+the whole stream ends and every fragment across every chunk has been
+assembled. Fixed instead by recording an *ordered* list of markers as
+things first appear — a flushed text segment, or the first-seen index
+of a tool call (its actual `ToolCallBlock` is still only built once,
+at the end, from the same `tool_call_parts` accumulator this adapter
+already had) — and replaying that order when assembling the final
+block list, rather than reconstructing position from the accumulator
+plus a single trailing text blob. Verified live the interleaved-turn
+repro now produces the true `[text, call, text, call]` order, and the
+pre-existing two-concurrent-tool-calls argument-reassembly test (the
+one piece of genuinely novel logic this file's own module docstring
+already calls out) still passes unchanged — the ordering fix doesn't
+touch how arguments themselves accumulate, only where the resulting
+blocks land. Verified by reverting and watching the new test fail with
+the literal old bug's own shape: both text segments merged into one
+block, hoisted ahead of both calls. 2 new tests, 766 → 768 Python
+tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with

@@ -15257,3 +15257,88 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## The third real adapter with the identical text/tool-call ordering gap, finally found in `openai_provider.py` after five rounds flagged as the likely place to check
+
+Round 101. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~22 rounds, with
+anthropic_provider.py/openai_provider.py's own text-accumulation logic
+carried forward as the standing high-priority candidate for a fifth
+round running, after the identical bug shipped for Ollama then Google
+in earlier rounds. This round it finally paid off: found in
+`openai_provider.py`, not `anthropic_provider.py` (whose SDK hands
+back an already-assembled `get_final_message()` with no equivalent
+accumulation logic to get wrong in the first place).
+
+**The bug**: `OpenAIProvider.generate()` accumulated every streamed
+text delta into one running string across the whole response, then
+spliced it into the final message exactly once -- unconditionally
+first, before every tool call -- while tool calls themselves were
+already assembled in true chronological order relative to each other
+(Python dict insertion order on `tool_call_parts`, keyed by the SDK's
+own per-call `index`). The identical asymmetry already found and fixed
+in `google_provider.py` and `ollama_provider.py`, never checked for in
+this third sibling.
+
+**Confirmed live**: an ordinary sequential-tool-calling turn
+(reasoning text, a call, more reasoning text, another call) produced
+one `TextBlock` with both segments concatenated, hoisted ahead of both
+tool calls -- corrupting the persisted `Message` `AgentLoop` appends
+straight to `transcript_out`/`SessionStore` and resends as history,
+the identical downstream consequence both sibling fixes already named.
+Reachable on any OpenAI (or OpenAI-compatible -- the adapter just
+wraps `openai.AsyncOpenAI()`, many self-hosted/third-party endpoints
+share this SDK) tool-using model that emits explanatory text between
+two sequential tool calls -- the normal path, no malformed input
+needed.
+
+**Genuinely trickier to fix here than in either sibling adapter**:
+unlike Ollama (each tool call complete in one chunk) or Gemini (each
+function-call part is a single, complete unit), OpenAI streams a tool
+call's `arguments` string as fragments across many chunks sharing one
+`index` -- there's no single "this chunk completed a call" moment to
+flush text against, since a call isn't a real `ToolCallBlock` until
+the whole stream ends. Fixed by recording an ordered list of markers
+as things first appear -- a flushed text segment, or the first-seen
+index of a tool call (its actual `ToolCallBlock` still only built once,
+at the end, from the existing `tool_call_parts` accumulator) -- and
+replaying that order when assembling the final block list, instead of
+reconstructing position from the accumulator plus a single trailing
+text blob.
+
+**Verified live**: the interleaved-turn repro now produces the true
+`[text, call, text, call]` order, and the pre-existing two-concurrent-
+tool-calls argument-reassembly test (the one piece of genuinely novel
+logic this file's own module docstring calls out) still passes
+unchanged -- the ordering fix doesn't touch how arguments themselves
+accumulate, only where the resulting blocks land.
+
+**Verified by reverting** `openai_provider.py` alone and watching the
+new test fail with the literal old bug's own shape: both text segments
+merged into one block, hoisted ahead of both calls.
+
+**2 new tests, 766 -> 768 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the Ollama version of this same fix chapter
+-- the third instance of an ordering bug that was, in retrospect,
+present in every provider adapter with incremental streamed
+accumulation from the start.
+
+**Fifty-six of the last fifty-seven rounds (46-67, 70-101) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.**
+Closes out a heuristic that had been explicitly carried forward and
+re-flagged in every sweep prompt for five consecutive rounds --
+worth noting that persistence on a well-reasoned heuristic across
+several unsuccessful rounds is what actually found this one; a
+heuristic dropped after two or three clean checks would have missed
+it. `anthropic_provider.py` can now be reasonably ruled out for this
+specific bug class (its SDK returns an already-assembled final
+message with no equivalent per-delta accumulation step to get subtly
+wrong), closing this particular multi-round thread for good.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
