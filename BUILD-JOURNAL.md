@@ -16516,3 +16516,68 @@ The three infra-blocked items remain deferred (Tauri `csp: null`, RL
 harness sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The third instance of the same stop-reason gap, in the OpenAI adapter's own deprecated `function_call` value
+
+Round 117. Followed up directly on a lead named but deliberately not
+acted on in round 116 (to keep one fix per round): OpenAI's own
+`finish_reason` -> `StopReason` mapping had the same confirmed-but-
+unfixed pattern already fixed twice, in `google_provider.py`
+(round 113) and `anthropic_provider.py` (round 115).
+
+**The bug**: the real OpenAI SDK's `Choice.finish_reason`
+(`openai.types.chat.chat_completion_chunk`) is `Literal["stop",
+"length", "tool_calls", "content_filter", "function_call"]` --
+`openai_provider.py`'s own `_STOP_REASON_MAP` covered the first four
+but not `function_call`, the deprecated legacy single-function-calling
+API's own stop reason -- still a real, documented value the SDK's
+type carries, not a hypothetical one.
+
+**Worse than the Google/Anthropic instances of this same bug**: this
+adapter only ever parses `delta.tool_calls` (the modern API), never
+the legacy `delta.function_call` field, so a response using the old
+API produces no `ToolCallBlock` at all -- the function call itself is
+silently unparsed, not just misreported.
+
+**Confirmed live** with a duck-typed fake stream yielding
+`finish_reason="function_call"`: it fell through the map's own
+`.get(finish_reason or "stop", StopReason.END_TURN)` default straight
+into the success path, reporting a genuinely unparsed function call as
+a normal, complete answer.
+
+**Fixed** identically to both sibling adapters: `function_call` mapped
+explicitly to `REFUSAL`, and the lookup's own default changed from
+`StopReason.END_TURN` to `StopReason.REFUSAL` -- `stop` is the only
+value that legitimately means success and it's already explicitly
+mapped (the pre-existing `finish_reason or "stop"` fallback for a
+`None` value is unchanged), so this adapter is now protected against
+any future unmapped value too.
+
+**Verified live**: both `function_call` and a deliberately
+unrecognized future value now report `REFUSAL` instead of `END_TURN`.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape.
+
+**2 new tests, 794 -> 796 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+chapter directly after the Anthropic `pause_turn` chapter this bug is
+a sibling of.
+
+**Seventy-two of the last seventy-three rounds (46-67, 70-117) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** This closes the loop across all three real provider adapters
+(Anthropic/OpenAI/Google) -- each has now independently needed the
+exact same fix for its own SDK's stop/finish-reason enum, confirming
+this was a real, systemic gap in this project's original provider-
+adapter design (an ad-hoc, incomplete lookup table with a
+success-shaped default) rather than three unrelated coincidences.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

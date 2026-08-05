@@ -136,6 +136,55 @@ async def test_text_only_stream_produces_end_turn():
     assert done.message.content[0].text == "Hello, world"
 
 
+async def test_a_legacy_function_call_finish_reason_is_not_reported_as_a_silent_success():
+    # A real bug found by a fresh-eyes sweep, the third instance of a bug
+    # class already fixed in both sibling adapters (Google's FinishReason
+    # mapping, Anthropic's pause_turn): the real OpenAI SDK's own
+    # finish_reason type also includes "function_call" -- the deprecated
+    # legacy single-function-calling API's own stop reason, still a real,
+    # documented value the SDK's type carries. This adapter only ever
+    # parses delta.tool_calls (the modern API), never the legacy
+    # delta.function_call field, so a response using the old API produces
+    # no ToolCallBlock at all. Confirmed live before this fix: it fell
+    # through _STOP_REASON_MAP's own `.get(..., StopReason.END_TURN)`
+    # default straight into the success path, reporting an unparsed
+    # function call as a normal, complete answer.
+    chunks = [
+        _chunk(
+            content="unparsed legacy function call",
+            finish_reason="function_call",
+            usage=_usage(10, 5),
+        )
+    ]
+    provider = OpenAIProvider(client=_FakeClient(chunks))
+    req = _simple_request()
+
+    events = [e async for e in provider.generate(req)]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.stop_reason != StopReason.END_TURN
+    assert done.stop_reason == StopReason.REFUSAL
+
+
+async def test_an_unrecognized_finish_reason_fails_safe_as_refusal_not_end_turn():
+    # The other half of the same fix: the map's own default was changed
+    # from StopReason.END_TURN to StopReason.REFUSAL, so any FUTURE
+    # finish_reason value this map hasn't explicitly named yet also
+    # fails safe -- a clean REFUSAL a caller can see, never a silently
+    # "successful" response just because the exact value wasn't
+    # enumerated.
+    chunks = [_chunk(content="x", finish_reason="some_future_reason", usage=_usage(10, 5))]
+    provider = OpenAIProvider(client=_FakeClient(chunks))
+    req = _simple_request()
+
+    events = [e async for e in provider.generate(req)]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.stop_reason == StopReason.REFUSAL
+
+
 async def test_interleaved_text_and_tool_calls_keep_their_chronological_order():
     # A real bug found by a fresh-eyes sweep, the identical gap already
     # found and fixed in google_provider.py/ollama_provider.py, just

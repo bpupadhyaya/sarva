@@ -67,6 +67,25 @@ _STOP_REASON_MAP = {
     "tool_calls": StopReason.TOOL_USE,
     "length": StopReason.MAX_TOKENS,
     "content_filter": StopReason.REFUSAL,
+    # A real bug found by a fresh-eyes sweep, the third instance of a
+    # bug class already fixed in both sibling adapters (google_
+    # provider.py's FinishReason mapping, anthropic_provider.py's
+    # pause_turn): the real OpenAI SDK's own finish_reason type
+    # (openai.types.chat.chat_completion_chunk.Choice) also includes
+    # "function_call" -- the deprecated legacy single-function-calling
+    # API's own stop reason, still a real, documented value the SDK's
+    # type still carries, not a hypothetical one. This adapter only
+    # ever parses `delta.tool_calls` (the modern API), never the
+    # legacy `delta.function_call` field, so a response using the old
+    # API produces no ToolCallBlock at all -- confirmed live, a
+    # duck-typed fake stream yielding finish_reason="function_call"
+    # fell through the map's own `.get(..., StopReason.END_TURN)`
+    # default straight into the success path, reporting what was
+    # actually an unparsed function call as a normal, complete answer.
+    # Mapped to REFUSAL rather than silently claiming success, matching
+    # the honest treatment `AgentLoop` already gives every other
+    # "not a genuine complete answer" case.
+    "function_call": StopReason.REFUSAL,
 }
 
 
@@ -351,7 +370,15 @@ class OpenAIProvider:
 
         prompt_tokens, completion_tokens, cached_tokens = usage_tokens
         yield DoneEvent(
-            stop_reason=_STOP_REASON_MAP.get(finish_reason or "stop", StopReason.END_TURN),
+            # Default REFUSAL, not END_TURN -- see _STOP_REASON_MAP's
+            # own comment on "function_call". "stop" is the only value
+            # that legitimately means success, and it's already
+            # explicitly mapped (also covering the `finish_reason is
+            # None` case via the `or "stop"` above, unchanged from
+            # before), so any other value, known today or added by a
+            # future SDK release, now fails safe instead of silently
+            # claiming a complete, successful answer.
+            stop_reason=_STOP_REASON_MAP.get(finish_reason or "stop", StopReason.REFUSAL),
             message=Message(role="assistant", content=blocks),
             usage=Usage(
                 input_tokens=prompt_tokens,

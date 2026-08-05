@@ -732,6 +732,45 @@ watching both new tests fail with the literal old bug's own shape:
 `stop_reason == END_TURN` for both `pause_turn` and a deliberately
 unrecognized future value. 2 new tests, 790 → 792 Python tests.
 
+### The third instance of the same stop-reason gap, in the OpenAI adapter's own deprecated `function_call` value
+
+A much later fresh-eyes sweep, following up directly on a lead named
+but deliberately not acted on in the previous round (to keep one fix
+per round), checked the third and last of the three real provider
+adapters against its own SDK's finish-reason type the same way. The
+real OpenAI SDK's `Choice.finish_reason`
+(`openai.types.chat.chat_completion_chunk`) is `Literal["stop",
+"length", "tool_calls", "content_filter", "function_call"]` —
+`openai_provider.py`'s own `_STOP_REASON_MAP` covered the first four
+but not `function_call`, the deprecated legacy single-function-calling
+API's own stop reason — still a real, documented value the SDK's type
+carries, not a hypothetical one.
+
+Worse than the Google/Anthropic instances of this same bug: this
+adapter only ever parses `delta.tool_calls` (the modern API), never
+the legacy `delta.function_call` field, so a response using the old
+API produces no `ToolCallBlock` at all — the function call itself is
+silently unparsed, not just misreported. Confirmed live with a
+duck-typed fake stream yielding `finish_reason="function_call"`: it
+fell through the map's own `.get(finish_reason or "stop",
+StopReason.END_TURN)` default straight into the success path,
+reporting a genuinely unparsed function call as a normal, complete
+answer.
+
+Fixed identically to both sibling adapters: `function_call` mapped
+explicitly to `REFUSAL`, and the lookup's own default changed from
+`StopReason.END_TURN` to `StopReason.REFUSAL` — `stop` is the only
+value that legitimately means success and it's already explicitly
+mapped (the pre-existing `finish_reason or "stop"` fallback for a
+`None` value is unchanged), so this adapter is now protected against
+any future unmapped value too. This closes the loop across all three
+real provider adapters — each has now independently needed this exact
+fix for its own SDK's stop/finish-reason enum. Verified live: both
+`function_call` and a deliberately unrecognized future value now
+report `REFUSAL` instead of `END_TURN`. Verified by reverting and
+watching both new tests fail with the literal old bug's own shape. 2
+new tests, 794 → 796 Python tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with
