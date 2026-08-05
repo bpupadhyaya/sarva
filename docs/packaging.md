@@ -405,6 +405,34 @@ declines. Verified the new test is real: reverted the fix and watched
 it fail with the literal old bug's own shape (`is_error: False`, the
 file written) before re-applying. 1 new test, 764 → 765 Python tests.
 
+### That same `bool(...)` gap existed two lines above it too — in `auto`, materially more severe than the `approved` fix it sits right next to
+
+The very next round's fresh-eyes sweep found the identical truthiness-
+cast bug in the same handler, on the two other caller-supplied JSON
+values sitting just above `ws_confirm`: `auto = bool(payload.get
+("auto", False))` and `verify = bool(payload.get("verify", False))`.
+`auto` selects `always_allow` (zero user confirmation, ever) over the
+real `ws_confirm` gate for *every* destructive tool call in the whole
+session — a client sending `"auto": "false"` (a JSON string, the exact
+same realistic shape the `approved` fix's own comment already names)
+got every destructive tool call auto-approved with no confirmation
+prompt at all, the opposite of what sending a falsy-looking value would
+reasonably suggest. Confirmed live: a scripted `write_file` turn with
+`"auto": "false"` and the client deliberately never replying to any
+prompt completed in milliseconds with the file already written; the
+same turn with the real boolean `False` correctly blocked on
+`ws_confirm` and timed out as a decline. Materially more severe than
+the `approved` bug it sits two lines above: that one could misapprove
+only one already-surfaced confirmation prompt; this one disables the
+confirmation system for the entire session, silently, for a client that
+was actively trying to ask for it. Fixed the identical way: `auto =
+payload.get("auto") is True`, `verify = payload.get("verify") is True`.
+Verified live the identical `"auto": "false"` request now correctly
+blocks on confirmation. Verified the new test is real: reverted the fix
+and watched it fail with the tool having already run
+(`is_error: False`, no confirmation reply ever sent) before
+re-applying. 1 new test, 765 → 766 Python tests.
+
 **A real gap found by checking what the desktop app actually calls, not
 what the server merely supports:** `/chat` has taken optional
 `image_base64`/`image_media_type` fields since images were wired into

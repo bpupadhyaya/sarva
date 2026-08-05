@@ -15178,3 +15178,82 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## Round 100: `auto`'s own `bool(...)` cast could silently disable the destructive-tool confirmation system for a whole session — the same bug fixed for `approved` one round earlier, sitting two lines above it
+
+Round 100. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~21 rounds, with the
+truthy-vs-strict-boolean heuristic (found twice already: the empty-
+string `session` bug, then `ws_confirm`'s own `approved` bug) carried
+forward with an explicit instruction to grep for other `bool(...)`
+casts on caller-supplied JSON. It found one immediately, in the same
+function that was fixed just last round.
+
+**The bug:** `auto = bool(payload.get("auto", False))` and `verify =
+bool(payload.get("verify", False))` sit two lines above `ws_confirm`
+in `/ws/chat`'s handler -- the exact same truthiness-cast mistake the
+previous round's fix closed for `approved`, right there in the same
+scope, never propagated to its own siblings. `auto` selects
+`always_allow` (zero user confirmation, ever) over the real
+`ws_confirm` gate for every destructive tool call in the whole
+session. `bool("false")` is `True` in Python.
+
+**Confirmed live**: a client sending `"auto": "false"` (a JSON string
+-- the exact realistic shape the previous round's own fix comment
+already named as a common client mistake) got every destructive tool
+call auto-approved with zero confirmation prompts -- a scripted
+`write_file` turn completed in milliseconds with the file already
+written, and the client never sent a single confirmation reply. The
+same turn with the real boolean `False` correctly blocked on
+`ws_confirm` and timed out as a decline (negative control).
+
+**Why this one is worse than last round's**: the `approved` bug could
+misapprove one already-surfaced confirmation prompt for one tool call.
+This bug disables the entire confirmation *system* for the whole
+session -- every destructive call the model makes for the rest of the
+turn runs unconfirmed, silently, for a client that was actively trying
+to ask for confirmation-gated behavior by sending what looked like a
+falsy value.
+
+**Why concretely reachable**: `/ws/chat` accepts raw, schema-less
+JSON with no validation on this field -- any hand-rolled client (a
+curl script, a non-browser integration, a config-driven client that
+stringifies its fields) sending `"auto": "false"` intending safety
+hits this immediately. The first-party desktop app avoids it only by
+accident (TypeScript enforces the boolean type at its one call site).
+
+**Fixed** identically to last round's `approved` fix: `auto =
+payload.get("auto") is True`, `verify = payload.get("verify") is
+True`.
+
+**Verified live**: the identical `"auto": "false"` request now
+correctly blocks on confirmation instead of silently bypassing it.
+
+**Verified by reverting** `server/app.py` alone and watching the new
+test fail with the literal old bug's own shape: the tool already run
+(`is_error: False`), no confirmation reply ever sent by the client.
+
+**1 new test, 765 -> 766 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after last round's `approved` fix chapter, naming
+the sibling gap and its higher severity explicitly.
+
+**Fifty-five of the last fifty-six rounds (46-67, 70-100) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** One
+hundred rounds into this project's non-stop bug-hunting loop, the
+single most productive discipline remains unchanged: a fix that closes
+one instance of a bug class is itself a signal to grep the same file
+for every sibling sharing the identical shape, immediately, in the
+same round if possible -- here it took exactly one more round to find
+the sibling, sitting two lines away in the same function, materially
+more severe than the bug that was just fixed. The standing instruction
+("find one real bug, verify it live, fix it properly, write a
+regression test, document it, ship it, watch CI, repeat") has now run
+unbroken for 100 rounds with only two of them coming back clean.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

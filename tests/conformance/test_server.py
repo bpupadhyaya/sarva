@@ -1108,6 +1108,54 @@ def test_websocket_auto_true_never_blocks_on_a_client_reply(tmp_path, monkeypatc
     assert events[-1]["state"] == "done"
 
 
+def test_websocket_auto_as_a_string_false_does_not_silently_enable_auto_mode(tmp_path, monkeypatch):
+    # A real bug found by a fresh-eyes sweep, the identical shape
+    # already found and fixed for the confirmation reply's own
+    # `approved` field (see ws_confirm's own comment), just never
+    # propagated to `auto` in the same handler: `bool(...)` is a
+    # Python-truthiness cast, not a strict boolean check --
+    # `bool("false")` is `True`, since any non-empty string is truthy.
+    # `auto` selects `always_allow` (zero user confirmation) over the
+    # real confirmation gate for every destructive tool call in the
+    # whole session -- confirmed live before this fix: a client sending
+    # `"auto": "false"` (a JSON STRING, exactly what a form/select's
+    # `.value`, or any client serializing booleans as strings, produces)
+    # got every destructive tool call auto-approved with zero
+    # confirmation prompts, the opposite of what a caller sending a
+    # falsy-looking value would reasonably expect -- materially more
+    # severe than the `approved` bug, since that one could misapprove
+    # only one already-surfaced prompt, while this one disables the
+    # confirmation system for the entire session.
+    import sarva.server.app as app_module
+
+    monkeypatch.setattr(app_module, "_CONFIRM_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.chdir(tmp_path)
+    call = ToolCallBlock(id="c1", name="write_file", arguments={"path": "hi.txt", "content": "hi"})
+    _use_scripted_mock(
+        monkeypatch,
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="ok, skipped")],
+    )
+
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        # Deliberately never replies to any needs_confirmation frame --
+        # if "false" were wrongly treated as auto mode, the tool would
+        # run immediately with no prompt at all; if correctly treated as
+        # real confirmation-gated mode, this must time out as a decline.
+        ws.send_json({"message": "write a file for me", "auto": "false"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    finished = [e for e in events if e["type"] == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0]["result"]["is_error"] is True
+    assert not (tmp_path / "hi.txt").exists()
+
+
 def test_doctor_endpoint_returns_the_same_checks_the_cli_command_reports(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

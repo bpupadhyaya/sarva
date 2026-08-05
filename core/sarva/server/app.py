@@ -428,9 +428,30 @@ def create_app() -> FastAPI:
             # session" means, instead of "" reaching SessionStore.
             # _sanitize() and raising before the agent ever ran.
             session = payload.get("session") or None
-            auto = bool(payload.get("auto", False))
+            # A real bug found by a fresh-eyes sweep, the identical shape
+            # already found and fixed a few lines below for `approved`
+            # (see ws_confirm's own comment), just never propagated to
+            # these two sibling caller-supplied JSON values in the same
+            # handler: `bool(...)` is a Python-truthiness cast, not the
+            # strict boolean check a flag this consequential needs --
+            # `bool("false")` is `True`, since any non-empty string is
+            # truthy. `auto` selects `always_allow` (zero user
+            # confirmation) over the real `ws_confirm` gate for every
+            # destructive tool call in the whole session -- confirmed
+            # live: a client sending `"auto": "false"` (a JSON STRING,
+            # exactly what a form/select's `.value`, or any client
+            # serializing booleans as strings, produces) got EVERY
+            # destructive tool call auto-approved with zero confirmation
+            # prompts, the file written with no reply ever sent by the
+            # client -- the opposite of what a caller sending a falsy-
+            # looking value would reasonably expect, and materially more
+            # severe than the `approved` bug (that one could misapprove
+            # one already-surfaced prompt; this one disables the
+            # confirmation system for the entire session). `verify` has
+            # the identical gap, lower stakes but the same fix.
+            auto = payload.get("auto") is True
             model = payload.get("model")
-            verify = bool(payload.get("verify", False))
+            verify = payload.get("verify") is True
 
             async def ws_confirm(call: ToolCallBlock) -> bool:
                 # A real bug found by actually sending a malformed
