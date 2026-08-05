@@ -243,7 +243,25 @@ def create_app() -> FastAPI:
             # now catches an invalid name -- entering the `async with`
             # raises before the inner try block below even starts.
             async with store.locked(session):
-                history = store.load(session) if session else []
+                # asyncio.to_thread: a real bug found by a fresh-eyes
+                # sweep, the identical bug class already fixed at least
+                # five separate times in this project (four times in
+                # agent/tools.py's memory tools, once more for that same
+                # file's ReadFileTool/WriteFileTool/EditFileTool) --
+                # SessionStore.load()/.save() do real, synchronous
+                # filesystem I/O (a read_text() call, an atomic_write_
+                # bytes() open/write/fsync/rename), called directly on
+                # the event loop despite every OTHER blocking call in
+                # this same handler (build_router, build_providers,
+                # run_diagnostics, save_config, even the session lock's
+                # own flock/msvcrt.locking acquire inside store.locked()
+                # itself) already being wrapped. Confirmed live: a
+                # simulated slow disk froze the whole process for the
+                # entire call, zero heartbeat ticks recorded -- on a
+                # real busy/network-mounted filesystem this stalls every
+                # OTHER concurrent user's in-flight /chat or /ws/chat
+                # turn too, not just the one doing the session I/O.
+                history = await asyncio.to_thread(store.load, session) if session else []
                 # A real bug found by actually sending {"image_base64":
                 # "not-valid-base64!!!", ...}: base64.b64decode() raises
                 # binascii.Error (a ValueError subclass) for malformed
@@ -305,7 +323,9 @@ def create_app() -> FastAPI:
                         spend = event.spend
 
                 if session and state == AgentState.DONE:
-                    store.save(session, transcript)
+                    # The save half of the same asyncio.to_thread fix as
+                    # the load above.
+                    await asyncio.to_thread(store.save, session, transcript)
 
                 return ChatResponse(
                     state=state,
@@ -535,7 +555,11 @@ def create_app() -> FastAPI:
                             # runs; /ws/chat parses raw, schema-less JSON,
                             # so nothing validated this until now.
                             raise TypeError(f"model must be a string, got {type(model).__name__}")
-                        history = store.load(session) if session else []
+                        # asyncio.to_thread: the WS counterpart to the
+                        # identical fix just applied to /chat -- see that
+                        # call site's own comment for the full history of
+                        # this bug class.
+                        history = await asyncio.to_thread(store.load, session) if session else []
                         # The WS counterpart to the same real bug just fixed
                         # for /chat: a malformed "image_base64" made
                         # base64.b64decode() raise binascii.Error (a
@@ -592,7 +616,8 @@ def create_app() -> FastAPI:
                             state = event.state
 
                     if session and state == AgentState.DONE:
-                        store.save(session, transcript)
+                        # The save half of the same fix as the load above.
+                        await asyncio.to_thread(store.save, session, transcript)
             except (ValueError, TypeError) as e:
                 # SessionStore._sanitize() raises a plain ValueError for an
                 # invalid session name (or TypeError for a non-string one),

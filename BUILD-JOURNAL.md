@@ -16655,3 +16655,74 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `/chat` and `/ws/chat` themselves never wrapped `SessionStore.load`/`.save` -- the sibling gap the `POST /config` fix never checked for
+
+Round 119. Delegated a fresh-eyes sweep to a subagent, explicitly
+instructed to apply round 118's own new lens: when a bug class has
+been fixed N times within one file or file family, audit every OTHER
+remaining call site of that shape across the whole codebase, not just
+within the file that prompted the fix. It found that `core/sarva/
+memory/session.py`'s `SessionStore.load()`/`.save()` -- a `read_text()`
+call, an `atomic_write_bytes()` open/write/fsync/rename -- were called
+directly from both `/chat` and `/ws/chat`'s own `async def` handlers in
+`server/app.py` with no `asyncio.to_thread`, even though every *other*
+blocking call in these same two handlers (`build_router`,
+`build_providers`, `run_diagnostics`, `save_config`, even the session
+lock's own flock acquire inside `store.locked()`) was already wrapped
+-- including the `POST /config` fix sitting directly above this one in
+the same file, from an earlier round.
+
+**Confirmed live** with the same heartbeat-coroutine methodology used
+throughout this project for this exact bug class: a simulated slow
+disk froze the whole event loop for the duration of a single `store.
+load()` call -- 0 of ~20 expected heartbeat ticks. A concurrent-
+request race (the technique the `POST /config` fix's own regression
+test uses) turned out NOT to reliably catch this specific call site:
+`store.locked(session)` does its own real `asyncio.to_thread` dispatch
+for the session flock *before* `store.load()` ever runs, and that
+genuine yield point lets an unrelated fast request sneak in and finish
+regardless of whether the later `load()` call blocks -- discovered the
+hard way when the first version of this round's own regression tests
+passed even against the unfixed code, and had to be rewritten to use
+the direct heartbeat-during-the-actual-call technique instead, which
+isn't fooled by that intervening yield.
+
+**Fixed** identically to every sibling instance of this bug class:
+both calls, in both handlers, now go through `asyncio.to_thread`.
+
+**Verified live**: the same heartbeat repro now ticks throughout the
+call instead of freezing solid.
+
+**Verified by reverting** `server/app.py` alone and watching both new
+tests fail with the literal old bug's own shape: near-zero heartbeat
+ticks for both the load and save call sites.
+
+**2 new tests, 799 -> 801 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+chapter directly after the `POST /config` `asyncio.to_thread` chapter
+this bug is a sibling of.
+
+**Seventy-four of the last seventy-five rounds (46-67, 70-119) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A genuinely useful methodological lesson from this round,
+worth carrying forward alongside the bug-class heuristics themselves:
+the concurrent-request-race verification technique this project has
+used since round ~104 for blocking-I/O fixes is NOT universally
+reliable -- it only proves the absence of a freeze if there's no
+OTHER genuine await between the start of the handler and the target
+blocking call for a fast sibling request to exploit. Any handler that
+does real async work (like a lock acquisition) before the suspect call
+needs the direct heartbeat-during-the-call technique instead, not the
+race. A future audit could usefully check whether any of this
+project's OTHER existing "does not stall a concurrent request" tests
+have the same false-negative gap this one round's first draft did.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

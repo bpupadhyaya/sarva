@@ -369,6 +369,107 @@ async def test_a_slow_save_config_does_not_stall_a_concurrent_request(monkeypatc
     assert fast_elapsed < 0.1, f"/health took {fast_elapsed:.3f}s -- event loop was blocked"
 
 
+async def test_a_slow_session_load_does_not_freeze_the_event_loop(monkeypatch):
+    # A real bug found by a fresh-eyes sweep, the identical bug class
+    # already fixed at least five separate times in this project (four
+    # times in agent/tools.py's memory tools, once more for that same
+    # file's ReadFileTool/WriteFileTool/EditFileTool): SessionStore.
+    # load() does real, synchronous filesystem I/O (a read_text() call),
+    # called directly from this handler's own async def with no
+    # asyncio.to_thread, even though every OTHER blocking call in this
+    # same file (build_router, build_providers, run_diagnostics,
+    # save_config, even the session lock's own flock/msvcrt.locking
+    # acquire inside store.locked()) is already wrapped against exactly
+    # this class of freeze. Confirmed live with a simulated slow disk: 0
+    # of ~20 expected heartbeat ticks landed on the event loop during
+    # the call.
+    #
+    # A concurrent-request race (the technique the save_config sibling
+    # test above uses) doesn't reliably catch this specific call site:
+    # store.locked(session) does its own real asyncio.to_thread dispatch
+    # for the session flock *before* store.load() ever runs, and that
+    # genuine yield point lets an unrelated fast request sneak in and
+    # finish regardless of whether the later load() call blocks. A
+    # direct heartbeat-coroutine measurement across the one request that
+    # actually exercises the slow call -- the same technique this
+    # project's own file/memory-tool tests use -- isn't fooled by that.
+    import time
+
+    import httpx
+
+    _force_mock_only(monkeypatch)
+
+    real_load = SessionStore.load
+
+    def slow_load(self, name):
+        time.sleep(0.3)  # simulate a slow/contended or network-mounted disk
+        return real_load(self, name)
+
+    monkeypatch.setattr(SessionStore, "load", slow_load)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        hb_task = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+        resp = await client.post("/chat", json={"message": "hi", "session": "default"})
+        hb_task.cancel()
+
+    assert resp.status_code == 200
+    # The real, decisive assertion: while the slowed load() ran, the
+    # event loop must have kept running other coroutines -- a near-zero
+    # tick count is the literal old bug reproducing itself (the loop
+    # frozen solid for the whole call).
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
+async def test_a_slow_session_save_does_not_freeze_the_event_loop(monkeypatch):
+    # The save half of the same fix as the load test above:
+    # SessionStore.save() (atomic_write_bytes' own open/write/fsync/
+    # rename) has the identical blocking-I/O-with-no-asyncio.to_thread
+    # shape, reached on every successful turn that has a session. Same
+    # heartbeat-coroutine technique as the load test above, for the same
+    # reason a concurrent-request race wouldn't reliably catch it.
+    import time
+
+    import httpx
+
+    _force_mock_only(monkeypatch)
+
+    real_save = SessionStore.save
+
+    def slow_save(self, name, messages):
+        time.sleep(0.3)  # simulate a slow/contended or network-mounted disk
+        return real_save(self, name, messages)
+
+    monkeypatch.setattr(SessionStore, "save", slow_save)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        hb_task = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0)
+        resp = await client.post("/chat", json={"message": "hi", "session": "default"})
+        hb_task.cancel()
+
+    assert resp.status_code == 200
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
 def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
     _force_mock_only(monkeypatch)
     monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)

@@ -750,6 +750,50 @@ methodology the slow-Ollama-probe test already uses): `/health` took
 0.211s instead of its expected few milliseconds, reproducing the exact
 old freeze. 1 new test, 752 → 753 Python tests.
 
+### `/chat` and `/ws/chat` themselves never wrapped `SessionStore.load`/`.save` — the sibling gap the `POST /config` fix above never checked for
+
+A much later fresh-eyes sweep, applying the round that had just found
+`ReadFileTool`/`WriteFileTool`/`EditFileTool` blocking the event loop
+in `agent/tools.py` (see the agent-loop chapter) as a lens one file
+over: `SessionStore.load()`/`.save()` (a `read_text()` call, an
+`atomic_write_bytes()` open/write/fsync/rename — see the memory
+chapter) are real, synchronous filesystem I/O, called directly from
+both `/chat` and `/ws/chat`'s own `async def` handlers with no
+`asyncio.to_thread` — even though every *other* blocking call in these
+same two handlers (`build_router`, `build_providers`,
+`run_diagnostics`, `save_config`, even the session lock's own
+`flock`/`msvcrt.locking` acquire inside `store.locked()` itself) was
+already wrapped, including the `POST /config` fix directly above this
+one in the same file.
+
+Confirmed live with the same heartbeat-coroutine methodology used
+throughout this project for this exact bug class: a simulated slow
+disk froze the whole event loop for the duration of a single `store.
+load()` call — near-zero ticks recorded instead of the expected count.
+A concurrent-request race (the technique the `POST /config` fix's own
+regression test uses) doesn't reliably catch this specific call site:
+`store.locked(session)` does its own real `asyncio.to_thread` dispatch
+for the session flock *before* `store.load()` ever runs, and that
+genuine yield point lets an unrelated fast request sneak in and finish
+regardless of whether the later `load()` call blocks — the heartbeat
+technique, measured across the one request that actually exercises the
+slow call, isn't fooled by that. Reachable with no adversarial input:
+`store.load()` runs on every `/chat`/`/ws/chat` turn with a session
+set, and `store.save()` on every one that completes successfully — on
+a slow or network-mounted filesystem (this project's own `sarva.
+config` docstring already names "shared dev servers, lab machines, CI
+runners with persistent home directories" as real, not hypothetical),
+this stalls every *other* concurrent user's in-flight turn too, not
+just the one doing the session I/O.
+
+Fixed identically to every sibling instance of this bug class: both
+calls, in both handlers, now go through `asyncio.to_thread`. Verified
+live: the same heartbeat repro now ticks throughout the call instead
+of freezing solid. Verified by reverting `server/app.py` alone and
+watching both new tests fail with the literal old bug's own shape —
+near-zero heartbeat ticks for both the load and save call sites. 2 new
+tests, 799 → 801 Python tests.
+
 ## First-run guided setup — a real gap between what was promised and what shipped
 
 T4's own definition of done, and the README's own quickstart text, have
