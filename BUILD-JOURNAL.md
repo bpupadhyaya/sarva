@@ -14690,3 +14690,91 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `_prune_old_runs` was this file's one remaining unwrapped blocking call -- and the obvious fix reopened an already-fixed bug
+
+Round 94. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~15 rounds and pointed at
+sibling-propagation gaps, buffer-then-splice patterns, overclaiming
+comments, and unwrapped blocking calls specifically. It found a real
+one: `core/sarva/agent/loop.py` had zero `asyncio.to_thread` calls
+anywhere in the whole file, despite this exact "blocking call inside
+an async def" bug class already having been found and fixed at every
+other I/O call site in the codebase (`NoteTool`, `VectorMemoryStore`,
+`SessionStore`, the PDF-extraction degrader, the Ollama probe and
+`save_config` in `server/app.py`, fixed just last round).
+
+**The bug**: `_prune_old_runs` -- a directory listing, a `stat()` per
+candidate, a `shutil.rmtree()` per directory to delete -- ran directly,
+synchronously, unconditionally on every `run()` call. Confirmed live:
+with 1500 accumulated run directories (~235MB, an ordinary amount for
+a long-running `sarva serve` process past the default 200-run
+retention cap), racing two concurrent `AgentLoop.run()` calls the same
+way `/chat`/`/ws/chat` serve two simultaneous users froze the event
+loop for ~188ms -- a concurrent heartbeat coroutine landed 1 tick
+instead of the ~18 expected, and a second, unrelated turn didn't start
+until 185ms later.
+
+**The obvious fix reopened a different, already-fixed bug.** Wrapping
+the entire original function in `asyncio.to_thread` closed the freeze
+but broke `_prune_old_runs`'s own `.active`-marker protection (added
+in an earlier round specifically to stop a concurrent sibling
+subagent's still-in-flight run_dir from being deleted): running the
+`.active` check on a genuine second OS thread means the GIL can now
+preempt a sibling's `run_dir.mkdir()` / `active_marker.touch()` pair
+mid-way -- something a single-threaded event loop could never do,
+since coroutines only ever switch at an `await`. Confirmed live with a
+30-trial stress run of the exact two-concurrent-subagent scenario the
+earlier fix's own test uses: ~27% of trials deleted a sibling's
+still-active run_dir out from under it, the identical
+`FileNotFoundError` `test_pruning_never_deletes_a_still_running_
+siblings_run_dir` was written to catch -- and did catch, once the full
+test suite ran end to end (not reliably on every isolated run of that
+one test alone, which is itself a useful reminder that a race
+condition's absence in a quick spot-check proves nothing).
+
+**Fixed properly** by splitting the function in two: `_select_dirs_to_
+prune`, a cheap, purely synchronous decision (listing, `stat()`, the
+`.active` check -- no deletion) that stays on the event loop thread
+specifically *because* running it there is what keeps it atomic with
+respect to a concurrent sibling's own directory-creation sequence; and
+`_rmtree_all`, the actual expensive deletions, which now runs in
+`asyncio.to_thread` with no need to re-check `.active` state, since it
+only ever acts on a list the synchronous half already decided.
+
+**Verified live** both fixes hold together: the original freeze repro
+now shows the event loop staying responsive throughout (elapsed-time-
+proportional heartbeat ticks, not a bare `> 0` check -- an earlier
+version of the new test used exactly that looser assertion and it kept
+passing even against the fully-synchronous, unfixed code, since a
+single stray tick landing any time after the freeze still satisfies
+`> 0`), and the 30-trial sibling-deletion stress run came back clean
+(0/30) on the combined fix.
+
+**Verified by reverting** `loop.py` alone and watching the new test
+fail with the literal old bug's own shape: 2 ticks landed across a
+0.467s run where ~23 were expected.
+
+**1 new test, 753 -> 754 Python tests, all passing (confirmed stable
+across two full-suite runs plus a 30-trial concurrency stress script),
+`ruff check`/`format --check` clean.** `docs/agent-loop.md` gained a
+new subsection directly after the two existing `_prune_old_runs`
+chapters -- the same function, its third real bug across three
+separate rounds, each genuinely different in shape.
+
+**Forty-nine of the last fifty rounds (46-67, 70-94) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** Worth
+naming explicitly for future rounds: the standard "wrap a blocking
+call in `asyncio.to_thread`" fix is only safe when nothing else in the
+same scope depends on that call's synchronous, uninterruptible
+execution relative to sibling coroutines -- here, the `.active`-marker
+protection quietly relied on exactly that property, and the naive fix
+broke it in a way only a real concurrency stress test caught, not the
+existing single-run test suite on its own.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

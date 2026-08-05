@@ -126,13 +126,25 @@ _MAX_STREAM_RETRIES = 5
 _MAX_RETAINED_RUNS = 200
 
 
-def _prune_old_runs(run_root: Path, keep: int) -> None:
+def _select_dirs_to_prune(run_root: Path, keep: int) -> list[Path]:
+    """The cheap, synchronous half of pruning: decide WHICH directories are
+    safe to delete. Deliberately kept synchronous rather than folded into
+    `_prune_old_runs`'s own `asyncio.to_thread` call (see that function's
+    own comment for the real bug that split them apart): every check here
+    is a fast, in-memory-ish metadata operation (`iterdir`/`stat`/`.active`
+    existence, no content read, no deletion), so running it on the event
+    loop thread is cheap -- and doing so is precisely what keeps this
+    decision atomic with respect to a concurrent sibling's own `run_dir.
+    mkdir()` + `active_marker.touch()` sequence: cooperative asyncio
+    scheduling only switches between coroutines at an `await`, so nothing
+    else can observe this function's `run_root` mid-computation the way a
+    genuinely separate OS thread could."""
     try:
         run_dirs = [p for p in run_root.iterdir() if p.is_dir()]
     except OSError:
-        return
+        return []
     if len(run_dirs) <= keep:
-        return
+        return []
     # Never prune a directory whose run is still genuinely in flight --
     # see `AgentLoop.run`'s own `.active` marker above for the real bug
     # this guards against. `keep` still bounds the TOTAL directory count
@@ -150,8 +162,46 @@ def _prune_old_runs(run_root: Path, keep: int) -> None:
     # finish.
     prunable = [p for p in run_dirs if not (p / ".active").exists()]
     prunable.sort(key=lambda p: p.stat().st_mtime)
-    for old_dir in prunable[: len(run_dirs) - keep]:
+    return prunable[: len(run_dirs) - keep]
+
+
+def _rmtree_all(dirs: list[Path]) -> None:
+    """The expensive, purely-mechanical half of pruning: the actual
+    directory deletions `_select_dirs_to_prune` already decided on. No
+    `.active` re-check here -- deliberately: re-reading state from a
+    background thread is exactly the race a fresh-eyes sweep found (see
+    `_prune_old_runs`'s own comment), so this trusts the synchronous
+    decision it was handed instead of re-deriving it off-thread."""
+    for old_dir in dirs:
         shutil.rmtree(old_dir, ignore_errors=True)
+
+
+async def _prune_old_runs(run_root: Path, keep: int) -> None:
+    # asyncio.to_thread on the deletions only, NOT the whole function -- a
+    # real bug found by a fresh-eyes sweep, then a real regression caught
+    # by this file's own pre-existing concurrent-subagent test while
+    # fixing it: naively wrapping the ENTIRE original synchronous
+    # function (listing + `.active` check + rmtree, all together) in
+    # `asyncio.to_thread` fixed the intended event-loop freeze (confirmed
+    # live: 0 of ~60 expected heartbeat ticks landed while a contended
+    # prune ran) but introduced a genuine, different bug: running the
+    # `.active` check on a real second OS thread means the GIL can now
+    # preempt a sibling's `run_dir.mkdir()` / `active_marker.touch()`
+    # pair mid-way (something a single-threaded event loop could never
+    # do, since coroutines only switch at an `await`) -- confirmed live
+    # with a 30-trial stress run of two concurrent subagents racing this
+    # exact prune: ~27% of trials deleted a sibling's run_dir out from
+    # under it, the identical FileNotFoundError this project's own
+    # `test_pruning_never_deletes_a_still_running_siblings_run_dir` was
+    # written to catch, and did catch. Splitting the cheap decision
+    # (synchronous, atomic with respect to sibling coroutines) from the
+    # expensive deletion (threaded, no longer needs to re-check state)
+    # keeps both fixes -- the event loop still never blocks on the real
+    # I/O cost, and no sibling's still-active directory can ever be
+    # observed mid-creation.
+    prunable = _select_dirs_to_prune(run_root, keep)
+    if prunable:
+        await asyncio.to_thread(_rmtree_all, prunable)
 
 
 def _required_modalities(messages: list[Message]) -> set[Modality]:
@@ -302,7 +352,34 @@ class AgentLoop:
         run_root = Path(self._run_root)
         run_dir = run_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        _prune_old_runs(run_root, keep=_MAX_RETAINED_RUNS)
+        # A real bug found by giving this file its own fresh-eyes sweep
+        # for the exact "blocking call never wrapped in asyncio.to_thread"
+        # class already found and fixed at every other I/O call site in
+        # this codebase (NoteTool, VectorMemoryStore, SessionStore, the
+        # PDF-extraction degrader, the Ollama probe and save_config in
+        # server/app.py) -- this whole file had zero asyncio.to_thread
+        # calls anywhere, so this specific instance was never caught by
+        # this file's own earlier sweeps (which addressed budget/spend
+        # ordering, not I/O blocking). `_prune_old_runs` does a directory
+        # listing, a stat() per candidate, and a shutil.rmtree() per
+        # directory to delete -- unconditionally on EVERY run() call, not
+        # just occasionally. Confirmed live: with 1500 accumulated run
+        # directories (~235MB, an ordinary amount for a long-running
+        # `sarva serve` process past the default 200-run retention cap),
+        # racing two concurrent AgentLoop.run() calls the same way
+        # /chat and /ws/chat serve two simultaneous users -- one turn
+        # that triggered the prune froze the event loop for ~188ms (a
+        # concurrent heartbeat coroutine got 1 tick instead of the ~18
+        # expected), and a completely unrelated, otherwise-instant second
+        # turn didn't even start until 185ms later, purely because the
+        # first turn's synchronous rmtree loop had the event loop wedged.
+        # `_prune_old_runs` is now itself `async def` -- it does its own,
+        # narrower `asyncio.to_thread` internally on just the deletions
+        # (see its own docstring/comment for why the naive "wrap the
+        # whole function" version of this exact fix introduced a real,
+        # separate regression, caught by this file's own pre-existing
+        # concurrent-subagent pruning test).
+        await _prune_old_runs(run_root, keep=_MAX_RETAINED_RUNS)
         transcript_path = run_dir / "transcript.jsonl"
 
         async def emit(event: AgentEvent) -> AgentEvent:

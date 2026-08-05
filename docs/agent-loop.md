@@ -110,6 +110,56 @@ reverting and watching the new test fail with the literal old bug's own
 retention-cap test this fix's own off-by-one nearly broke) pass
 unchanged.
 
+### Much later still, `_prune_old_runs` turned out to be this whole file's one remaining unwrapped blocking call — and the obvious fix reopened the bug directly above it
+
+A much later fresh-eyes sweep, applying the "blocking call inside an
+`async def`, never wrapped in `asyncio.to_thread`" lens already used to
+fix `NoteTool`/`VectorMemoryStore`/`SessionStore`/the PDF-extraction
+degrader/the Ollama probe and `save_config` in `server/app.py`, found
+that `core/sarva/agent/loop.py` itself had zero `asyncio.to_thread`
+calls anywhere. `_prune_old_runs` — a directory listing, a `stat()` per
+candidate, a `shutil.rmtree()` per directory to delete — ran directly,
+synchronously, unconditionally on **every** `run()` call, not just
+occasionally. Confirmed live: with 1500 accumulated run directories
+(~235MB, an ordinary amount for a long-running `sarva serve` process
+past the default 200-run retention cap), racing two concurrent
+`AgentLoop.run()` calls the same way `/chat`/`/ws/chat` serve two
+simultaneous users — one turn's prune froze the event loop for ~188ms
+(a concurrent heartbeat coroutine landed 1 tick instead of the ~18
+expected), and a second, completely unrelated turn didn't even start
+until 185ms later.
+
+**The obvious fix — wrapping the entire original function in
+`asyncio.to_thread` — closed that freeze but reopened the exact bug the
+chapter directly above this one already fixed.** Running the `.active`
+check on a genuine second OS thread means the GIL can now preempt a
+sibling's `run_dir.mkdir()` / `active_marker.touch()` pair mid-way —
+something a single-threaded event loop could never do, since coroutines
+only ever switch at an `await`. Confirmed live with a 30-trial stress
+run of the exact two-concurrent-subagent scenario the chapter above
+uses: **~27% of trials deleted a sibling's still-active run_dir out
+from under it**, the identical `FileNotFoundError` `test_pruning_never_
+deletes_a_still_running_siblings_run_dir` was written to catch — and
+did catch, failing reliably (though not on every single run in
+isolation — inserting a new, unrelated test earlier in the same file
+was enough to shift timing and make it fail consistently once the full
+suite ran end to end).
+
+Fixed by splitting the function into two: `_select_dirs_to_prune`, a
+cheap, purely synchronous decision (listing, `stat()`, the `.active`
+check — no deletion) that stays on the event loop thread specifically
+*because* running it there is what keeps it atomic with respect to a
+concurrent sibling's own directory-creation sequence; and `_rmtree_all`,
+the actual expensive deletions, which now runs in `asyncio.to_thread`
+with no need to re-check `.active` state, since it only ever acts on a
+list the synchronous half already decided. `_prune_old_runs` itself
+became `async def`, calling the synchronous decision directly and
+`await`ing the threaded deletion only when there's actually something
+to delete. Verified live both fixes hold together: the original freeze
+repro now shows the event loop staying responsive throughout, and the
+30-trial sibling-deletion stress run came back clean (0/30) on the
+combined fix. 1 new test, 753 → 754 Python tests.
+
 ## Tool use: concurrent, typed, gated by one policy
 
 A `Tool` is a small, explicit contract:

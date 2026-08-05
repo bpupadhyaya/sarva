@@ -440,6 +440,93 @@ async def test_run_directories_are_pruned_beyond_the_retention_cap(run_root, mon
     assert len(run_dirs) == 3
 
 
+@pytest.mark.asyncio
+async def test_pruning_old_run_directories_does_not_freeze_the_event_loop(run_root, monkeypatch):
+    # A real bug found by giving this file its own fresh-eyes sweep for
+    # the exact "blocking call never wrapped in asyncio.to_thread" class
+    # already found and fixed at every other I/O call site in this
+    # codebase (NoteTool, VectorMemoryStore, SessionStore, the
+    # PDF-extraction degrader, the Ollama probe and save_config in
+    # server/app.py) -- this whole file had zero asyncio.to_thread calls
+    # anywhere, so this specific instance was never caught: `run()`
+    # called `_prune_old_runs` (directory listing, a stat() per
+    # candidate, a shutil.rmtree() per directory to delete) directly,
+    # unconditionally on EVERY call. Confirmed live before this fix: with
+    # a realistic backlog of accumulated run directories -- an ordinary
+    # `sarva serve` process past the default 200-run retention cap, not
+    # contrived -- one turn's prune froze the event loop for the whole
+    # deletion window, and a second, completely unrelated concurrent
+    # turn (the same concurrency /chat and /ws/chat serve two
+    # simultaneous users with) didn't even start until the first turn's
+    # synchronous rmtree loop finished.
+    #
+    # Deliberately NOT a bare `ticks > 0` heartbeat count: an earlier
+    # version of this test asserted only that, over the WHOLE call, and
+    # it kept passing even when reverted back to the fully-synchronous,
+    # unfixed code -- a single tick landing any time AFTER the freeze
+    # (not just during it) still satisfies `> 0`. Instead this measures
+    # the run's total elapsed time and requires the tick count to be
+    # roughly proportional to it: if the event loop were frozen for most
+    # of that window, ticks would fall far short of what a free-running
+    # 0.02s-interval heartbeat would have accumulated across the same
+    # real duration.
+    import sarva.agent.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "_MAX_RETAINED_RUNS", 1)
+
+    run_root_path = Path(run_root)
+    run_root_path.mkdir(parents=True, exist_ok=True)
+    for i in range(20):
+        d = run_root_path / f"stale-{i}"
+        d.mkdir()
+        (d / "transcript.jsonl").write_text("x")
+
+    real_rmtree = shutil.rmtree
+
+    def slow_rmtree(path, *args, **kwargs):
+        import time
+
+        time.sleep(0.02)  # simulate real deletion latency for a larger transcript
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(loop_module.shutil, "rmtree", slow_rmtree)
+
+    ticks = 0
+    stop = False
+
+    async def heartbeat():
+        nonlocal ticks
+        while not stop:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+
+    provider = MockProvider(script=[ScriptedTurn(text="pruning turn")])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+    t0 = asyncio.get_event_loop().time()
+    async for _ in loop.run("trigger the prune"):
+        pass
+    elapsed = asyncio.get_event_loop().time() - t0
+
+    stop = True
+    await hb_task
+
+    # 20 stale dirs pruned at 0.02s each is ~0.4s of real deletion work.
+    # A free-running event loop would land roughly elapsed/0.02 ticks
+    # across that whole window; the unfixed, fully-synchronous code
+    # produced 0 regardless of elapsed time, since nothing could tick
+    # while it was blocked. Requiring at least half the expected count
+    # tolerates ordinary scheduling jitter while still failing hard on
+    # an actual freeze.
+    expected_ticks = elapsed / 0.02
+    assert ticks >= expected_ticks * 0.5, (
+        f"only {ticks} ticks landed across a {elapsed:.3f}s run "
+        f"(expected ~{expected_ticks:.0f}) -- event loop was blocked"
+    )
+
+
 def test_required_modalities_text_only():
     messages = [Message(role="user", content=[TextBlock(text="hi")])]
     assert _required_modalities(messages) == {Modality.TEXT}
