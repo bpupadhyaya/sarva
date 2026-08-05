@@ -1184,6 +1184,38 @@ watched it fail with a raw `TypeError` (the fake `subprocess.run` in
 the test expects a `timeout` keyword argument the reverted code never
 passes) before re-applying.
 
+**A much later fresh-eyes sweep found a third, structurally different
+way for `synthesize()` to crash — before the child process is even
+spawned, on ordinarily long text with nothing crafted about it.** The
+macOS (`say`) and Linux (`espeak`/`espeak-ng`) branches both pass
+`text` as a literal `argv` element to `subprocess.run`, with no size
+cap anywhere — unlike the Windows branch (below), which already writes
+`text` to a temp file and reads it back via PowerShell's `Get-Content`
+specifically to avoid interpolating arbitrary text into a command at
+all. If `text` is large enough to exceed the OS's real `execve()`
+argument-list limit (`ARG_MAX` — confirmed on this machine via `getconf
+ARG_MAX`, ~1MB; Linux additionally caps any *single* `argv` string at
+128KB via `MAX_ARG_STRLEN`, independent of the total), `Popen.__init__`
+raises `OSError: [Errno 7] Argument list too long` — neither a
+`TimeoutExpired` nor a `CalledProcessError`, the only two types this
+function already caught, so it propagated raw straight past `sarva
+speak`'s own `except RuntimeError` and crashed with a full Python
+traceback. Confirmed live: `sarva speak "$(cat transcript.txt)"` on an
+ordinarily long piece of text — a book chapter, an article, a meeting
+transcript, `speak`'s own advertised use case — hits this once the
+text approaches the real OS limit, no crafted or adversarial input
+needed. This module's own docstring already names "an agent speaking
+its own output" as the real threat model `text` can be arbitrary,
+potentially large content for — the same reasoning that already
+motivated the timeout fix directly above. Fixed with one more `except
+OSError` clause in `synthesize()`, translating it into the same clean
+`RuntimeError` shape every other engine failure already gets. Verified
+live the same over-long-text scenario now fails cleanly instead of
+crashing. Verified the new tests are real: reverted the fix and
+watched both the library-level and CLI-level tests fail with the raw,
+uncaught `OSError` propagating before re-applying. 2 new tests,
+776 → 778 Python tests.
+
 **Windows had no engine at all until now** — this module's own
 docstring named it as genuinely unimplemented, not just unverified.
 It's closed the same way the other two branches are: shell out to an

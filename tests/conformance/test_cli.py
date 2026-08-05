@@ -1290,6 +1290,42 @@ def test_speak_with_a_bad_voice_fails_cleanly_instead_of_a_raw_traceback(tmp_pat
     assert not (tmp_path / "out.wav").exists()
 
 
+def test_speak_with_command_line_too_long_for_the_os_fails_cleanly_not_a_traceback(
+    tmp_path, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep: `sarva speak
+    # "$(cat transcript.txt)"` on an ordinarily long piece of text (a
+    # book chapter, an article, a meeting transcript -- speak's own
+    # advertised use case, no crafted input needed) crashed with a raw
+    # `OSError: [Errno 7] Argument list too long` once the text
+    # approached the real OS argv-size limit -- `say`/`espeak` both pass
+    # `text` as a literal argv element with no size cap, and `Popen.
+    # __init__` raises this OSError before the child is even spawned,
+    # neither a `TimeoutExpired` nor a `CalledProcessError`, the only
+    # two types `synthesize()` used to catch. `speak` only ever caught
+    # `RuntimeError`, so `synthesize()` needed to translate this failure
+    # into one too, the same fix shape the bad-voice case above already
+    # established.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        audio_module.shutil, "which", lambda cmd: "/usr/bin/say" if cmd == "say" else None
+    )
+
+    def fake_run(args, check, capture_output, timeout):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["speak", "hello", "--out", str(tmp_path / "out.wav")])
+
+    assert result.exit_code == 1
+    assert "text-to-speech engine could not be started" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert not (tmp_path / "out.wav").exists()
+
+
 @pytest.mark.skipif(
     not (tts_engine_available() and stt_extra_installed()),
     reason="needs a local TTS engine and sarva[audio] (faster-whisper)",

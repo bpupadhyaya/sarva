@@ -15757,3 +15757,83 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `sarva speak` crashed with a raw `OSError` on ordinarily long text -- a real, structurally different crash mode the existing exception handling never covered
+
+Round 107. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the "checked too late" and subprocess/capture-timing
+heuristics from the last two rounds. It found something related but
+genuinely different in the same file as last round's audio fix --
+not a memory-exhaustion bug this time, but a third, previously
+unhandled exception type on the text-to-speech side of the same
+module.
+
+**The bug**: `synthesize()`'s macOS (`say`) and Linux
+(`espeak`/`espeak-ng`) branches both pass `text` as a literal `argv`
+element to `subprocess.run`, with no size cap anywhere -- unlike the
+Windows branch, which already writes `text` to a temp file and reads
+it back via PowerShell's `Get-Content` specifically to avoid
+interpolating arbitrary text into a command at all. If `text` is large
+enough to exceed the OS's real `execve()` argument-list limit
+(`ARG_MAX`, ~1MB on this machine; Linux additionally caps any single
+`argv` string at 128KB via `MAX_ARG_STRLEN`), `Popen.__init__` raises
+`OSError: [Errno 7] Argument list too long` *before the child process
+is even spawned* -- neither a `subprocess.TimeoutExpired` nor a
+`subprocess.CalledProcessError`, the only two types `synthesize()`
+already caught, so it propagated raw straight past `sarva speak`'s own
+`except RuntimeError` and crashed with a full Python traceback.
+
+**Confirmed live**: `sarva speak "$(cat transcript.txt)"` on an
+ordinarily long piece of text -- a book chapter, an article, a meeting
+transcript, `speak`'s own advertised use case -- hits this once the
+text approaches the real OS limit, no crafted or adversarial input
+needed. Directly reproduced via Typer's `CliRunner` with ~2.4MB of
+ordinary repeated text, and confirmed as standard OS behavior (not a
+test-harness artifact) with a bare `subprocess.run` call against a
+similarly oversized argv.
+
+**Why this is new, not a re-tread**: the sibling `transcribe()`/
+`_decode_audio_isolated()` STT path in this same file was already
+swept and fixed last round for a memory-exhaustion bug on the
+speech-to-text side. This is a different bug, on the text-to-speech
+side, in the exception-handling contract rather than resource limits
+-- an uncaught exception type never getting the "raw traceback → clean
+message" treatment this codebase has otherwise applied everywhere else
+in the same function (a hung engine, an unrecognized voice name).
+
+**Fixed** with one more `except OSError` clause in `synthesize()`,
+translating it into the same clean `RuntimeError` shape every other
+engine failure already gets -- matching this project's own established
+convention rather than redesigning how macOS/Linux pass text (a bigger
+change, out of scope for closing this specific bug).
+
+**Verified live**: the same over-long-text scenario now fails cleanly
+with an actionable message instead of a raw traceback.
+
+**Verified by reverting** `audio.py` alone and watching both the
+library-level and CLI-level new tests fail with the raw, uncaught
+`OSError` propagating, exactly the old bug's own shape.
+
+**2 new tests, 776 -> 778 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+paragraph directly after the TTS timeout-fix chapter in the same
+function.
+
+**Sixty-two of the last sixty-three rounds (46-67, 70-107) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.**
+Two rounds running now on the same file (`audio.py`), each finding a
+genuinely distinct bug -- last round's was about resource exhaustion
+from a check running too late; this round's is about an exception
+type nobody anticipated needing to catch. Worth remembering that
+sweeping the same recently-touched file again isn't automatically
+wasted effort if the bug classes being searched for are different
+enough -- both rounds targeted the same file but different halves of
+it (STT decode vs. TTS synthesis) and different failure dimensions
+(memory vs. exception coverage).
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

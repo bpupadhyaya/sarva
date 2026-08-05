@@ -114,6 +114,42 @@ def test_synthesize_raises_a_clean_runtime_error_on_a_hung_engine(monkeypatch):
         synthesize("this should time out")
 
 
+def test_synthesize_raises_a_clean_runtime_error_on_an_over_long_command_line(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: the macOS (`say`) and
+    # Linux (`espeak`/`espeak-ng`) branches both pass `text` as a
+    # literal argv element to `subprocess.run`, with no size cap
+    # anywhere -- unlike the Windows branch (see the dedicated test
+    # below), which already writes `text` to a temp file specifically
+    # to avoid this. If `text` is large enough to exceed the OS's real
+    # `execve()` argument-list limit, `Popen.__init__` raises `OSError:
+    # [Errno 7] Argument list too long` *before the child process is
+    # even spawned* -- neither a `TimeoutExpired` nor a
+    # `CalledProcessError`, the only two types this function already
+    # caught, so it propagated raw past `sarva speak`'s own `except
+    # RuntimeError` and crashed with a full Python traceback. Confirmed
+    # live: `sarva speak "$(cat transcript.txt)"` on an ordinarily long
+    # piece of text (a book chapter, an article, a meeting transcript --
+    # `speak`'s own advertised use case, no crafted input needed) hits
+    # this once the text approaches the real OS limit. Pinned here
+    # without needing an actually-oversized real command line: a fake
+    # subprocess.run raising the exact OSError a real over-limit argv
+    # would raise.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        audio_module.shutil, "which", lambda cmd: "/usr/bin/say" if cmd == "say" else None
+    )
+
+    def fake_run(args, check, capture_output, timeout):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="text-to-speech engine could not be started"):
+        synthesize("this text is conceptually way too long for one command line")
+
+
 @pytest.mark.skipif(not _has_espeak, reason="espeak/espeak-ng not installed")
 def test_synthesize_falls_back_to_espeak_when_say_is_unavailable(monkeypatch):
     # On real macOS the Darwin branch (say) always wins, so this is the

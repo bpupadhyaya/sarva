@@ -161,6 +161,33 @@ def synthesize(text: str, voice: str | None = None) -> bytes:
         stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
         detail = f": {stderr}" if stderr else ""
         raise RuntimeError(f"text-to-speech engine failed{detail}") from e
+    except OSError as e:
+        # A real bug found by a fresh-eyes sweep: the macOS (`say`) and
+        # Linux (`espeak`/`espeak-ng`) branches both pass `text` as a
+        # literal argv element to `subprocess.run`, with no size cap
+        # anywhere -- unlike the Windows branch, which already writes
+        # `text` to a temp file and reads it back via PowerShell's
+        # `Get-Content` specifically to avoid interpolating arbitrary
+        # text into a command at all. If `text` is large enough to
+        # exceed the OS's real `execve()` argument-list limit
+        # (`ARG_MAX` -- confirmed on this machine via `getconf ARG_MAX`,
+        # 1MB; Linux additionally caps any SINGLE argv string at 128KB
+        # via `MAX_ARG_STRLEN`, independent of the total), `Popen.
+        # __init__` raises `OSError: [Errno 7] Argument list too long`
+        # *before the child process is even spawned* -- neither a
+        # `TimeoutExpired` nor a `CalledProcessError`, the only two
+        # types this function already catches, so it propagated raw
+        # clean past `sarva speak`'s own `except RuntimeError` and
+        # crashed with a full Python traceback. Confirmed live: `sarva
+        # speak "$(cat transcript.txt)"` on an ordinarily long piece of
+        # text (a book chapter, an article, a meeting transcript --
+        # `speak`'s own advertised use case, no crafted input needed)
+        # hits this once the text approaches the real OS limit. This
+        # module's own docstring already names "an agent speaking its
+        # own output" as the real threat model `text` can be arbitrary,
+        # potentially large content for -- the same reasoning that
+        # already motivated this function's own timeout fix.
+        raise RuntimeError(f"text-to-speech engine could not be started: {e}") from e
 
 
 def _synthesize_with_detected_engine(text: str, voice: str | None) -> bytes:
