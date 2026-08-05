@@ -815,6 +815,32 @@ observable as whether `mtime` advances across repeated acquisitions.
 Reverted and watched the new test fail with a real, later `mtime` on
 every one of five repeated acquisitions before re-applying.
 
+**A much later fresh-eyes sweep found the permissions fix above had
+only ever covered the *file*, never the *directory* it lives in —**
+the identical gap `SessionStore`/`LongTermMemoryStore`/
+`VectorMemoryStore` (see the memory chapter) had already closed for
+their own `~/.sarva/...` subdirectories, `os.chmod`ing them to `0o700`
+right after `mkdir`, but this module — whose own docstring most
+directly promises exactly this hardening, for the most sensitive data
+in the whole `~/.sarva/` tree — never picked up the same fix for
+`~/.sarva` itself. Confirmed live on a fresh install (the directory
+doesn't exist yet): `save_config`'s own `mkdir` left `~/.sarva` at
+`0o755` under the same common `022` umask this module's own docstring
+already tested against for the file — world-readable, letting any
+other local user on a shared machine list `~/.sarva`'s contents and
+confirm a key is configured — and at `0o777` (genuinely
+world-**writable**) under a more permissive real `000` umask, letting
+another local user unlink or rename `config.json` out from under the
+app regardless of the file's own `0600` bits. Fixed in `_exclusive_
+lock`, the one place both `save_config` and `unset_config` already
+route every write through, rather than duplicated at each call site —
+self-healing the same way the file permission fix already is, tightening
+a directory an older version of this module left insecure on the very
+next save. Verified live a fresh, never-before-existing `~/.sarva`
+directory now lands at `0o700`. Verified by reverting and watching both
+new tests fail with the literal old bug's own value, `0o755` where
+`0o700` was expected. 2 new tests, 771 → 773 Python tests.
+
 `Onboarding.tsx` is the screen this makes possible: on mount it polls
 `GET /doctor`; if any provider (including a reachable Ollama) is already
 configured, it completes immediately and the user never sees it. If

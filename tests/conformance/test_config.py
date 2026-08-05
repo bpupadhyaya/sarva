@@ -98,6 +98,45 @@ def test_save_config_tightens_permissions_on_a_file_that_already_existed_insecur
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@_posix_only
+def test_save_config_locks_down_its_own_directory_not_just_the_file(tmp_path):
+    # A real bug found by a fresh-eyes sweep, the identical fix this
+    # module's own docstring already claims for config.json's own file
+    # but never applied to the directory it lives in: SessionStore/
+    # LongTermMemoryStore/VectorMemoryStore all explicitly os.chmod
+    # their own `~/.sarva/...` subdirectory to 0o700 right after mkdir
+    # -- this module never picked up the same fix for `~/.sarva` itself.
+    # Confirmed live before this fix: on a fresh install (the directory
+    # doesn't exist yet), save_config's own mkdir left it at the
+    # platform-default mode -- 0o755 under the common umask this same
+    # module's own docstring already tested against for the file --
+    # world-readable, letting any other local user on a shared machine
+    # list ~/.sarva's contents and confirm a key is configured, and
+    # world-WRITABLE under a more permissive real umask, letting another
+    # local user unlink/rename config.json out from under the app
+    # regardless of the file's own 0600 bits.
+    config_dir = tmp_path / "fresh-install" / ".sarva"
+    path = config_dir / "config.json"
+    assert not config_dir.exists()  # sanity: genuinely not created yet
+
+    save_config({"ANTHROPIC_API_KEY": "sk-ant-test"}, path=path)
+
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o700
+
+
+@_posix_only
+def test_save_config_tightens_directory_permissions_that_already_existed_insecurely(tmp_path):
+    config_dir = tmp_path / "config-dir"
+    config_dir.mkdir()
+    config_dir.chmod(0o755)
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755  # sanity: the insecure state is real
+    path = config_dir / "config.json"
+
+    save_config({"ANTHROPIC_API_KEY": "sk-ant-test"}, path=path)
+
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o700
+
+
 def test_exclusive_lock_actually_serializes_two_concurrent_acquirers(tmp_path):
     # Proves the primitive save_config/unset_config's race fix depends
     # on genuinely works: a second acquirer must block until the first

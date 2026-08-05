@@ -158,6 +158,27 @@ def _exclusive_lock(path: Path):
     out to be empty, and every later acquisition just opens and locks
     the already-populated file without writing to it at all."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # A real bug found by a fresh-eyes sweep, the identical fix this
+    # module's own docstring already claims for config.json's own file
+    # (0600, not the platform default) but never applied to the
+    # directory it lives in: sarva.memory.session.SessionStore,
+    # sarva.memory.longterm.LongTermMemoryStore, and sarva.memory.
+    # vector.VectorMemoryStore all explicitly os.chmod their own
+    # `~/.sarva/...` subdirectory to 0o700 right after mkdir -- this
+    # module, whose own docstring most directly promises the "shared
+    # dev servers, lab machines, CI runners" hardening, never picked up
+    # the same fix for `~/.sarva` itself. Confirmed live on a fresh
+    # install: `~/.sarva` was left at 0o755 (world-readable, other
+    # local users can list its contents and confirm a key is
+    # configured) under the common 022 umask this module's own
+    # docstring already tested against for the file -- and at 0o777
+    # (genuinely world-WRITABLE, letting another local user unlink/
+    # rename config.json out from under the app regardless of the
+    # file's own 0600 bits) under a real, if less common, 000 umask.
+    # Fixed here, in the one function both save_config and unset_config
+    # already route every write through, rather than duplicated at each
+    # call site.
+    os.chmod(path.parent, 0o700)
     fd = os.open(path, os.O_CREAT | os.O_RDWR)
     f = os.fdopen(fd, "r+b")
     try:

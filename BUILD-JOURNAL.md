@@ -15506,3 +15506,78 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `sarva.config.save_config` never locked down its own `~/.sarva` directory -- the identical fix already shipped for three sibling stores' directories, never propagated to the one holding the most sensitive data
+
+Round 104. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~25 rounds, with
+`memory/vector.py` flagged for a second round running as the top
+never-swept candidate. The sweep tried that lead again but landed on a
+different, equally real find instead: `core/sarva/config.py`.
+
+**The bug**: `config.py`'s own module docstring makes a strong,
+explicit security claim -- it writes `~/.sarva/config.json` with
+owner-only (0600) permissions specifically because the file holds
+plaintext provider API keys, and names shared machines/lab
+servers/CI runners as the real threat model. The *file* really does
+get 0600. But three sibling stores that write into the same
+`~/.sarva/` tree -- `SessionStore`, `LongTermMemoryStore`, and
+`VectorMemoryStore` -- all explicitly `os.chmod` their own directory
+to 0o700 right after `mkdir`, closing exactly this class of gap for
+themselves. `config.py` never picked up the same fix for its own
+directory, despite being the one file in this set holding the most
+sensitive data and despite its own docstring claiming the hardening
+problem is solved.
+
+**Confirmed live**: on a fresh install, `save_config`'s own `mkdir`
+left `~/.sarva` at 0o755 under the common 022 umask this module's own
+docstring already tested against for the file -- world-readable,
+letting any other local user on a shared machine list `~/.sarva`'s
+contents and confirm a key is configured. Under a more permissive real
+000 umask, the same call left `~/.sarva` at 0o777 -- genuinely
+world-writable, letting another local user unlink/rename `config.json`
+out from under the app regardless of the file's own 0600 bits.
+
+**Why concretely reachable**: `save_config` runs on the very first,
+most ordinary path a user takes -- `sarva config set ...`, and
+equally via the desktop app's Onboarding "paste an API key" flow. On a
+fresh install this is the very first file this project ever writes to
+disk -- no attacker interaction or corrupted state needed, just the
+documented common umask this same module's own docstring says it
+already tested against.
+
+**Fixed** in `_exclusive_lock`, the one place both `save_config` and
+`unset_config` already route every write through, rather than
+duplicated at each call site -- `os.chmod(path.parent, 0o700)` right
+after the existing `mkdir`, self-healing the same way the file
+permission fix already is (a directory an older version left insecure
+gets tightened on the very next save).
+
+**Verified live**: a fresh, never-before-existing `~/.sarva` directory
+now lands at 0o700.
+
+**Verified by reverting** `config.py` alone and watching both new
+tests fail with the literal old bug's own value: 0o755 where 0o700 was
+expected.
+
+**2 new tests, 771 -> 773 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the Windows-lock-bug chapter, in the same
+security-fix sequence as the file-permission and concurrent-write-race
+fixes this module already documents.
+
+**Fifty-nine of the last sixty rounds (46-67, 70-104) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** Another
+instance of this project's single most recurring theme -- a fix that
+shipped for named siblings never propagated to the one member of the
+group that arguably needed it most. `core/sarva/memory/vector.py`
+remains the only file in this codebase never given a dedicated round
+across 104 rounds; flagged for a third consecutive round as the
+standing top candidate.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
