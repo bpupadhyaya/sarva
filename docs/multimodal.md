@@ -46,6 +46,43 @@ skipping), but the type exists specifically to support url-sourced
 media, and leaving this path unguarded while `WebFetchTool` got the fix
 would have been real, avoidable inconsistency.
 
+### The `path` source had the identical unreachable-but-real gap the `url` source's SSRF guard was already fixed for — just for blocking I/O, not network safety
+
+A much later fresh-eyes sweep found that `resolve_media_bytes()` fell
+through to `block.resolve_bytes()` for a `path`-sourced block, which
+does a real, synchronous `Path(self.path).read_bytes()` — the identical
+"blocking I/O called directly from async code with no `asyncio.
+to_thread`" class already found and fixed at 9+ other call sites across
+this project (`ReadFileTool`, `SessionStore.load`/`.save`, `NoteTool`,
+`SearchNotesTool`, `RememberTool`, `RecallMemoryTool`, and others).
+`resolve_media_bytes()` is the one async entry point every provider
+adapter and every multimodal degrader calls from inside their own
+`async def` methods, so this sat directly on the hot path the module's
+own opening paragraph above already names as the reason `url` needed
+async handling in the first place.
+
+Confirmed live with a simulated slow disk: zero heartbeat ticks landed
+on the event loop for the whole duration of a single `path`-sourced
+resolve — on a slow or network-mounted filesystem, every *other*
+concurrent `/chat`/`/ws/chat` turn in a real `sarva serve` process
+would freeze too, for as long as one media file read takes. Not
+reachable through any current server/CLI input surface in this repo
+(nothing here constructs a `path=`-sourced block today — `cli.py`'s own
+`_load_image` deliberately pre-reads bytes and uses `data=` instead)
+— the identical "not reachable today, but a real, documented,
+first-class part of the public type, so leaving it unguarded would be
+real, avoidable inconsistency the moment anything does wire a
+`path`-sourced block up to real input" reasoning this module already
+applied to the sibling `url` source above.
+
+Fixed by dispatching the `path` branch through `asyncio.to_thread`,
+leaving `data` (a plain in-memory attribute access, no I/O at all)
+exactly as fast and untouched as before. Verified live: the same repro
+now shows the event loop ticking throughout the call instead of
+freezing solid. Verified by reverting and watching the new test fail
+with the literal old bug's own shape — zero heartbeat ticks. 1 new
+test, 801 → 802 Python tests.
+
 ## Degradation: never silently drop, or fail loudly instead
 
 `Degrader` is the registry every "this model can't see modality X"

@@ -16726,3 +16726,85 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The `path` source had the identical unreachable-but-real gap the `url` source's SSRF guard was already fixed for -- just for blocking I/O, not network safety
+
+Round 120. This round's sweep first audited a self-generated lead from
+round 119 (whether this project's own "does not stall a concurrent
+request" test technique has the same false-negative gap elsewhere in
+the suite) -- confirmed live, thoroughly, and honestly that it does
+NOT: the only two existing tests of that shape (`/models`'s
+`build_router()`, `/config`'s `save_config()`) both have their target
+blocking call as the very first await in their handler, with no
+intervening yield for a fast sibling request to exploit, and every
+other test of this bug class in the suite already uses the more
+precise heartbeat technique. With that audit clean, the sweep fell
+back to a normal bug hunt and found something real in
+`core/sarva/multimodal/fetch.py`'s `resolve_media_bytes()`.
+
+**The bug**: the function fell through to `block.resolve_bytes()` for
+a `path`-sourced block, which does a real, synchronous `Path(self.
+path).read_bytes()` -- the identical "blocking I/O called directly
+from async code with no `asyncio.to_thread`" class already found and
+fixed at 9+ other call sites across this project (`ReadFileTool`,
+`SessionStore.load`/`.save`, `NoteTool`, `SearchNotesTool`,
+`RememberTool`, `RecallMemoryTool`, and others). `resolve_media_bytes()`
+is the one async entry point every provider adapter and every
+multimodal degrader calls from inside their own `async def` methods.
+
+**Confirmed live** with a simulated slow disk: zero heartbeat ticks
+landed on the event loop for the whole duration of a single
+`path`-sourced resolve.
+
+**Reachability note, stated honestly rather than glossed over**:
+nothing in this repo's own server/CLI input surface constructs a
+`path=`-sourced block today (`cli.py`'s own `_load_image` deliberately
+pre-reads bytes and uses `data=` instead), so this specific gap isn't
+reachable through any of THIS repo's own current call sites. Fixed
+anyway, applying the identical reasoning this same module's own
+docstring already used to justify fixing the sibling `url` source's
+SSRF guard before anything wired a `url`-sourced block up to external
+input either: `path` is a real, documented, first-class part of the
+public `_MediaBlock` type (content.py's own docstring: "exactly one of
+data/path/url"), so leaving it unguarded would be real, avoidable
+inconsistency the moment anything -- an MCP tool result, a future CLI
+optimization, a direct SDK caller -- does wire a `path`-sourced block
+up to real input.
+
+**Fixed** by dispatching the `path` branch through `asyncio.to_thread`,
+leaving `data` (a plain in-memory attribute access, no I/O at all)
+exactly as fast and untouched as before.
+
+**Verified live**: the same repro now shows the event loop ticking
+throughout the call instead of freezing solid.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: zero heartbeat ticks.
+
+**1 new test, 801 -> 802 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/multimodal.md` gained a new
+chapter directly after the section introducing `resolve_media_bytes()`
+and its sibling SSRF-guard reasoning.
+
+**Seventy-five of the last seventy-six rounds (46-67, 70-120) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** This closes what is very likely the last remaining unchecked
+call site of this specific bug class across the entire codebase --
+`resolve_media_bytes()` was the shared choke point every provider
+adapter and degrader already routes through, so fixing it here closes
+the gap everywhere at once rather than requiring N more per-adapter
+fixes. Also the second time (after the SSRF guard) this project has
+applied the same "fix a public API's dead branch proactively, because
+leaving one source type unguarded while its siblings are is real,
+avoidable inconsistency" reasoning -- worth naming as its own
+recognized pattern for future sweeps, distinct from "reachable by
+realistic usage today."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -94,6 +94,57 @@ async def test_resolve_media_bytes_dispatches_path_source(tmp_path):
     assert result == b"\x89PNG from disk"
 
 
+async def test_resolve_media_bytes_does_not_freeze_the_event_loop_on_a_slow_disk(
+    tmp_path, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep, the identical "blocking I/O
+    # called directly from async code with no asyncio.to_thread" class
+    # already found and fixed at 9+ other call sites in this project
+    # (ReadFileTool, SessionStore.load/save, NoteTool, SearchNotesTool,
+    # RememberTool, RecallMemoryTool, ...): the old code fell through to
+    # block.resolve_bytes() for a path-sourced block, which does a real,
+    # synchronous Path.read_bytes() -- and this is the one async entry
+    # point every provider adapter and every multimodal degrader calls
+    # from inside their own async def methods. Confirmed live with a
+    # simulated slow disk: zero heartbeat ticks landed on the event loop
+    # for the whole call.
+    import asyncio
+    import time
+    from pathlib import Path
+
+    path = tmp_path / "image.png"
+    path.write_bytes(b"\x89PNG from a slow disk")
+
+    real_read_bytes = Path.read_bytes
+
+    def slow_read_bytes(self, *args, **kwargs):
+        time.sleep(0.3)  # simulate a slow/contended or network-mounted disk
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", slow_read_bytes)
+
+    block = ImageBlock(media_type="image/png", path=str(path))
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+    result = await resolve_media_bytes(block)
+    hb_task.cancel()
+
+    assert result == b"\x89PNG from a slow disk"
+    # The real, decisive assertion: while the slowed read() ran, the
+    # event loop must have kept running other coroutines -- a near-zero
+    # tick count is the literal old bug reproducing itself (the loop
+    # frozen solid for the whole call).
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
 async def test_resolve_media_bytes_dispatches_url_source(monkeypatch):
     _skip_ssrf_check(monkeypatch)
 

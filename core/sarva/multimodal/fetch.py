@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import httpcore
@@ -206,8 +207,35 @@ async def resolve_media_bytes(
 ) -> bytes:
     """The async counterpart to `block.resolve_bytes()` that also handles
     `url` sources. Safe to call on any `_MediaBlock` regardless of which
-    source it carries — `data`/`path` resolve exactly as the sync method
-    already does, `url` is the only path that actually awaits anything."""
+    source it carries — `data` resolves exactly as the sync method
+    already does (an in-memory attribute access, no I/O), `url` and
+    `path` are the two sources that actually need to await something.
+
+    A real bug found by a fresh-eyes sweep, the identical "blocking I/O
+    called directly from async code with no `asyncio.to_thread`" class
+    already found and fixed at 9+ other call sites in this project
+    (ReadFileTool, SessionStore.load/save, NoteTool, SearchNotesTool,
+    RememberTool, RecallMemoryTool, ...): the old code fell through to
+    `block.resolve_bytes()` for a `path`-sourced block, which does a
+    real, synchronous `Path(self.path).read_bytes()` -- and this is the
+    one async entry point every provider adapter and every multimodal
+    degrader calls from inside their own `async def` methods. Confirmed
+    live with a simulated slow disk: zero heartbeat ticks landed on the
+    event loop for the whole duration of a single `path`-sourced
+    resolve, meaning every OTHER concurrent `/chat`/`/ws/chat` turn in a
+    real `sarva serve` process would freeze too, for as long as one
+    media file read takes. Not reachable through any current server/CLI
+    input surface in this repo (nothing here constructs a `path=`-
+    sourced block today -- `cli.py`'s own `_load_image` deliberately
+    pre-reads bytes and uses `data=` instead), the identical "not
+    reachable today, but a real, documented, first-class part of the
+    public type -- content.py's own module docstring names data/path/
+    url as three equally valid sources -- so leaving it unguarded would
+    be real, avoidable inconsistency the moment anything does wire a
+    `path`-sourced block up to real input" reasoning this module's own
+    docstring already applies to the sibling `url` source above."""
     if block.url is not None:
         return await fetch_bytes(block.url, client=client)
+    if block.path is not None:
+        return await asyncio.to_thread(Path(block.path).read_bytes)
     return block.resolve_bytes()
