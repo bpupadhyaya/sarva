@@ -56,6 +56,28 @@ _STOP_REASON_MAP = {
     "max_tokens": StopReason.MAX_TOKENS,
     "refusal": StopReason.REFUSAL,
     "stop_sequence": StopReason.END_TURN,
+    # A real bug found by a fresh-eyes sweep, the identical bug class
+    # already fixed once in google_provider.py's FinishReason mapping,
+    # never propagated to this sibling adapter: the real Anthropic SDK's
+    # `StopReason` type also includes `"pause_turn"` -- a real,
+    # documented, non-error state ("we paused a long-running turn. You
+    # may provide the response back as-is in a subsequent request to
+    # let the model continue," per the SDK's own docstring, returned for
+    # long-running server-side tool use such as web search/code
+    # execution), not a hypothetical value. Left unmapped, it fell
+    # through the lookup's own `.get(..., StopReason.END_TURN)` default
+    # straight into the *success* path -- confirmed live, a real
+    # `pause_turn` response was reported to AgentLoop/CLI/server as a
+    # normal, complete answer, silently dropping the unfinished
+    # long-running turn instead of surfacing it as incomplete. This
+    # project has no turn-resumption mechanism wired in yet, so there's
+    # no accurate "paused, resume me" StopReason to map to -- REFUSAL is
+    # the closest honest fit among the ones that exist: it's not a
+    # successful, complete answer, and `AgentLoop` already treats it as
+    # a clean FAILED rather than crashing or silently succeeding, the
+    # same "fail safe, never silently succeed" choice the Google fix
+    # made for its own unmapped reasons.
+    "pause_turn": StopReason.REFUSAL,
 }
 
 # 2026-07 pricing snapshot (USD / 1M tokens) — keep in sync with providers/data/models.yaml
@@ -305,7 +327,13 @@ class AnthropicProvider:
             / 1_000_000,
         )
         yield DoneEvent(
-            stop_reason=_STOP_REASON_MAP.get(final.stop_reason, StopReason.END_TURN),
+            # Default REFUSAL, not END_TURN -- see _STOP_REASON_MAP's
+            # own comment on `pause_turn`. Every value that legitimately
+            # means success is already explicitly mapped above; any
+            # other value, known today or added by a future SDK
+            # release, now fails safe instead of silently claiming a
+            # complete, successful answer.
+            stop_reason=_STOP_REASON_MAP.get(final.stop_reason, StopReason.REFUSAL),
             message=Message(role="assistant", content=blocks),
             usage=usage,
         )

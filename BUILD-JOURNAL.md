@@ -16362,3 +16362,75 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The identical stop-reason gap already fixed once in the Google adapter, never propagated to Anthropic's own `pause_turn`
+
+Round 115. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file covered in recent rounds (including `memory/
+vector.py`, just given its first dedicated round). It found the exact
+same bug class one adapter over: `core/sarva/providers/
+anthropic_provider.py`'s `_STOP_REASON_MAP`.
+
+**The bug**: the map covered `end_turn`/`tool_use`/`max_tokens`/
+`refusal`/`stop_sequence`, but the real Anthropic Python SDK's
+`StopReason` type also includes `pause_turn` -- a real, documented,
+non-error state ("we paused a long-running turn. You may provide the
+response back as-is in a subsequent request to let the model
+continue," per the SDK's own docstring), returned for long-running
+server-side tool use such as web search or code execution. Left
+unmapped, it fell through the identical `.get(..., StopReason.
+END_TURN)` default the round 113 Google fix had already closed in its
+own sibling adapter, straight into the success path.
+
+**Confirmed live** with a duck-typed fake client producing a real
+`pause_turn` final message: the CLI/server/agent loop reported it as a
+normal, complete answer, silently dropping the unfinished long-running
+turn instead of surfacing it as incomplete.
+
+**Fixed** two ways together, mirroring the Google fix exactly: this
+project has no turn-resumption mechanism wired in yet, so there's no
+`StopReason` value that accurately means "paused, resume me" --
+`pause_turn` is mapped to `REFUSAL` (the closest honest fit among
+existing values: not a complete, successful answer, and `AgentLoop`
+already turns it into a clean `FAILED` rather than crashing or
+silently succeeding), and the map's own default is changed from
+`StopReason.END_TURN` to `StopReason.REFUSAL`, protecting this adapter
+against any future unmapped `stop_reason` too, not just the one this
+sweep happened to find.
+
+**Verified live**: the same repro now reports `REFUSAL` instead of
+`END_TURN`.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: `stop_reason == END_TURN` for both
+`pause_turn` and a deliberately unrecognized future value.
+
+**2 new tests, 790 -> 792 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+chapter directly after the Google `_STOP_REASON_MAP` chapter this bug
+is a sibling of.
+
+**Seventy of the last seventy-one rounds (46-67, 70-115) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** The first time in this project's history that a bug found
+and fixed in one provider adapter was deliberately re-checked as "did
+this same shape ever get missed in a sibling adapter" and found real
+there too, one round later -- worth adding to the standing bug-class
+heuristic list: after fixing a lookup/mapping-table gap in one
+adapter, check every sibling adapter with the same shape (a `Provider`
+subclass translating a third-party SDK's own stop/finish-reason enum)
+for the identical unmapped-value bug, since these three adapters
+(Anthropic/OpenAI/Google) have now each independently needed this same
+fix in different rounds for their own text/tool-call ordering bug, and
+two of three for their own stop-reason mapping gap -- OpenAI's own
+`finish_reason` mapping hasn't been checked yet.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

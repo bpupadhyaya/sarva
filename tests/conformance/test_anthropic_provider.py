@@ -30,7 +30,7 @@ from sarva.multimodal.content import (
     ToolResultBlock,
 )
 from sarva.providers.anthropic_provider import AnthropicProvider, _to_anthropic_message
-from sarva.providers.base import GenerateRequest, StreamErrorEvent
+from sarva.providers.base import DoneEvent, GenerateRequest, StopReason, StreamErrorEvent
 
 
 async def test_text_block_translation():
@@ -228,3 +228,94 @@ async def test_generate_still_handles_a_plain_rate_limit_error_as_before():
     assert len(events) == 1
     assert events[0].code == "rate_limit"
     assert events[0].retryable is True
+
+
+class _FakeUsage:
+    def __init__(self, input_tokens=10, output_tokens=5):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+class _FakeFinalMessage:
+    def __init__(self, stop_reason: str, content=None):
+        self.content = content or []
+        self.usage = _FakeUsage()
+        self.stop_reason = stop_reason
+
+
+class _SucceedingStreamContext:
+    """Duck-typed stand-in for client.messages.stream(**kwargs)'s async
+    context manager where the stream succeeds and produces a real final
+    message -- unlike _RaisingStreamContext above, which only covers the
+    error path."""
+
+    def __init__(self, final):
+        self._final = final
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def __aiter__(self):
+        async def _gen():
+            return
+            yield  # pragma: no cover
+
+        return _gen()
+
+    async def get_final_message(self):
+        return self._final
+
+
+class _FakeMessagesWithFinal:
+    def __init__(self, final):
+        self._final = final
+
+    def stream(self, **kwargs):
+        return _SucceedingStreamContext(self._final)
+
+
+class _FakeClientWithFinal:
+    def __init__(self, final):
+        self.messages = _FakeMessagesWithFinal(final)
+
+
+async def test_a_paused_long_running_turn_is_not_reported_as_a_silent_success():
+    # A real bug found by a fresh-eyes sweep, the identical bug class
+    # already fixed once in google_provider.py's FinishReason mapping,
+    # never propagated to this sibling adapter: the real Anthropic SDK's
+    # StopReason type also includes "pause_turn" (see anthropic.types.
+    # stop_reason.StopReason) -- a real, documented, non-error state
+    # returned for a long-running server-side tool call (web search/code
+    # execution) that must be resumed with a follow-up request, not
+    # treated as a complete answer. Left unmapped, it fell through
+    # _STOP_REASON_MAP's own `.get(..., StopReason.END_TURN)` default
+    # straight into the success path -- confirmed live before this fix.
+    final = _FakeFinalMessage(stop_reason="pause_turn")
+    provider = AnthropicProvider(client=_FakeClientWithFinal(final))
+
+    events = [e async for e in provider.generate(_req())]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.stop_reason != StopReason.END_TURN
+    assert done.stop_reason == StopReason.REFUSAL
+
+
+async def test_an_unrecognized_stop_reason_fails_safe_as_refusal_not_end_turn():
+    # The other half of the same fix: the map's own default was changed
+    # from StopReason.END_TURN to StopReason.REFUSAL, so any FUTURE
+    # stop_reason value this map hasn't explicitly named yet also fails
+    # safe -- a clean REFUSAL a caller can see, never a silently
+    # "successful" response just because the exact value wasn't
+    # enumerated.
+    final = _FakeFinalMessage(stop_reason="some_future_reason")
+    provider = AnthropicProvider(client=_FakeClientWithFinal(final))
+
+    events = [e async for e in provider.generate(_req())]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.stop_reason == StopReason.REFUSAL

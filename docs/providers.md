@@ -699,6 +699,39 @@ watching the new tests fail with the literal old bug's own shape:
 `stop_reason == END_TURN` for both a known blocked reason and a
 deliberately unrecognized one. 2 new tests, 786 → 788 Python tests.
 
+### The identical stop-reason gap, never propagated to the Anthropic adapter's own `pause_turn`
+
+A much later fresh-eyes sweep found the exact same bug class one
+adapter over: `anthropic_provider.py`'s `_STOP_REASON_MAP` covered
+`end_turn`/`tool_use`/`max_tokens`/`refusal`/`stop_sequence`, but the
+real Anthropic Python SDK's `StopReason` type also includes
+`pause_turn` — a real, documented, non-error state ("we paused a
+long-running turn. You may provide the response back as-is in a
+subsequent request to let the model continue," per the SDK's own
+docstring), returned for long-running server-side tool use such as web
+search or code execution. Left unmapped, it fell through the identical
+`.get(..., StopReason.END_TURN)` default the Google fix above had
+already closed, straight into the success path — confirmed live with a
+duck-typed fake client producing a real `pause_turn` final message:
+the CLI/server/agent loop reported it as a normal, complete answer,
+silently dropping the unfinished long-running turn instead of
+surfacing it as incomplete.
+
+This project has no turn-resumption mechanism wired in yet, so there's
+no StopReason value that accurately means "paused, resume me" — fixed
+by mapping `pause_turn` to `REFUSAL` (the closest honest fit among
+existing values: not a complete, successful answer, and `AgentLoop`
+already turns it into a clean `FAILED` rather than crashing or
+silently succeeding) and changing the map's own default from
+`StopReason.END_TURN` to `StopReason.REFUSAL`, the identical
+fail-safe-default change the Google fix made, so this adapter is now
+protected against any future unmapped `stop_reason` too, not just the
+one this sweep happened to find. Verified live: the same repro now
+reports `REFUSAL` instead of `END_TURN`. Verified by reverting and
+watching both new tests fail with the literal old bug's own shape:
+`stop_reason == END_TURN` for both `pause_turn` and a deliberately
+unrecognized future value. 2 new tests, 790 → 792 Python tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with
