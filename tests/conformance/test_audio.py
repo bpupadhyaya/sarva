@@ -18,6 +18,7 @@ import random
 import shutil
 import struct
 import subprocess
+import sys
 import wave
 from pathlib import Path
 
@@ -318,6 +319,44 @@ def test_transcribe_rejects_audio_longer_than_the_duration_cap():
 
     with pytest.raises(RuntimeError, match="too long to transcribe safely"):
         transcribe(raw)
+
+
+@pytest.mark.skipif(not stt_extra_installed(), reason="sarva[audio] (faster-whisper) not installed")
+def test_the_duration_cap_is_enforced_in_the_worker_not_after_the_parent_already_paid_for_it():
+    # A real bug found by a fresh-eyes sweep: the test above proves
+    # transcribe() eventually raises for over-cap audio, but that alone
+    # doesn't prove WHEN -- the previous version of this code called
+    # `_decode_audio_isolated()` unconditionally first (paying the full
+    # decode cost, including `capture_output=True` reading the ENTIRE
+    # decoded array back into this process via stdout) and only checked
+    # the cap afterward. Confirmed live: a 7.2MB, 2-hour real audio file
+    # (an entirely ordinary, non-adversarial shape -- a long lecture/
+    # meeting/voicemail recording) decoded to a ~460MB float32 array
+    # that fully materialized in the long-lived PARENT `sarva serve`
+    # process before the "protective" cap ever fired, driving parent RSS
+    # from ~27MB to ~1.2GB with no ceiling -- a similarly-shaped ~24-hour
+    # file, still well under 100MB on disk, would have materialized
+    # roughly 5.5GB. Fixed by enforcing the cap INSIDE the isolated
+    # worker subprocess, before it ever writes the decoded array to
+    # stdout -- proven directly here, at the worker's own real subprocess
+    # boundary, rather than only at transcribe()'s eventual exception:
+    # a too-long input must produce an EMPTY stdout, not a
+    # multi-megabyte one the parent then has to receive before rejecting.
+    raw = _synthetic_wav_bytes(duration_s=601.0)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "sarva._audio_decode_worker", "600"],
+        input=raw,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == b"", (
+        f"worker wrote {len(result.stdout)} bytes of decoded audio back to the parent "
+        "before rejecting it -- the cap was not enforced before the expensive transfer"
+    )
+    assert result.stderr.decode().startswith("AUDIO_TOO_LONG:")
 
 
 @pytest.mark.skipif(not stt_extra_installed(), reason="sarva[audio] (faster-whisper) not installed")

@@ -1104,6 +1104,43 @@ existing two, same clean-message treatment. Verified by reverting and
 watching the new test fail exactly as the original bug would have —
 empty output where the clean error message belongs.
 
+**The duration cap itself, above, was checked too late — a fresh-eyes
+sweep found it ran *after* the exact expensive, unbounded step it was
+supposed to prevent, not before.** `transcribe()` called `_decode_
+audio_isolated(audio_bytes)` unconditionally first and only computed
+`duration_s`/checked it against the cap afterward — meaning
+`capture_output=True` had already read the *entire* decoded array back
+from the worker subprocess into the long-lived parent process before
+the "protective" cap ever got a chance to fire. Confirmed live: a
+7.2 MB, 2-hour real audio file (ordinary — a long lecture/meeting/
+voicemail recording with quiet stretches, not crafted) decoded to a
+~460 MB float32 array that fully materialized in the parent, driving
+its RSS from ~27 MB to ~1.2 GB before rejection; the relationship has
+no ceiling — a similarly-encoded ~24-hour file, still well under
+100 MB on disk, would have materialized roughly 5.5 GB, easily enough
+to OOM-kill a `sarva serve` host serving multiple concurrent users.
+Worse still, this wasn't even isolated to the throwaway subprocess the
+way the SIGBUS crash fix above claims process isolation for — the
+memory blow-up landed squarely in the process every other user's
+in-flight turn shares. Fixed by moving the cap check *into* the
+isolated worker itself (`sarva._audio_decode_worker`, passed the cap
+as an argument): the worker now checks duration right after its own
+decode and, if over the cap, writes a small, distinct stderr marker
+(`AUDIO_TOO_LONG:<duration>`) and exits nonzero **without ever writing
+the decoded array to stdout at all** — the parent's `_decode_audio_
+isolated` recognizes that marker and raises the identical `RuntimeError`
+message the caller already expected, but never has to receive the huge
+payload to do it. Verified live with the same 2-hour repro: parent RSS
+growth dropped from ~1.2 GB to a small, roughly constant overhead
+unrelated to audio length at all (the same order of magnitude whether
+the input is 5 seconds or 2 hours), and the worker's own real stdout is
+now provably empty for a too-long input — proven directly at the
+worker's own subprocess boundary in the new test, not just inferred
+from `transcribe()`'s eventual exception. Verified by reverting and
+watching the new test fail with the literal old bug's own shape: a
+real, populated stdout instead of an empty one. 1 new test, 775 → 776
+Python tests.
+
 **`synthesize()` itself could crash with a raw subprocess error, found
 by actually running it against the real `espeak-ng` binary with a bad
 `--voice`.** `espeak-ng` genuinely exits 1 for an unrecognized voice

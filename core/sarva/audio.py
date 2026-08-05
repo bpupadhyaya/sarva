@@ -263,6 +263,14 @@ def _decode_audio_isolated(audio_bytes: bytes):
     reaps the child on expiry -- no manual cleanup needed the way the
     asyncio-based fixes elsewhere in this project require.
 
+    The duration cap is passed to the worker as an argument and enforced
+    THERE, before the decoded array is ever written back to this
+    process via stdout -- see `_audio_decode_worker`'s own docstring for
+    the real, measured parent-process memory-exhaustion bug this closes
+    (checking the cap only after `capture_output=True` had already
+    brought the whole array back into this long-lived process was too
+    late to protect it at all).
+
     Raises `RuntimeError` (never propagates a raw PyAV/ctranslate2
     exception, and never lets a native crash escape uncaught) on any
     decode failure -- ordinary or a native crash, deliberately
@@ -275,7 +283,7 @@ def _decode_audio_isolated(audio_bytes: bytes):
 
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "sarva._audio_decode_worker"],
+            [sys.executable, "-m", "sarva._audio_decode_worker", str(_MAX_TRANSCRIBE_SECONDS)],
             input=audio_bytes,
             capture_output=True,
             timeout=_DECODE_TIMEOUT_SECONDS,
@@ -285,6 +293,13 @@ def _decode_audio_isolated(audio_bytes: bytes):
 
     if result.returncode != 0 or not result.stdout:
         detail = result.stderr.decode(errors="replace").strip()
+        if detail.startswith("AUDIO_TOO_LONG:"):
+            duration_s = float(detail.removeprefix("AUDIO_TOO_LONG:"))
+            raise RuntimeError(
+                f"audio too long to transcribe safely: {duration_s:.0f}s exceeds the "
+                f"{_MAX_TRANSCRIBE_SECONDS}s cap (whisper's own feature extraction scales "
+                "memory linearly with duration -- confirmed live at roughly 100MB per minute)"
+            )
         raise RuntimeError(f"could not decode audio{f': {detail}' if detail else ''}")
     return np.frombuffer(result.stdout, dtype=np.float32)
 
@@ -337,12 +352,19 @@ def transcribe(audio_bytes: bytes, model_size: str = "tiny") -> str:
 
     Raises `RuntimeError` if the decoded audio exceeds
     `_MAX_TRANSCRIBE_SECONDS` -- see this module's own comment just
-    above for the real, measured memory-exhaustion bug this closes.
-    `AudioToTextDegrader` already catches every `RuntimeError` this
-    function can raise (decode failure, decode timeout, and now this)
-    identically, falling back to the honest metadata-only report --
-    "too long to safely transcribe" needs no special handling beyond
-    what "couldn't decode this" already gets."""
+    above, and `_audio_decode_worker`'s own docstring, for the real,
+    measured memory-exhaustion bug this closes. The cap is actually
+    *enforced* inside the isolated worker subprocess, before the
+    decoded array is ever sent back to this process -- `_decode_
+    audio_isolated` already raises with this same message for a real
+    over-cap file, so the check just below is unreachable defense-in-
+    depth for the ordinary case, kept in case a future caller ever
+    reaches `_decode_audio_isolated` some other way. `AudioToTextDegrader`
+    already catches every `RuntimeError` this function can raise (decode
+    failure, decode timeout, and now this) identically, falling back to
+    the honest metadata-only report -- "too long to safely transcribe"
+    needs no special handling beyond what "couldn't decode this"
+    already gets."""
     if not stt_extra_installed():
         raise ImportError(
             "faster-whisper is not installed -- pip install sarva[audio] for local speech-to-text"

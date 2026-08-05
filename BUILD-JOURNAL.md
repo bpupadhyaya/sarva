@@ -15667,3 +15667,93 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `sarva.audio.transcribe()`'s duration cap ran after the expensive, unbounded decode it was supposed to prevent -- not before
+
+Round 106. Delegated a fresh-eyes sweep to a subagent, with the new
+"a fix that moves a blocking call onto a real OS thread can make a
+different bug live" heuristic carried forward from last round, plus
+`memory/vector.py` still flagged (though effectively covered last
+round in the course of finding the tools.py race). The sweep found
+something different and real in `core/sarva/audio.py` instead --
+another instance of a "protective" check that doesn't actually protect
+anything, in the module holding this project's own already-fixed
+audio memory-exhaustion bug.
+
+**The bug**: `transcribe()` called `_decode_audio_isolated(audio_bytes)`
+unconditionally first, and only computed `duration_s`/checked it
+against `_MAX_TRANSCRIBE_SECONDS` (600s) afterward.
+`_decode_audio_isolated` runs the decode in an isolated subprocess via
+`subprocess.run(..., capture_output=True, ...)` -- but that means the
+*entire* decoded array gets read back into the parent process before
+the cap is ever checked. The module's own docstring claims this cap
+"closes" the real, measured memory-exhaustion bug from whisper's own
+feature extraction -- true for that *next* stage, but the decode stage
+itself, immediately before it, was completely unbounded and
+unprotected the whole time.
+
+**Confirmed live**: a 7.2MB, 2-hour real audio file (ordinary -- a long
+lecture/meeting/voicemail recording with quiet stretches, not crafted)
+decoded to a ~460MB float32 array that fully materialized in the
+long-lived parent `sarva serve` process before the "protective" cap
+ever fired, driving parent RSS from ~27MB to ~1.2GB. The relationship
+has no ceiling -- a similarly-encoded ~24-hour file, still well under
+100MB on disk, would have materialized roughly 5.5GB, easily enough to
+OOM-kill a host serving multiple concurrent users. Worse than the
+already-fixed SIGBUS crash bug in the same file: this wasn't even
+isolated to the throwaway subprocess the way that fix claims process
+isolation for -- the memory blow-up landed squarely in the process
+every other user's in-flight turn shares.
+
+**Why concretely reachable**: `AudioToTextDegrader.degrade()` calls
+this exact `transcribe()` path via `asyncio.to_thread` any time a user
+attaches an audio file in a chat turn routed to a model without native
+audio support -- completely ordinary usage. There's no size/duration
+pre-check on `raw` bytes anywhere upstream for path/data-sourced audio
+blocks (already separately documented as bypassing `fetch.py`'s own
+20MB URL-fetch cap).
+
+**Fixed** by moving the cap check *into* the isolated worker itself
+(`sarva._audio_decode_worker`, passed the cap as an argument): the
+worker now checks duration right after its own decode and, if over the
+cap, writes a small, distinct stderr marker (`AUDIO_TOO_LONG:
+<duration>`) and exits nonzero without ever writing the decoded array
+to stdout at all. The parent's `_decode_audio_isolated` recognizes that
+marker and raises the identical `RuntimeError` message the caller
+already expected, but never has to receive the huge payload to do it.
+
+**Verified live**: with the same 2-hour repro, parent RSS growth
+dropped from ~1.2GB to a small, roughly constant overhead unrelated to
+audio length at all (the same order of magnitude whether the input is
+5 seconds or 2 hours) -- and the worker's own real stdout is now
+provably empty for a too-long input.
+
+**Verified by reverting** `audio.py`/`_audio_decode_worker.py` together
+and watching the new test fail with the literal old bug's own shape: a
+real, populated stdout instead of an empty one, proven directly at the
+worker's own subprocess boundary rather than only inferred from
+`transcribe()`'s eventual exception.
+
+**1 new test, 775 -> 776 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+paragraph directly after the duration-cap fix chapter this bug lives
+one layer beneath.
+
+**Sixty-one of the last sixty-two rounds (46-67, 70-106) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** A fresh
+instance of a recurring theme with a new flavor: not "the fix never
+propagated to a sibling," but "the fix protects the SECOND expensive
+step in a pipeline while leaving the FIRST expensive step completely
+unguarded," inside the very function whose docstring claims to have
+already closed this exact class of bug. Worth treating any comment
+that says "checked right after X" as a claim worth verifying against
+what actually happens *during* X, not just after it -- the memory cost
+here was entirely in the step the cap was meant to gate, just one
+function call earlier than the check itself.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
