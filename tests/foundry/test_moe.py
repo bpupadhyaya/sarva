@@ -302,6 +302,40 @@ def test_moe_config_still_accepts_none_and_a_positive_expert_hidden_dim():
     assert config_explicit.expert_hidden_dim == 64
 
 
+def test_moe_config_rejects_negative_n_shared_experts():
+    # A real bug found by a fresh-eyes sweep: the fifth field in this
+    # exact dataclass, reachable through the identical untrusted-
+    # checkpoint config.json path already established for the four
+    # fields validated above -- simply the one field those earlier
+    # passes missed. range() of a negative number is silently empty in
+    # Python, so MoEFeedForward.__init__'s per-shared-expert list
+    # comprehension never raised for a negative value -- it silently
+    # built a model with ZERO shared experts instead, contradicting
+    # this module's own docstring ("n_shared_experts always-active
+    # experts every token passes through unconditionally"). Confirmed
+    # live before this fix: n_shared_experts=-3 constructed with no
+    # error and built a model with 0 shared-expert modules instead of
+    # raising.
+    import pytest
+
+    for n_shared in (-1, -3):
+        with pytest.raises(ValueError, match="n_shared_experts"):
+            MoEConfig(n_experts=4, n_experts_per_tok=2, n_shared_experts=n_shared)
+
+
+def test_moe_config_still_accepts_zero_shared_experts():
+    # Regression guard for the fix above, and the reason it's a strict
+    # "not negative" check rather than the same "must be positive"
+    # check the sibling fields use: unlike those (which each need at
+    # least one of something to route to/scale by), zero shared experts
+    # is a real, legitimate configuration -- plenty of real MoE
+    # architectures use only routed experts with none shared.
+    config = MoEConfig(n_experts=4, n_experts_per_tok=2, n_shared_experts=0)
+    assert config.n_shared_experts == 0
+    model = MoEFeedForward(dim=16, config=config)
+    assert len(model.shared_experts) == 0
+
+
 def test_a_non_finite_bias_update_speed_would_permanently_collapse_routing():
     # Regression proof for why the __post_init__ check above matters: this
     # is what happens if a non-finite bias_update_speed reaches

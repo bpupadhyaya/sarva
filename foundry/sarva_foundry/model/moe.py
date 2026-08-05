@@ -113,6 +113,32 @@ class MoEConfig:
         # sentinel) is deliberately still allowed through unchanged.
         if self.expert_hidden_dim is not None and self.expert_hidden_dim <= 0:
             raise ValueError(f"expert_hidden_dim must be positive, got {self.expert_hidden_dim}")
+        # A real bug found by a fresh-eyes sweep: the fifth field in this
+        # exact dataclass, reachable through the identical untrusted-
+        # checkpoint `config.json` path already established for the four
+        # fields above -- simply the one field those earlier passes
+        # missed. `range()` of a negative number is silently empty in
+        # Python, so `MoEFeedForward.__init__`'s `[SwiGLU(dim, hidden)
+        # for _ in range(config.n_shared_experts)]` never raises for a
+        # negative value -- it silently builds a model with ZERO shared
+        # experts instead, contradicting this module's own docstring
+        # ("n_shared_experts always-active experts every token passes
+        # through unconditionally"). Confirmed live two ways: direct
+        # construction with `n_shared_experts=-3` built successfully
+        # with 0 shared-expert modules instead of raising; loading a
+        # real trained checkpoint back with its saved config.json's
+        # `n_shared_experts` corrupted to a negative number produced a
+        # confusing raw `RuntimeError` deep inside `load_state_dict`
+        # naming implementation-detail state-dict keys, instead of a
+        # clean error at construction time naming the real cause.
+        # Deliberately NOT the same `<= 0` check the four fields above
+        # use: unlike those (which each need at least one of something
+        # to route to/scale by), zero shared experts is a real,
+        # legitimate configuration -- plenty of real MoE architectures
+        # use only routed experts with none shared -- so only a
+        # genuinely negative count is rejected here.
+        if self.n_shared_experts < 0:
+            raise ValueError(f"n_shared_experts must not be negative, got {self.n_shared_experts}")
 
 
 def _route(gate_logits: Tensor, bias: Tensor, top_k: int) -> tuple[Tensor, Tensor]:

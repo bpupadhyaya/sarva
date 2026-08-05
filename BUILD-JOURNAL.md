@@ -17105,3 +17105,71 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `MoEConfig.n_shared_experts` was the fifth field in this exact dataclass to go unvalidated -- and the one field where "positive" was the wrong bar
+
+Round 125. Continuing to prioritize `foundry/sarva_foundry/` for a
+fourth round in a row. It found the last unvalidated field in a
+dataclass this project has now touched four separate times:
+`MoEConfig.n_shared_experts`, the fifth field, reachable through the
+identical untrusted-checkpoint `config.json` path already established
+for `n_experts`, `n_experts_per_tok`, `bias_update_speed`, and
+`expert_hidden_dim` (round 103 and round 124).
+
+**The bug**: `range()` of a negative number is silently empty in
+Python, so `MoEFeedForward.__init__`'s `[SwiGLU(dim, hidden) for _ in
+range(config.n_shared_experts)]` never raised for a negative value --
+it silently built a model with ZERO shared experts instead,
+contradicting this module's own docstring ("`n_shared_experts`
+always-active experts every token passes through unconditionally").
+
+**Confirmed live, two ways**: direct construction with `n_shared_
+experts=-3` built successfully with 0 shared-expert modules instead of
+raising; loading a real trained checkpoint back with its saved
+`config.json`'s `n_shared_experts` corrupted to a negative number
+produced a confusing raw `RuntimeError` deep inside `load_state_dict`
+naming implementation-detail state-dict keys, instead of a clean error
+at construction time naming the real cause.
+
+**Fixed**, but deliberately NOT with the same `<= 0` check the other
+four fields use: unlike those (each of which needs at least one of
+something to route to/scale by), zero shared experts is a real,
+legitimate configuration -- plenty of real MoE architectures use only
+routed experts with none shared. Only a genuinely negative count is
+rejected here (`< 0`), preserving `n_shared_experts=0` as valid.
+
+**Verified live**: both `-1` and `-3` now raise a clear `ValueError`;
+`0` and the default `1` still construct exactly as before, with `0`
+correctly producing a model with zero shared-expert modules rather
+than being rejected.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: no exception raised at all.
+
+**2 new tests, 809 -> 811 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round,
+following established precedent for foundry model-internals fixes.
+
+**Eighty of the last eighty-one rounds (46-67, 70-125) have found and
+shipped real fixes; rounds 68-69 remain the only two clean sweeps.**
+Fourth round in a row finding a real bug in `foundry/sarva_foundry/`,
+and the second consecutive round inside `MoEConfig` specifically --
+`n_shared_experts` was genuinely the last of this dataclass's five
+fields left unvalidated, so this one likely closes the class out for
+this particular config object. Also a useful refinement to the
+"validate every field, not just the ones a prior round named"
+heuristic: validating a newly-found field doesn't always mean copying
+the exact same check a sibling field used -- `n_shared_experts` needed
+a strictly weaker bound (reject negative, not reject non-positive)
+because its own legitimate value range genuinely differs from its
+siblings', and applying the stronger check by rote would have turned
+a real, valid configuration into a false rejection.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
