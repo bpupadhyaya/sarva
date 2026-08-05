@@ -216,6 +216,44 @@ def test_moe_config_rejects_top_k_larger_than_n_experts():
         MoEConfig(n_experts=4, n_experts_per_tok=5)
 
 
+def test_moe_config_rejects_non_positive_n_experts_per_tok():
+    # A real bug found by a fresh-eyes sweep, the identical gap already
+    # found and fixed three separate times for the sibling
+    # RopeScalingConfig, never propagated here: neither n_experts nor
+    # n_experts_per_tok was ever checked for being positive.
+    # foundry_provider.load_checkpoint_bundle() builds this straight
+    # from an untrusted checkpoint bundle's config.json -- a checkpoint
+    # saved mid-crash, a hand-edited config.json, or a training-script
+    # bug all produce a value like this. Confirmed live before this fix:
+    # n_experts_per_tok=-1 constructed with no error at all, then
+    # crashed deep inside _route() with a raw, uncaught
+    # `RuntimeError: selected index k out of range` from
+    # `biased.topk(-1, ...)` on the first real inference call --
+    # invisible at load time, not a clean ValueError like every other
+    # invalid field in this same class already gets.
+    import pytest
+
+    for top_k in (0, -1):
+        with pytest.raises(ValueError, match="n_experts_per_tok"):
+            MoEConfig(n_experts=4, n_experts_per_tok=top_k)
+
+
+def test_moe_config_rejects_non_positive_n_experts():
+    # n_experts_per_tok is deliberately kept <= n_experts here (both
+    # non-positive) so this doesn't just re-trigger the pre-existing
+    # "can't exceed" check above for an unrelated reason -- a first
+    # version of this test used n_experts_per_tok=1, which happened to
+    # already raise on the OLD code too (1 > 0 already tripped the
+    # exceeds check), silently failing to prove the new check does
+    # anything. This combination genuinely passed n_experts<=0 through
+    # BOTH pre-existing checks unnoticed on the old code.
+    import pytest
+
+    for n_experts in (0, -1):
+        with pytest.raises(ValueError, match="n_experts"):
+            MoEConfig(n_experts=n_experts, n_experts_per_tok=n_experts)
+
+
 def test_moe_config_rejects_non_finite_bias_update_speed():
     import pytest
 

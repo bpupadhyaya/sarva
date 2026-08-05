@@ -53,6 +53,35 @@ class MoEConfig:
     bias_update_speed: float = 0.01  # DeepSeek-V3's gamma; how fast the routing bias corrects load
 
     def __post_init__(self) -> None:
+        # A real bug found by a fresh-eyes sweep, the identical gap
+        # already found and fixed three separate times for the sibling
+        # RopeScalingConfig (NaN factor, head_dim<=2 NTK divide-by-zero,
+        # extreme-factor overflow -- see layers.py's own docstrings),
+        # never propagated here: neither field was ever checked for
+        # being positive. `foundry_provider.load_checkpoint_bundle()`
+        # builds this straight from an untrusted checkpoint bundle's
+        # config.json, the exact same reachability path those fixes
+        # closed -- a checkpoint saved mid-crash, a hand-edited/rolled-
+        # back config.json, or a training-script bug computing this
+        # field incorrectly all produce a config that constructs
+        # silently, with the corruption invisible until the first real
+        # inference call. Confirmed live: n_experts_per_tok=-1 passed
+        # construction with no error at all, then crashed deep inside
+        # _route() with a raw `RuntimeError: selected index k out of
+        # range` from `biased.topk(-1, ...)` -- not the clean,
+        # actionable ValueError this same file's own sibling config
+        # already raises for its own invalid fields, and not a
+        # ProviderError, so it propagates straight past the
+        # `except ProviderError` both sarva.eval.harness.run_benchmark
+        # and sarva.distill.distill use specifically to keep one bad
+        # case from discarding every other case's already-computed
+        # result -- the identical failure mode DistillationError exists
+        # to prevent, just reached through a different, unvalidated
+        # field.
+        if self.n_experts <= 0:
+            raise ValueError(f"n_experts must be positive, got {self.n_experts}")
+        if self.n_experts_per_tok <= 0:
+            raise ValueError(f"n_experts_per_tok must be positive, got {self.n_experts_per_tok}")
         if self.n_experts_per_tok > self.n_experts:
             raise ValueError(
                 f"n_experts_per_tok ({self.n_experts_per_tok}) can't exceed "

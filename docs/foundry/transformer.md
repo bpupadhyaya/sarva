@@ -137,6 +137,51 @@ and self.bias_update_speed > 0` in `MoEConfig.__post_init__`, the same
 pattern as `RopeScalingConfig`'s fix. Verified by reverting and
 confirming the new tests fail with `DID NOT RAISE ValueError`.
 
+### A much later fresh-eyes sweep found `MoEConfig`'s remaining two fields had the identical, never-propagated gap — this time reachable from a real checkpoint file, not just a hand-constructed config
+
+`n_experts` and `n_experts_per_tok` were checked against each other
+(`n_experts_per_tok` can't exceed `n_experts`) but neither was ever
+checked for being positive — the identical validation gap
+`bias_update_speed` had just above, and the identical gap
+`RopeScalingConfig` (below) has had fixed *three* separate times, just
+never propagated to these two fields. `foundry_provider.
+load_checkpoint_bundle()` builds `MoEConfig(**moe_data)` straight from
+an untrusted checkpoint bundle's `config.json`, the exact same
+reachability path those `RopeScalingConfig` fixes closed. Confirmed
+live: `MoEConfig(n_experts=4, n_experts_per_tok=-1)` constructed with
+no error at all — `FoundryProvider.__init__`'s own per-bundle load
+error tracking saw nothing wrong — and the corruption stayed invisible
+until the first real inference call, where `_route()`'s `biased.
+topk(-1, dim=-1)` raised a raw, uncaught `RuntimeError: selected index
+k out of range` deep inside `MoEFeedForward.forward`, not the clean
+`ValueError` every other invalid field in this same class already
+gets.
+
+This matters beyond an ugly error message: `sarva.eval.harness.
+run_benchmark` and `sarva.distill.distill` both wrap each case in
+`except ProviderError` specifically so one bad case can't discard
+every other case's already-computed result — a raw `RuntimeError`
+isn't a `ProviderError`, so it propagates straight through that guard,
+crashing the whole benchmark run or distillation batch outright. The
+identical failure mode `DistillationError` exists to prevent, just
+reached through a different, unvalidated field the earlier fix never
+checked. Fixed with two more checks in the same `__post_init__` —
+`n_experts <= 0` and `n_experts_per_tok <= 0` both raise a clean
+`ValueError` — placed before the existing "can't exceed" check so a
+genuinely non-positive value gets its own specific message rather than
+an unrelated one. **A real test-rigor gap caught while writing the
+regression test, not shipped**: an early version of the `n_experts`
+test paired it with `n_experts_per_tok=1`, which happened to already
+raise on the *old*, unfixed code too — `1 > 0` already tripped the
+pre-existing "can't exceed" check, so the test passed regardless of
+whether the new validation did anything at all. Fixed by pairing
+`n_experts` with an equally non-positive `n_experts_per_tok`
+(`n_experts_per_tok=n_experts`), which the old "can't exceed" check
+lets through silently (`0 > 0` and `-1 > -1` are both `False`) —
+genuinely isolating the new check. Verified by reverting and
+confirming both new tests fail with `DID NOT RAISE ValueError`. 2 new
+tests, 769 → 771 Python tests.
+
 ### A real test-construction mistake, caught by running it, not shipped
 
 The first draft of the load-balancing convergence test used an
