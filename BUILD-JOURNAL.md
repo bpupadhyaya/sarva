@@ -14616,3 +14616,77 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `POST /config` froze the whole server under lock contention -- the one blocking call in this file that never got wrapped in `asyncio.to_thread`
+
+Round 93. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~14 rounds and pointed at
+sibling-propagation gaps, buffer-then-splice patterns, and overclaiming
+comments specifically. It found a real one in `server/app.py`'s
+`save_config_route` -- a sibling gap in the same file's own established
+"wrap blocking calls in asyncio.to_thread" discipline.
+
+**The bug:** `save_config_route`'s own `save_config(non_empty)` call
+was the one blocking call in this handler still called directly, with
+no `asyncio.to_thread` -- even though the very next line's own comment
+(`# asyncio.to_thread: see /models' own comment.`) sits two lines
+below it, describing a discipline this one call never actually got.
+`sarva.config.save_config()` acquires a real, cross-process
+`fcntl.flock()`/`msvcrt.locking()` on `config.json.lock` and blocks
+synchronously until it gets it -- every OTHER blocking call in this
+same file (`build_router`, `build_providers`, `run_diagnostics`) is
+already wrapped in `asyncio.to_thread` specifically because it can
+block on I/O; this call site never got the same fix.
+
+**Confirmed live**: a real second OS process holding that lock for 3
+seconds froze the event loop solid -- 0 of ~60 expected heartbeat
+ticks landed on a concurrent coroutine during the whole window, meaning
+every other in-flight request `sarva serve` was handling (another
+user's `/chat` or `/ws/chat` stream) would have frozen too, not just
+the `/config` request itself.
+
+**Why concretely reachable**: the desktop app's onboarding screen and
+`sarva config set` both write through this exact lock, meant to be
+used interchangeably against the same running server -- any overlap
+between them (a user running `sarva config set` in a terminal while
+the desktop app or a browser tab is also mid-save, or simply two
+concurrent `POST /config` requests) contends on it, no adversarial
+input needed.
+
+**Fixed** by wrapping the call as `await asyncio.to_thread(save_config,
+non_empty)`, matching every sibling blocking call already in this same
+handler and file.
+
+**Verified live** with the identical repro: the concurrent heartbeat
+coroutine now ticks normally (53 of ~54 expected) throughout the
+3-second contended wait.
+
+**Verified by reverting** `server/app.py` alone and racing a real
+`/health` request against a slow `POST /config` over a genuine
+`httpx.AsyncClient`/ASGI transport (the same concurrency methodology
+this file's own slow-Ollama-probe test already uses): `/health` took
+0.211s instead of its expected few milliseconds, reproducing the exact
+old freeze.
+
+**1 new test, 752 -> 753 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the standalone-TypeScript-SDK fix chapter in
+the server section, right where `POST /config`'s other real bugs are
+already documented.
+
+**Forty-eight of the last forty-nine rounds (46-67, 70-93) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.**
+Another instance of this project's dominant recurring theme -- a fix
+(here, "wrap every blocking call in this handler in asyncio.to_thread")
+that shipped for the named siblings in a comment's own list but not for
+every actual call site sharing the same shape, even within the very
+same function. Worth remembering that a comment listing specific named
+call sites as already-fixed is itself worth checking against every
+call in the same scope, not just the ones it names.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

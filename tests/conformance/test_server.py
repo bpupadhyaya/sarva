@@ -306,6 +306,46 @@ async def test_a_slow_ollama_probe_does_not_stall_a_concurrent_request(monkeypat
     assert fast_elapsed < 0.1, f"/health took {fast_elapsed:.3f}s -- event loop was blocked"
 
 
+async def test_a_slow_save_config_does_not_stall_a_concurrent_request(monkeypatch):
+    # A real bug found by a fresh-eyes sweep, the identical shape as the
+    # slow-Ollama-probe fix above but a sibling gap the original fix
+    # never propagated to: sarva.config.save_config() acquires a real,
+    # cross-process fcntl.flock()/msvcrt.locking() on config.json.lock
+    # and blocks synchronously until it gets it -- called directly, with
+    # no asyncio.to_thread, from POST /config's own async handler, even
+    # though every OTHER blocking call in this same file (build_router,
+    # build_providers, run_diagnostics) is already wrapped against
+    # exactly this class of freeze. Confirmed live with a real second OS
+    # process holding the OS-level flock for 3s: 0 of ~60 expected
+    # heartbeat ticks landed on the event loop during that window.
+    # Reachable with no adversarial input: the desktop app's onboarding
+    # screen and `sarva config set` both write through this exact lock,
+    # meant to be used interchangeably against the same running server.
+    import time
+
+    import httpx
+
+    def slow_save_config(values, path=None):
+        time.sleep(0.2)  # simulate a real, contended cross-process flock wait
+
+    monkeypatch.setattr(app_module, "save_config", slow_save_config)
+
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        t0 = asyncio.get_event_loop().time()
+        slow_task = asyncio.create_task(
+            client.post("/config", json={"anthropic_api_key": "sk-test"})
+        )
+        fast_task = asyncio.create_task(client.get("/health"))
+        fast_resp = await fast_task
+        fast_elapsed = asyncio.get_event_loop().time() - t0
+        slow_resp = await slow_task
+
+    assert slow_resp.status_code == 200
+    assert fast_resp.status_code == 200
+    assert fast_elapsed < 0.1, f"/health took {fast_elapsed:.3f}s -- event loop was blocked"
+
+
 def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
     _force_mock_only(monkeypatch)
     monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)

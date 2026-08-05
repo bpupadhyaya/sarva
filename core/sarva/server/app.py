@@ -191,7 +191,23 @@ def create_app() -> FastAPI:
         }
         non_empty = {k: v for k, v in values.items() if v}
         if non_empty:
-            save_config(non_empty)
+            # asyncio.to_thread: see /models' own comment -- a real,
+            # sibling-propagation gap found by a fresh-eyes sweep.
+            # save_config() acquires a real, cross-process fcntl.flock()/
+            # msvcrt.locking() on config.json.lock and blocks
+            # synchronously until it gets it, exactly the "blocking
+            # cross-process lock called directly from an async def" shape
+            # every OTHER blocking call in this file is already wrapped
+            # against -- this one call site never got the same fix.
+            # Confirmed live: a second process holding that lock for 3s
+            # froze the whole event loop solid (0 of ~60 expected
+            # heartbeat ticks landed) -- every other concurrent request
+            # (another user's in-flight /chat or /ws/chat stream) would
+            # have frozen too. Reachable with no adversarial input: the
+            # desktop app's onboarding screen and `sarva config set`
+            # both write through this exact lock, and both are meant to
+            # be used interchangeably against the same running server.
+            await asyncio.to_thread(save_config, non_empty)
         # asyncio.to_thread: see /models' own comment.
         checks = await asyncio.to_thread(run_diagnostics)
         return [DoctorCheckOut(name=c.name, ok=c.ok, detail=c.detail) for c in checks]

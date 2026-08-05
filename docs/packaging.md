@@ -579,6 +579,47 @@ test is real: reverted the fix and watched it fail with the literal
 old bug reproducing itself, a raw `SyntaxError` instead of
 `SarvaApiError`. 1 new test, 18 → 19 TypeScript SDK tests.
 
+### `POST /config` itself froze the whole server under lock contention — the one blocking call in this file that never got wrapped in `asyncio.to_thread`
+
+A much later fresh-eyes sweep, applying the same "does this blocking
+call actually run off the event loop thread" lens the slow-Ollama-probe
+fix (`docs/memory.md`'s memory chapter has the `note`/`search_notes`/
+`remember`/`recall_memory` chain of this exact bug class) already
+established for `build_router`/`build_providers`/`run_diagnostics`:
+`save_config_route`'s own `save_config(non_empty)` call was the one
+blocking call in this handler still called directly, with no
+`asyncio.to_thread` — even though the very next line's comment
+(`# asyncio.to_thread: see /models' own comment.`) sits two lines
+below it, describing a discipline this one call never actually got.
+
+`sarva.config.save_config()` acquires a real, cross-process
+`fcntl.flock()`/`msvcrt.locking()` on `config.json.lock` and blocks
+synchronously until it gets it — the exact "blocking cross-process lock
+called directly from an `async def`" shape already found and fixed
+for `SessionStore`'s own locking above. Confirmed live: a real second
+OS process holding that lock for 3 seconds froze the event loop
+solid — 0 of ~60 expected heartbeat ticks landed on a concurrent
+coroutine during the whole window, meaning every other in-flight
+request `sarva serve` was handling (another user's `/chat` or
+`/ws/chat` stream) would have frozen too, not just the `/config`
+request itself. Reachable with no adversarial input: the desktop
+app's onboarding screen and `sarva config set` both write through
+this exact lock, meant to be used interchangeably against the same
+running server — any overlap between them (a user running `sarva
+config set` in a terminal while the desktop app or a browser tab is
+also mid-save) contends on it.
+
+Fixed by wrapping the call as `await asyncio.to_thread(save_config,
+non_empty)`, matching every sibling blocking call already in this same
+handler and file. Verified live with the identical repro: the
+concurrent heartbeat coroutine now ticks normally throughout the
+3-second contended wait. Verified by reverting `server/app.py` alone
+and racing a real `/health` request against a slow `POST /config` over
+a genuine `httpx.AsyncClient`/ASGI transport (the same concurrency
+methodology the slow-Ollama-probe test already uses): `/health` took
+0.211s instead of its expected few milliseconds, reproducing the exact
+old freeze. 1 new test, 752 → 753 Python tests.
+
 ## First-run guided setup — a real gap between what was promised and what shipped
 
 T4's own definition of done, and the README's own quickstart text, have
