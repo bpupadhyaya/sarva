@@ -16217,3 +16217,77 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A blocked Gemini generation was reported as a normal, successful, silently empty turn
+
+Round 113. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file covered in the last several rounds, with a
+standing note that `core/sarva/memory/vector.py` is still the one file
+with no fully dedicated round of its own. It found a bug in a
+different, previously-covered file instead: `core/sarva/providers/
+google_provider.py`'s `_STOP_REASON_MAP`.
+
+**The bug**: the real installed `google-genai` SDK's `types.
+FinishReason` enum has 17 members; only `STOP`, `MAX_TOKENS`, `SAFETY`,
+`PROHIBITED_CONTENT`, and `BLOCKLIST` were mapped in
+`_STOP_REASON_MAP`. Everything else -- including `RECITATION` (Gemini
+refusing because the answer recites training-data text too closely,
+e.g. song lyrics -- a well-documented, ordinary occurrence, not
+contrived), `SPII`, `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`,
+`LANGUAGE`, and `OTHER` -- fell through the map's own `.get(...,
+StopReason.END_TURN)` default straight into the *success* path. Gemini
+sends no content parts on a blocked candidate, so the streaming loop's
+existing empty-content guard added no blocks either.
+
+**Confirmed live** with a duck-typed fake client yielding `RECITATION`/
+`MALFORMED_FUNCTION_CALL`/`SPII` finish reasons: each one produced a
+`DoneEvent(stop_reason=END_TURN, message=Message(content=[]))` -- a
+genuinely blocked generation reported to the CLI/server caller as a
+normal, successful completion with an *empty* message, silently
+masking the real failure. The three already-mapped block reasons
+correctly hit `StopReason.REFUSAL` -> `AgentState.FAILED` in `agent/
+loop.py`, proving the intended behavior for a blocked generation is
+exactly what these others should get but didn't.
+
+**Fixed** two ways together: the newly-identified reasons are added
+explicitly to `_STOP_REASON_MAP` (self-documenting, same as the
+existing three), and the lookup's own default is changed from
+`StopReason.END_TURN` to `StopReason.REFUSAL` -- `STOP` is the only
+finish reason that legitimately means success and it's already
+explicitly mapped, so any other value, known today or added by a
+future SDK release, now fails safe: a clean `REFUSAL`/`FAILED` state a
+caller can see, never a silently "successful" empty response just
+because this map hadn't named it yet.
+
+**Verified live**: the same repro now reports `REFUSAL` for all three
+block reasons.
+
+**Verified by reverting** and watching the new tests fail with the
+literal old bug's own shape: `stop_reason == END_TURN` for both a
+known blocked reason and a deliberately unrecognized one.
+
+**2 new tests, 786 -> 788 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+chapter directly after the Gemini text/tool-call ordering-bug trilogy.
+
+**Sixty-eight of the last sixty-nine rounds (46-67, 70-113) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A new variant of the "confident-sounding comment/docstring
+claims a property the control flow doesn't deliver" heuristic: the map
+itself wasn't wrong about what it *did* contain, but its silent
+fallback default made an incomplete enumeration behave identically to
+a complete one until checked against the real SDK's own enum --
+changing the fallback default from "assume success" to "fail safe" is
+the more durable fix, since it protects against every value this
+sweep didn't individually name too, not just the ones it happened to
+find.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

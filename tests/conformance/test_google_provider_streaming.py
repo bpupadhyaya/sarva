@@ -143,6 +143,43 @@ async def test_text_only_stream_produces_end_turn():
     assert done.message.content[0].text == "Hello, world"
 
 
+async def test_a_blocked_generation_is_reported_as_refusal_not_a_silent_empty_success():
+    # A real bug found by a fresh-eyes sweep: the real google-genai
+    # FinishReason enum has 17 members, and only 5 were ever mapped in
+    # _STOP_REASON_MAP -- everything else, including RECITATION (Gemini
+    # refusing because the answer recites training-data text too
+    # closely, e.g. song lyrics -- a well-documented, ordinary
+    # occurrence, not contrived) fell through the map's own `.get(...,
+    # StopReason.END_TURN)` default straight into the *success* path.
+    # Gemini sends no content parts on a blocked candidate, so this
+    # reported a blocked generation as a normal, successful END_TURN
+    # with a silently EMPTY message -- confirmed live before this fix.
+    chunks = [_chunk(parts=None, finish_reason="RECITATION", usage=_usage(10, 0))]
+    provider = GoogleProvider(client=_FakeClient(chunks))
+    events = [e async for e in provider.generate(_simple_request())]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.stop_reason == StopReason.REFUSAL
+    assert done.message.content == []
+
+
+async def test_an_unrecognized_finish_reason_fails_safe_as_refusal_not_end_turn():
+    # The other half of the same fix: the map's own default was changed
+    # from StopReason.END_TURN to StopReason.REFUSAL, so any FUTURE
+    # FinishReason value this map hasn't explicitly named yet (a new SDK
+    # release, an image-out-specific variant) also fails safe -- a clean
+    # REFUSAL a caller can see, never a silently "successful" empty
+    # response just because the exact enum member wasn't enumerated.
+    chunks = [_chunk(parts=None, finish_reason="SOME_FUTURE_REASON", usage=_usage(10, 0))]
+    provider = GoogleProvider(client=_FakeClient(chunks))
+    events = [e async for e in provider.generate(_simple_request())]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.stop_reason == StopReason.REFUSAL
+
+
 async def test_thought_parts_become_thinking_delta_not_text_delta():
     from sarva.providers.base import ThinkingDeltaEvent
 

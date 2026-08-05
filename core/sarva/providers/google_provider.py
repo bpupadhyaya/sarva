@@ -112,6 +112,29 @@ _STOP_REASON_MAP = {
     types.FinishReason.SAFETY: StopReason.REFUSAL,
     types.FinishReason.PROHIBITED_CONTENT: StopReason.REFUSAL,
     types.FinishReason.BLOCKLIST: StopReason.REFUSAL,
+    # A real bug found by a fresh-eyes sweep: the real google-genai
+    # `FinishReason` enum has 17 members, and only 5 were mapped here --
+    # everything else (including RECITATION, a well-documented, ordinary
+    # occurrence when Gemini refuses because the answer recites
+    # training-data text too closely, e.g. song lyrics or well-known
+    # published text) fell through the `.get(..., StopReason.END_TURN)`
+    # default below straight into the *success* path. Gemini sends no
+    # content parts on a blocked candidate, so this reported a blocked
+    # generation as a normal, successful `END_TURN` with a silently
+    # EMPTY message -- confirmed live with a duck-typed fake client
+    # yielding RECITATION/MALFORMED_FUNCTION_CALL/SPII finish reasons.
+    # Every one of these is added explicitly for self-documentation, and
+    # the lookup's own default (below) is changed from END_TURN to
+    # REFUSAL so any future/unrecognized `FinishReason` this map hasn't
+    # named yet (a new SDK release, an image-out-specific variant like
+    # IMAGE_SAFETY) fails safe -- a clean REFUSAL/FAILED state a caller
+    # can see, never a silently "successful" empty response.
+    types.FinishReason.RECITATION: StopReason.REFUSAL,
+    types.FinishReason.SPII: StopReason.REFUSAL,
+    types.FinishReason.MALFORMED_FUNCTION_CALL: StopReason.REFUSAL,
+    types.FinishReason.UNEXPECTED_TOOL_CALL: StopReason.REFUSAL,
+    types.FinishReason.LANGUAGE: StopReason.REFUSAL,
+    types.FinishReason.OTHER: StopReason.REFUSAL,
 }
 
 
@@ -392,7 +415,12 @@ class GoogleProvider:
         if any(isinstance(b, ToolCallBlock) for b in blocks):
             stop_reason = StopReason.TOOL_USE
         elif finish_reason:
-            stop_reason = _STOP_REASON_MAP.get(finish_reason, StopReason.END_TURN)
+            # Default REFUSAL, not END_TURN -- see _STOP_REASON_MAP's own
+            # comment. STOP is the only finish reason that legitimately
+            # means success, and it's already explicitly mapped; every
+            # other value, known or not yet added to this map, is an
+            # abnormal stop that must never be silently reported as one.
+            stop_reason = _STOP_REASON_MAP.get(finish_reason, StopReason.REFUSAL)
         else:
             stop_reason = StopReason.END_TURN
         yield DoneEvent(

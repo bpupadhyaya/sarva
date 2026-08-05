@@ -653,6 +653,52 @@ the literal old bug's own shape: both text segments merged into one
 block, hoisted ahead of both calls. 2 new tests, 766 → 768 Python
 tests.
 
+### A blocked Gemini generation was reported as a normal, successful, silently empty turn
+
+A much later fresh-eyes sweep of `google_provider.py` checked
+`_STOP_REASON_MAP`, the small dict that translates Gemini's own
+`FinishReason` into this project's `StopReason`, against the real
+installed SDK's enum rather than trusting the five members already
+listed there. The real `types.FinishReason` has 17 members; only
+`STOP`, `MAX_TOKENS`, `SAFETY`, `PROHIBITED_CONTENT`, and `BLOCKLIST`
+were mapped. Everything else — including `RECITATION` (Gemini refusing
+because the answer recites training-data text too closely, e.g. song
+lyrics or well-known published text — a well-documented, ordinary
+occurrence, not contrived), `SPII`, `MALFORMED_FUNCTION_CALL`,
+`UNEXPECTED_TOOL_CALL`, `LANGUAGE`, and `OTHER` — fell through the
+map's own `.get(..., StopReason.END_TURN)` default straight into the
+*success* path.
+
+Gemini sends no content parts on a blocked candidate, so the streaming
+loop's existing `if not candidate.content or not candidate.content.
+parts: continue` added no blocks either. Confirmed live with a
+duck-typed fake client (no live API key needed, the same discipline
+this file's other adapter-specific bugs were found and fixed with)
+yielding `RECITATION`/`MALFORMED_FUNCTION_CALL`/`SPII` finish reasons:
+each one produced a `DoneEvent(stop_reason=END_TURN, message=Message
+(content=[]))` — a genuinely blocked generation reported to the
+CLI/server caller as a normal, successful completion with an *empty*
+message, silently masking the real failure. By contrast, the three
+already-mapped block reasons correctly hit `StopReason.REFUSAL` →
+`AgentState.FAILED` in `agent/loop.py`, proving the intended behavior
+for a blocked generation is exactly what these others should get but
+didn't.
+
+Fixed two ways together: the newly-identified reasons are added
+explicitly to `_STOP_REASON_MAP` (self-documenting, same as the
+existing three), and the lookup's own default is changed from
+`StopReason.END_TURN` to `StopReason.REFUSAL` — `STOP` is the only
+finish reason that legitimately means success, and it's already
+explicitly mapped, so any *other* value, known today or added by a
+future SDK release (an image-out-specific variant like `IMAGE_SAFETY`,
+say), now fails safe: a clean `REFUSAL`/`FAILED` state a caller can
+see, never a silently "successful" empty response just because this
+map hadn't named it yet. Verified live: the same repro now reports
+`REFUSAL` for all three block reasons. Verified by reverting and
+watching the new tests fail with the literal old bug's own shape:
+`stop_reason == END_TURN` for both a known blocked reason and a
+deliberately unrecognized one. 2 new tests, 786 → 788 Python tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with
