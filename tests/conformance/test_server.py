@@ -961,6 +961,50 @@ def test_websocket_tool_confirmation_denied_skips_the_tool(tmp_path, monkeypatch
     assert events[-1]["state"] == "done"
 
 
+def test_websocket_confirmation_reply_with_a_string_false_is_treated_as_a_decline(
+    tmp_path, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep: `ws_confirm` cast the reply
+    # with a bare `bool(reply.get("approved", False))` -- Python
+    # truthiness, not the strict boolean check the documented
+    # `{"approved": bool}` wire contract actually promises.
+    # `bool("false")` is `True`, since any non-empty string is truthy in
+    # Python. Confirmed live before this fix: a client sending
+    # `{"approved": "false"}` (a JSON STRING, not a JSON boolean --
+    # exactly what a form/select's `.value`, or any client serializing
+    # booleans as strings, produces with no explicit `=== "true"`
+    # conversion) got the destructive `write_file` call APPROVED, the
+    # opposite of the sender's intent, with no error and no signal
+    # anything was wrong -- directly contradicting this same function's
+    # own "an ambiguous or absent confirmation signal must never default
+    # to running" discipline already applied to the timeout/non-dict
+    # cases right above this one.
+    monkeypatch.chdir(tmp_path)
+    call = ToolCallBlock(id="c1", name="write_file", arguments={"path": "hi.txt", "content": "hi"})
+    _use_scripted_mock(
+        monkeypatch,
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="ok, skipped")],
+    )
+
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "write a file for me"})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "needs_confirmation":
+                ws.send_json({"approved": "false"})
+            if data["type"] == "run_done":
+                break
+
+    finished = [e for e in events if e["type"] == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0]["result"]["is_error"] is True
+    assert not (tmp_path / "hi.txt").exists()
+    assert events[-1]["state"] == "done"
+
+
 def test_websocket_a_malformed_confirmation_reply_is_treated_as_a_decline_not_a_crash(
     tmp_path, monkeypatch
 ):

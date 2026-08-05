@@ -15094,3 +15094,87 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## `ws_confirm`'s own `bool(...)` cast silently approved a destructive action given a non-boolean truthy value -- the exact ambiguity that same function's earlier fix was written to reject
+
+Round 99. Delegated a fresh-eyes sweep to a subagent, steered away
+from every file/area covered across the last ~20 rounds, with a new
+truthy-vs-identity-check heuristic added after last round's finding.
+It found a real, security-relevant one inside `ws_confirm` -- the
+WebSocket destructive-tool confirmation callback -- and, notably, a
+gap inside a function this project had already fixed once for a
+related reason.
+
+**The bug**: `return bool(reply.get("approved", False))` is a Python-
+truthiness cast, not the strict boolean check the surrounding code's
+own established contract (`{"approved": bool}`, documented in this
+module's own docstring) actually promises. `bool("false")` is `True`
+in Python -- any non-empty string is truthy. A client sending
+`{"approved": "false"}` (a JSON string, not a JSON boolean) got a
+destructive tool call APPROVED, the opposite of the sender's intent,
+with no error and no signal anything was wrong.
+
+**Why this one stings**: this same function already has a documented
+fix, right above it in the source, whose whole stated purpose is "a
+destructive action given an ambiguous or absent confirmation signal
+must never default to running" -- covering a malformed reply and a
+timeout. A non-boolean truthy value isn't ambiguous by accident here;
+it was silently accepted as approval, directly contradicting the
+philosophy the earlier fix on the very same function already states.
+
+**Confirmed live**: driving a real `/ws/chat` session where the model
+calls the destructive `write_file` tool, replying to the
+`needs_confirmation` frame with `{"approved": "false"}` instead of
+`{"approved": false}` got `tool result is_error: False` and the file
+actually written -- the string was accepted as approval. Contrasted
+directly against the real boolean `{"approved": False}`, which
+correctly declines.
+
+**Why concretely reachable**: `/ws/chat`'s own docstring documents
+`{"approved": bool}` as the wire protocol for any client to
+implement, not a private internal API. The first-party desktop app
+avoids this only by accident -- TypeScript enforces the boolean type
+at its one `send()` call site -- but nothing on the server enforces or
+even checks it. Any other client (a JS form/select whose `.value` is
+always a string, a test script, a future mobile client, a third-party
+integration) is one string-typed variable away from silently
+auto-approving every destructive action -- shell commands, file
+writes/deletes -- a user believes they just declined.
+
+**Fixed** by replacing the truthiness cast with a strict identity
+check, `reply.get("approved") is True`: only the real JSON boolean
+`true` approves; every other value -- a string, a number, a missing
+key -- fails closed the same way the timeout and non-dict cases
+already do.
+
+**Verified live**: the identical `{"approved": "false"}` reply now
+correctly declines.
+
+**Verified by reverting** `server/app.py` alone and watching the new
+test fail with the literal old bug's own shape: `is_error: False`, the
+file actually written.
+
+**1 new test, 764 -> 765 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the timeout/shape-validation fix chapter for
+this same function -- its second real bug, found in two separate
+rounds, each a genuinely different mechanism.
+
+**Fifty-four of the last fifty-five rounds (46-67, 70-99) have found
+and shipped real fixes; rounds 68-69 were the two clean sweeps.** The
+newest search heuristic (checking for `is None` paired with a truthy
+check on the same value) paid off again in a slightly different shape:
+here it wasn't two checks on the same value disagreeing, but a
+truthiness CAST standing in for a strict boolean check the surrounding
+code's own comments already promised. Worth remembering that `bool()`
+on a JSON-derived value is rarely the right operation when the
+contract is "must be exactly `true`/`false`" -- a non-empty string, a
+nonzero number, and a populated dict or list are all truthy in Python
+regardless of what they actually mean.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

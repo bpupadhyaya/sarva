@@ -368,6 +368,43 @@ has no attribute '_CONFIRM_TIMEOUT_SECONDS'` (the constant this fix
 introduces) — before re-applying. All 35 pre-existing server tests pass
 unchanged.
 
+### That same fix's own `bool(...)` cast silently approved a destructive action given a non-boolean truthy value — the exact ambiguity it was written to reject
+
+A much later fresh-eyes sweep found a real gap inside the fix directly
+above: `return bool(reply.get("approved", False))` is a Python-
+truthiness cast, not the strict boolean check the surrounding code's
+own established contract (`{"approved": bool}`, documented in this
+module's own docstring) actually promises — `bool("false")` is `True`,
+since any non-empty string is truthy in Python. Confirmed live: a
+client sending `{"approved": "false"}` — a **JSON string**, not a JSON
+boolean, exactly what a form/select's `.value` produces, or any client
+that serializes booleans as strings with no explicit `=== "true"`
+conversion — got a destructive `write_file` call **approved**, the
+opposite of the sender's intent, with no error and no signal anything
+was wrong. This directly contradicts the timeout/non-dict fix's own
+stated philosophy just above: "a destructive action given an ambiguous
+or absent confirmation signal must never default to running" — a
+non-boolean truthy value isn't ambiguous by accident here, it was
+silently *accepted* as approval.
+
+Reachable, not hypothetical: `/ws/chat`'s own docstring documents
+`{"approved": bool}` as the wire protocol for *any* client to
+implement, not a private internal API. The first-party desktop app
+avoids this by accident — TypeScript enforces the boolean type at its
+one `send(JSON.stringify({ approved }))` call site — but nothing on
+the server enforces or even checks it; any other client (a test
+script, a future mobile client, a third-party integration) is one
+string-typed variable away from silently auto-approving every
+destructive action a user believes they just declined. Fixed by
+replacing the truthiness cast with a strict identity check,
+`reply.get("approved") is True`: only the real JSON boolean `true`
+approves, and every other value — a string, a number, a missing key —
+fails closed the same way the timeout and non-dict cases already do.
+Verified live the identical `{"approved": "false"}` reply now correctly
+declines. Verified the new test is real: reverted the fix and watched
+it fail with the literal old bug's own shape (`is_error: False`, the
+file written) before re-applying. 1 new test, 764 → 765 Python tests.
+
 **A real gap found by checking what the desktop app actually calls, not
 what the server merely supports:** `/chat` has taken optional
 `image_base64`/`image_media_type` fields since images were wired into

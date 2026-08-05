@@ -463,7 +463,28 @@ def create_app() -> FastAPI:
                     return False
                 if not isinstance(reply, dict):
                     return False
-                return bool(reply.get("approved", False))
+                # A real bug found by a fresh-eyes sweep: `bool(...)` is a
+                # Python-truthiness cast, not the strict boolean check the
+                # documented `{"approved": bool}` wire contract (this
+                # function's own docstring above) actually promises --
+                # `bool("false")` is `True`, since any non-empty string is
+                # truthy in Python. Confirmed live: a client that sends
+                # `{"approved": "false"}` (a JSON string, not a JSON
+                # boolean -- exactly what a form/select's `.value`, or any
+                # client serializing booleans as strings, produces with no
+                # explicit `=== "true"` conversion) got a destructive tool
+                # call APPROVED, the opposite of the sender's intent, with
+                # no error and no signal anything was wrong. This directly
+                # contradicts the "ambiguous or absent confirmation signal
+                # must never default to running" discipline the comment
+                # above already states for the timeout/non-dict cases --
+                # a non-boolean truthy value isn't ambiguous by accident,
+                # it was silently ACCEPTED as approval. `is True` is a
+                # strict identity check: only the real JSON boolean `true`
+                # approves: any other value (a string, a number, missing
+                # entirely) fails closed the same way the two checks above
+                # already do.
+                return reply.get("approved") is True
 
             store = SessionStore()
             try:
