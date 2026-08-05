@@ -17038,3 +17038,70 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `MoEConfig.expert_hidden_dim` was never validated, unlike its three sibling fields in the same class
+
+Round 124. Continuing to prioritize `foundry/sarva_foundry/` for a
+third round in a row, after rounds 122 and 123 both found real bugs
+there. It found a real bug back in a file this project has already
+fixed twice before -- `foundry/sarva_foundry/model/moe.py`'s
+`MoEConfig` -- but in a field neither prior fix touched.
+
+**The bug**: `MoEConfig.__post_init__` validates `n_experts`,
+`n_experts_per_tok`, and `bias_update_speed` (added across two earlier
+rounds, each explicitly citing the identical "built straight from an
+untrusted checkpoint bundle's `config.json`" reachability path as the
+reason). `expert_hidden_dim` -- reachable through that exact same
+path -- never got the same treatment. `MoEFeedForward.__init__` then
+does `hidden = config.expert_hidden_dim or max(32, ...)`: for a
+negative value, this constructs `nn.Linear` with a negative
+`out_features`, crashing deep inside PyTorch with a raw
+`RuntimeError` instead of the clean `ValueError` its three sibling
+fields already produce for the identical corrupted-config threat
+model. Worse for exactly `0`: the `or`-fallback is a truthiness check,
+not a strict `is None` check, so `0` is silently discarded and
+replaced with the default hidden dim -- no error raised at all, just a
+model quietly built with a different architecture than the
+checkpoint's own config claims.
+
+**Confirmed live**: `MoEConfig(n_experts=4, n_experts_per_tok=2,
+expert_hidden_dim=-5)` constructed with no error, then crashed
+building the model with `RuntimeError: Trying to create tensor with
+negative dimension -5: [-5, 16]`; `expert_hidden_dim=0` constructed
+with no error and silently produced a model using the default hidden
+dim instead of the requested `0`.
+
+**Fixed** by adding the identical positivity check this class's three
+sibling fields already have, deliberately still allowing `None`
+through unchanged (the documented "use the default" sentinel).
+
+**Verified live**: both `-5` and `0` now raise a clear `ValueError`
+naming the field; `None` and a genuine positive value still construct
+exactly as before.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: no exception raised at all.
+
+**2 new tests, 807 -> 809 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round,
+following established precedent for foundry model-internals fixes.
+
+**Seventy-nine of the last eighty rounds (46-67, 70-124) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** Third round in a row finding a real bug in `foundry/
+sarva_foundry/` -- this one specifically inside a class already fixed
+twice before, worth remembering alongside `contains_match`/
+`answer_reward` and `RunShellTool`'s timeout as a reminder that
+"already fixed N times" describes the FIELDS that were checked, not
+the whole surface: a dataclass with several fields needs every field
+independently audited, not just the ones a prior round happened to
+name.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

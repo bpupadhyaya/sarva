@@ -270,6 +270,38 @@ def test_moe_config_rejects_non_positive_bias_update_speed():
             MoEConfig(n_experts=4, n_experts_per_tok=2, bias_update_speed=speed)
 
 
+def test_moe_config_rejects_non_positive_expert_hidden_dim():
+    # A real bug found by a fresh-eyes sweep, the identical gap already
+    # found and fixed for this class's other three fields (n_experts,
+    # n_experts_per_tok, bias_update_speed) above, never propagated to
+    # expert_hidden_dim -- reachable through the identical untrusted-
+    # checkpoint config.json path those fixes closed. Confirmed live
+    # before this fix: a negative value constructed with no error, then
+    # crashed deep inside MoEFeedForward.__init__ with a raw
+    # RuntimeError ("Trying to create tensor with negative dimension")
+    # instead of a clean ValueError. Worse for exactly 0: `hidden =
+    # config.expert_hidden_dim or max(32, ...)` is an or-fallback (a
+    # truthiness check, not `is None`), so 0 was silently discarded and
+    # replaced with the default hidden dim -- no error at all, a model
+    # built with a different architecture than the checkpoint's config
+    # claims.
+    import pytest
+
+    for hidden_dim in (0, -1, -64):
+        with pytest.raises(ValueError, match="expert_hidden_dim"):
+            MoEConfig(n_experts=4, n_experts_per_tok=2, expert_hidden_dim=hidden_dim)
+
+
+def test_moe_config_still_accepts_none_and_a_positive_expert_hidden_dim():
+    # Regression guard for the fix above: None (the documented "use the
+    # default" sentinel) and a genuinely positive value must not be
+    # rejected by the new check.
+    config_default = MoEConfig(n_experts=4, n_experts_per_tok=2, expert_hidden_dim=None)
+    assert config_default.expert_hidden_dim is None
+    config_explicit = MoEConfig(n_experts=4, n_experts_per_tok=2, expert_hidden_dim=64)
+    assert config_explicit.expert_hidden_dim == 64
+
+
 def test_a_non_finite_bias_update_speed_would_permanently_collapse_routing():
     # Regression proof for why the __post_init__ check above matters: this
     # is what happens if a non-finite bias_update_speed reaches

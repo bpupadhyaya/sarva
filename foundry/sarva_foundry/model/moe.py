@@ -94,6 +94,25 @@ class MoEConfig:
                 "silently collapses routing to a fixed, content-independent pattern "
                 "once it reaches expert_bias via update_expert_bias()"
             )
+        # A real bug found by a fresh-eyes sweep: this exact class's own
+        # sibling fields (n_experts, n_experts_per_tok, bias_update_speed
+        # above) all got this same positivity check, but `expert_hidden_
+        # dim` -- reachable through the identical untrusted-checkpoint
+        # `config.json` path -- never did. Confirmed live: a negative
+        # value passed construction with no error, then crashed deep
+        # inside `MoEFeedForward.__init__` with a raw `RuntimeError:
+        # Trying to create tensor with negative dimension` instead of a
+        # clean, actionable ValueError. Worse for exactly `0`: `hidden =
+        # config.expert_hidden_dim or max(32, ...)` is an `or`-fallback
+        # (a truthiness check, not `is None`), so `0` is silently
+        # discarded and replaced with the default hidden dim -- no error
+        # at all, just a model built with a different architecture than
+        # the checkpoint's own config claims, which then risks a shape
+        # mismatch at load_state_dict instead of a clear failure here at
+        # construction time. `None` (the documented "use the default"
+        # sentinel) is deliberately still allowed through unchanged.
+        if self.expert_hidden_dim is not None and self.expert_hidden_dim <= 0:
+            raise ValueError(f"expert_hidden_dim must be positive, got {self.expert_hidden_dim}")
 
 
 def _route(gate_logits: Tensor, bias: Tensor, top_k: int) -> tuple[Tensor, Tensor]:
