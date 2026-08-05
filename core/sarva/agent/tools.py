@@ -11,6 +11,7 @@ import asyncio
 import os
 import signal
 import subprocess
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -567,10 +568,36 @@ class RememberTool:
     def __init__(self, store: VectorMemoryStore | None = None, session_id: str = "default"):
         self._store = store
         self._session_id = session_id
+        self._store_lock = threading.Lock()
 
     def _get_store(self) -> VectorMemoryStore:
+        # A real bug found by a fresh-eyes sweep: this check-then-act
+        # lazy construction runs on a real OS worker thread (via
+        # `asyncio.to_thread` in `run()` below, dispatched specifically
+        # so it can't block the event loop -- see that comment), not a
+        # cooperative asyncio task, so the classic unsynchronized
+        # singleton race is genuinely live here, not just theoretical:
+        # two concurrent `/ws/chat` connections (two users, or two
+        # tabs/windows of the same user) both calling `remember` before
+        # this tool's very first call -- most realistically right after
+        # server startup -- can both pass `self._store is None`
+        # simultaneously on `BUILTIN_TOOLS`' shared, module-level
+        # singleton instance and each construct their own independent
+        # `VectorMemoryStore` (its own sqlite3 connection AND its own
+        # `threading.Lock`). Confirmed live: two concurrent calls
+        # produced two distinct `VectorMemoryStore` objects for one
+        # lazily-cached field, one connection silently discarded
+        # unclosed the moment the other's assignment won the race --
+        # momentarily breaking the exact "one lock serializes every
+        # real access" invariant `VectorMemoryStore`'s own docstring
+        # claims. Fixed with the standard double-checked-locking
+        # pattern: the lock is only ever contended during this narrow
+        # first-use window, never on the hot path once `self._store` is
+        # set.
         if self._store is None:
-            self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
+            with self._store_lock:
+                if self._store is None:
+                    self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
         return self._store
 
     def _add(self, session_id: str, text: str) -> None:
@@ -620,10 +647,17 @@ class RecallMemoryTool:
     def __init__(self, store: VectorMemoryStore | None = None, session_id: str = "default"):
         self._store = store
         self._session_id = session_id
+        self._store_lock = threading.Lock()
 
     def _get_store(self) -> VectorMemoryStore:
+        # A real bug found by a fresh-eyes sweep: the same unsynchronized
+        # check-then-act lazy-singleton race found (and fixed) in
+        # RememberTool's own `_get_store` -- see that fix's own comment
+        # for the confirmed live repro. Fixed identically.
         if self._store is None:
-            self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
+            with self._store_lock:
+                if self._store is None:
+                    self._store = VectorMemoryStore(DEFAULT_MEMORY_DB_PATH)
         return self._store
 
     def _search(self, query: str, top_k: int, session_id: str | None):
@@ -717,10 +751,17 @@ class NoteTool:
 
     def __init__(self, store: LongTermMemoryStore | None = None):
         self._store = store
+        self._store_lock = threading.Lock()
 
     def _get_store(self) -> LongTermMemoryStore:
+        # A real bug found by a fresh-eyes sweep: the same unsynchronized
+        # check-then-act lazy-singleton race found (and fixed) in
+        # RememberTool's own `_get_store` -- see that fix's own comment
+        # for the confirmed live repro. Fixed identically.
         if self._store is None:
-            self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
+            with self._store_lock:
+                if self._store is None:
+                    self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
         return self._store
 
     def _write(self, topic: str, content: str) -> Path:
@@ -798,10 +839,17 @@ class SearchNotesTool:
 
     def __init__(self, store: LongTermMemoryStore | None = None):
         self._store = store
+        self._store_lock = threading.Lock()
 
     def _get_store(self) -> LongTermMemoryStore:
+        # A real bug found by a fresh-eyes sweep: the same unsynchronized
+        # check-then-act lazy-singleton race found (and fixed) in
+        # RememberTool's own `_get_store` -- see that fix's own comment
+        # for the confirmed live repro. Fixed identically.
         if self._store is None:
-            self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
+            with self._store_lock:
+                if self._store is None:
+                    self._store = LongTermMemoryStore(DEFAULT_LONGTERM_MEMORY_DIR)
         return self._store
 
     def _search(self, query: str) -> list[NoteMatch]:

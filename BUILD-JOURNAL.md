@@ -15581,3 +15581,89 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+## The event-loop-freeze fix for the four memory/notes tools made a completely different bug live for the first time -- an unsynchronized lazy-singleton race, in all four tools at once
+
+Round 105. Delegated a fresh-eyes sweep to a subagent, with `memory/
+vector.py` flagged for a third consecutive round as the only file in
+this entire codebase never given a dedicated round. The sweep gave it
+a serious, thorough look but found the real bug one layer up instead
+-- in the tools that USE `VectorMemoryStore`, not the store itself,
+and specifically as a side effect of an earlier round's own fix.
+
+**The bug**: `RememberTool`/`RecallMemoryTool`/`NoteTool`/
+`SearchNotesTool` all share the identical lazy-init pattern: `if
+self._store is None: self._store = VectorMemoryStore(...)`. An earlier
+round fixed a real event-loop-freeze bug in all four by routing this
+lazy construction through `asyncio.to_thread` (so the blocking
+filesystem/SQLite I/O can't stall the event loop) -- but that fix had
+a real, un-anticipated side effect: it made the classic unsynchronized
+check-then-act singleton race genuinely *live* for the first time. The
+check now runs on a real OS worker thread, not a cooperative asyncio
+task, and `BUILTIN_TOOLS` is a module-level singleton list -- the same
+tool instances handed to every `AgentLoop` a running `sarva serve`
+process builds, one per `/ws/chat` connection.
+
+**Confirmed live**: two concurrent connections both calling the same
+tool before its very first call (most realistically right after server
+startup) can both pass `self._store is None` simultaneously and each
+construct their own independent store object. With a deterministic
+repro (a small artificial delay inside the relevant store's
+`__init__`, the same technique the freeze tests already use): two
+concurrent `remember` calls on one shared `RememberTool` instance
+reliably constructed two distinct `VectorMemoryStore` objects for the
+one lazily-cached field, 10/10 trials.
+
+**Why this is worse than a plain resource leak**: whichever assignment
+lands last silently wins; the other is discarded without ever being
+closed, and the thread that "lost" ends up operating through a store
+object it didn't itself construct -- momentarily breaking the exact
+"one lock serializes every real access" invariant `VectorMemoryStore`'s
+own docstring claims, for the duration of the race.
+
+**Fixed** with the standard double-checked-locking pattern: a
+`threading.Lock` (not `asyncio.Lock`, which isn't safe to hand between
+real OS threads) created once per tool instance in `__init__`, guarding
+the check-and-construct in all four tools identically -- the lock is
+only ever contended during this narrow first-use window, never on the
+hot path once `self._store` is set.
+
+**Honest about severity**, matching this project's own established
+discipline of not overstating impact: the blast radius is a momentary
+resource blip during the race window, not lasting data corruption --
+both racing connections still ultimately write to the same on-disk
+file, and the situation self-heals the instant the race resolves.
+
+**Verified live**: the identical repro now constructs exactly one
+store object across 10/10 trials.
+
+**Verified by reverting** `tools.py` alone and watching both new tests
+fail with the literal old bug's own shape: two distinct store objects
+constructed for one field, deterministically on every run.
+
+**2 new tests, 773 -> 775 Python tests, all passing, `ruff
+check`/`format --check` clean** -- one for each of the two underlying
+store types this fix touches (`VectorMemoryStore` via `remember`,
+`LongTermMemoryStore` via `note`); the other two tools share the
+identical fix and mechanism. `docs/memory.md` gained a new subsection
+directly after the fourth-sibling freeze-fix chapter this bug was a
+direct, un-anticipated consequence of.
+
+**Sixty of the last sixty-one rounds (46-67, 70-105) have found and
+shipped real fixes; rounds 68-69 were the two clean sweeps.** A
+genuinely interesting instance of this project's own hardening work
+creating a new, different bug as a side effect -- not the first time
+this exact thing has happened (an earlier round's `_prune_old_runs`
+fix nearly reopened a different concurrency bug), but this time the
+new bug wasn't caught until a later, independent sweep found it,
+rather than being caught during the same round's own stress-testing.
+Worth treating "did this fix change what kind of concurrency is now
+possible" as its own explicit question whenever a blocking call moves
+onto a real OS thread, not just "does the freeze go away."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

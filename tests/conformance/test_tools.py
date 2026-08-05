@@ -704,6 +704,52 @@ async def test_remember_does_not_freeze_the_event_loop_while_waiting_on_a_conten
 
 
 @pytest.mark.asyncio
+async def test_remember_lazy_store_construction_is_not_racy_under_real_concurrency(
+    tmp_path, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep: `_get_store()`'s lazy
+    # construction runs on a real OS worker thread (via `asyncio.
+    # to_thread` above, dispatched specifically so it can't block the
+    # event loop), not a cooperative asyncio task -- so the classic
+    # unsynchronized check-then-act singleton race is genuinely live
+    # here. `BUILTIN_TOOLS` is a module-level singleton list shared by
+    # every AgentLoop the server builds, so two concurrent /ws/chat
+    # connections both calling `remember` before this tool's very first
+    # call -- most realistically right after server startup -- can both
+    # pass `self._store is None` simultaneously and each construct
+    # their own independent VectorMemoryStore, one connection silently
+    # discarded unclosed the moment the other's assignment wins.
+    # Confirmed live before this fix (10/10 trials with a small
+    # artificial delay inside VectorMemoryStore.__init__ to make the
+    # race deterministic rather than "usually"): two distinct store
+    # objects constructed for the one lazily-cached `self._store` field.
+    monkeypatch.setattr(tools_module, "DEFAULT_MEMORY_DB_PATH", tmp_path / "memory.db")
+
+    created: list[VectorMemoryStore] = []
+    real_init = VectorMemoryStore.__init__
+
+    def slow_init(self, *args, **kwargs):
+        time.sleep(0.05)  # widen the race window deterministically
+        real_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(VectorMemoryStore, "__init__", slow_init)
+
+    remember = RememberTool()  # the shared BUILTIN_TOOLS singleton shape
+    ctx_obj = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+
+    await asyncio.gather(
+        remember.run({"text": "call A"}, ctx_obj),
+        remember.run({"text": "call B"}, ctx_obj),
+    )
+
+    assert len(created) == 1, (
+        f"{len(created)} distinct VectorMemoryStore objects constructed for one "
+        "lazily-cached field -- the unsynchronized race reproduced itself"
+    )
+
+
+@pytest.mark.asyncio
 async def test_recall_with_no_memories_says_so(ctx, tmp_path):
     recall = RecallMemoryTool(store=VectorMemoryStore(tmp_path / "memory.db"))
     result = await recall.run({"query": "anything"}, ctx)
@@ -994,6 +1040,43 @@ async def test_note_does_not_freeze_the_event_loop_while_lazily_constructing_its
     # coroutines -- a near-zero tick count is the literal old bug
     # reproducing itself (the loop frozen solid for the whole ~1s wait).
     assert ticks >= 10, f"event loop only ticked {ticks} times -- looks frozen"
+
+
+@pytest.mark.asyncio
+async def test_note_lazy_store_construction_is_not_racy_under_real_concurrency(tmp_path):
+    # The LongTermMemoryStore-backed sibling of RememberTool's own
+    # identical race, fixed the same way and for the same reason: once
+    # `_get_store()`'s lazy construction runs on a real OS worker thread
+    # (see the freeze fix above), the unsynchronized check-then-act
+    # singleton pattern is genuinely racy under real concurrency -- two
+    # concurrent `/ws/chat` connections both calling `note` before
+    # `BUILTIN_TOOLS`' shared NoteTool instance has ever built a store
+    # can both pass `self._store is None` and each construct their own.
+    import sarva.memory.longterm as longterm_module
+
+    created: list[longterm_module.LongTermMemoryStore] = []
+    real_init = longterm_module.LongTermMemoryStore.__init__
+
+    def slow_init(self, directory=longterm_module.DEFAULT_LONGTERM_MEMORY_DIR):
+        time.sleep(0.05)  # widen the race window deterministically
+        real_init(self, directory)
+        created.append(self)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(longterm_module.LongTermMemoryStore, "__init__", slow_init):
+        note = NoteTool()  # the shared BUILTIN_TOOLS singleton shape
+        ctx_obj = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+
+        await asyncio.gather(
+            note.run({"topic": "t", "content": "call A"}, ctx_obj),
+            note.run({"topic": "t", "content": "call B"}, ctx_obj),
+        )
+
+    assert len(created) == 1, (
+        f"{len(created)} distinct LongTermMemoryStore objects constructed for one "
+        "lazily-cached field -- the unsynchronized race reproduced itself"
+    )
 
 
 async def test_search_notes_does_not_freeze_the_event_loop_on_a_large_notes_directory(tmp_path):

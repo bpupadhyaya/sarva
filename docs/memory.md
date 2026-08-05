@@ -737,6 +737,55 @@ plus-store-call path through `asyncio.to_thread` as a single unit,
 closing this exact bug shape across the whole chapter, not just three
 of its four tools. 1 new test, 739 -> 740 total.
 
+### Dispatching that lazy construction onto real OS threads made a completely different bug live for the first time — an unsynchronized singleton race, in all four tools at once
+
+Fixing the event-loop-freeze shape above (routing `_get_store()`'s lazy
+construction through `asyncio.to_thread` in all four tools) had a real,
+un-anticipated side effect a much later fresh-eyes sweep caught: it
+made the classic unsynchronized check-then-act singleton race genuinely
+*live* for the first time. `_get_store()`'s `if self._store is None:
+self._store = ...` now runs on a real OS worker thread, not a
+cooperative asyncio task — and `BUILTIN_TOOLS` is a module-level
+singleton list, the same `RememberTool()`/`RecallMemoryTool()`/
+`NoteTool()`/`SearchNotesTool()` instances handed to *every* `AgentLoop`
+a running `sarva serve` process builds, one per `/ws/chat` connection.
+Two concurrent connections — two users, or two tabs/windows of the
+same user — both calling the same tool before its very first call
+(most realistically right after server startup) can both pass
+`self._store is None` simultaneously and each construct their own
+independent store object: its own SQLite connection and lock for the
+two memory tools, its own directory handle for the two notes tools.
+Whichever assignment lands last silently wins; the other is discarded
+without ever being closed, and — worse than a mere resource leak — the
+thread that "lost" the race ends up operating through a store object
+it didn't itself construct, momentarily breaking the exact "one lock
+serializes every real access" invariant `VectorMemoryStore`'s own
+docstring claims, for the duration of the race.
+
+Confirmed live with a deterministic repro (a small artificial delay
+inside the relevant store's `__init__`, the same technique the freeze
+tests above already use): two concurrent `remember` calls on one
+shared `RememberTool` instance — the exact shape `BUILTIN_TOOLS`
+produces — reliably constructed two distinct `VectorMemoryStore`
+objects for the one lazily-cached `self._store` field, 10/10 trials.
+Fixed with the standard double-checked-locking pattern: a
+`threading.Lock` (not `asyncio.Lock`, which isn't safe to hand between
+real OS threads) created once per tool instance in `__init__`, guarding
+the check-and-construct in all four tools identically — the lock is
+only ever contended during this narrow first-use window, never on the
+hot path once `self._store` is set. Honest about severity: the blast
+radius is a momentary resource blip during the race window, not
+lasting data corruption — both racing connections still ultimately
+write to the same on-disk file, and the situation self-heals the
+instant the race resolves. Verified live the identical repro now
+constructs exactly one store object across 10/10 trials. Verified by
+reverting and watching the new tests fail with the literal old bug's
+own shape: two distinct store objects constructed for one field. New
+tests cover both underlying store types this fix touches
+(`VectorMemoryStore` via `remember`, `LongTermMemoryStore` via `note`)
+— the other two tools share the identical fix and mechanism. 2 new
+tests, 773 → 775 Python tests.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools
