@@ -41,6 +41,35 @@ def generate_with_cache(
     its correctness proof. `model.config.max_seq_len` bounds the cache's
     allocation, the same limit `sample_completion`/RoPE are bounded by
     elsewhere in this codebase."""
+    # A real bug found by a fresh-eyes sweep: this is a genuinely public,
+    # documented entry point (used directly in examples/15_kv_cache_
+    # inference.py), and its own docstring makes no exception for an
+    # empty prompt -- but nothing here ever validated one. An empty
+    # `prompt_ids` (e.g. `tokenizer.encode("")` on an empty message, a
+    # completely realistic input with zero upstream validation --
+    # `sarva.providers.foundry_provider`'s own generate() already
+    # documents this exact repro before its own caller-side guard) makes
+    # `torch.tensor([prompt_ids])` an empty tensor with no elements to
+    # infer a dtype from, so PyTorch defaults it to float32 instead of
+    # int64 -- fed straight into `tok_embeddings`, which requires an
+    # integer index tensor, crashing with a raw, implementation-leaking
+    # RuntimeError ("Expected tensor for argument #1 'indices' to have
+    # one of the following scalar types: Long, Int; but got
+    # torch.FloatTensor instead"), confirmed live before this fix. Even
+    # fixing just the dtype wouldn't make an empty prompt generatable
+    # anyway -- prefilling zero positions leaves no "last" logit for
+    # `next_logits = logits[0, -1]` to sample from either, an IndexError
+    # one line later. `foundry_provider.py`'s own caller already guards
+    # against this at its own layer, but that protects only that one
+    # caller -- every OTHER caller of this public function (the bundled
+    # example script, a test, a future adapter) hit the identical
+    # unguarded crash. A clear, actionable error here protects all of
+    # them at once, at the one place the real architectural constraint
+    # (a KV-cache prefill needs at least one token) actually lives.
+    if not prompt_ids:
+        raise ValueError(
+            "prompt_ids must not be empty -- there's no prefix to prefill the KV cache from"
+        )
     model.eval()
     device = next(model.parameters()).device
     cache = KVCache(

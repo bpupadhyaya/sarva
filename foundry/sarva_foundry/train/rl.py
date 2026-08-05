@@ -53,7 +53,18 @@ def sample_completion(
     `temperature <= 0` means greedy (always the argmax token); otherwise
     samples from the softmax distribution at that temperature. Returns
     only the *newly generated* token ids, not the prompt — matching what
-    `build_grpo_batch` expects as a "completion"."""
+    `build_grpo_batch` expects as a "completion".
+
+    A real bug found by a fresh-eyes sweep, the identical gap found and
+    fixed in this function's own drop-in-compatible sibling,
+    `sarva_foundry.inference.generate_with_cache` (see that function's
+    own comment for the full confirmed-live repro): an empty
+    `prompt_ids` makes `torch.tensor(ids)` an empty tensor with no
+    elements to infer a dtype from, defaulting to float32 instead of
+    int64 and crashing the token embedding lookup with a raw,
+    implementation-leaking `RuntimeError` instead of a clear one."""
+    if not prompt_ids:
+        raise ValueError("prompt_ids must not be empty -- there's nothing to condition on")
     model.eval()
     generated: list[int] = []
     ids = list(prompt_ids)

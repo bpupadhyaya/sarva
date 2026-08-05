@@ -143,3 +143,29 @@ def test_generate_with_cache_raises_a_clear_error_past_max_seq_len():
     prompt_ids = list(range(6))
     with pytest.raises(ValueError, match="exceeds max_seq_len"):
         generate_with_cache(model, prompt_ids, max_new_tokens=10, temperature=0.0)
+
+
+def test_generate_with_cache_raises_a_clear_error_on_an_empty_prompt():
+    # A real bug found by a fresh-eyes sweep: an empty prompt_ids (e.g.
+    # tokenizer.encode("") on an empty message -- a completely realistic
+    # input with zero upstream validation, sarva.providers.
+    # foundry_provider's own generate() already documents this exact
+    # repro before its own caller-side guard) made torch.tensor([[]])
+    # an empty tensor with no elements to infer a dtype from, defaulting
+    # to float32 instead of int64 -- crashing the token embedding lookup
+    # with a raw, implementation-leaking RuntimeError instead of a clear
+    # one. Confirmed live before this fix.
+    torch.manual_seed(0)
+    model = DecoderOnlyTransformer(_tiny_config())
+    with pytest.raises(ValueError, match="must not be empty"):
+        generate_with_cache(model, [], max_new_tokens=5, temperature=0.0)
+
+
+def test_sample_completion_raises_a_clear_error_on_an_empty_prompt():
+    # The identical gap found and fixed in generate_with_cache's own
+    # drop-in-compatible sibling -- see that test's own comment for the
+    # full confirmed-live repro.
+    torch.manual_seed(0)
+    model = DecoderOnlyTransformer(_tiny_config())
+    with pytest.raises(ValueError, match="must not be empty"):
+        sample_completion(model, [], max_new_tokens=5, temperature=0.0)

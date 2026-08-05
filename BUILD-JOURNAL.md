@@ -16959,3 +16959,82 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `generate_with_cache`/`sample_completion` crashed with a raw, implementation-leaking `RuntimeError` on an empty prompt -- a caller-side guard existed for one caller, but never in the shared library functions themselves
+
+Round 123. Continuing to prioritize the foundry/sarva_foundry/ codebase
+after round 122's own finding suggested it was comparatively
+under-swept relative to core/sarva/. It found a real bug in
+`foundry/sarva_foundry/inference/generate.py`'s `generate_with_cache`
+-- a genuinely public, documented entry point (used directly in
+`examples/15_kv_cache_inference.py`) -- and confirmed the identical
+gap in its own drop-in-compatible sibling, `sarva_foundry.train.rl.
+sample_completion`.
+
+**The bug**: neither function validated `prompt_ids` before use. An
+empty `prompt_ids` (e.g. `tokenizer.encode("")` on an empty message --
+completely realistic, with zero upstream validation: `core/sarva/
+providers/foundry_provider.py`'s own `generate()` had ALREADY
+documented this exact repro in its own comment, from an earlier round,
+but only fixed it at that one caller's own layer) makes `torch.
+tensor([prompt_ids])` (or `torch.tensor(ids)` in `sample_completion`)
+an empty tensor with no elements to infer a dtype from -- PyTorch
+defaults it to float32 instead of int64, and that float tensor fed
+straight into `tok_embeddings` (which requires an integer index
+tensor) crashes with a raw, implementation-leaking `RuntimeError`
+("Expected tensor for argument #1 'indices' to have one of the
+following scalar types: Long, Int; but got torch.FloatTensor
+instead") instead of a clean, actionable error.
+
+**Confirmed live**: both `generate_with_cache([], ...)` and
+`sample_completion([], ...)` raised the identical raw `RuntimeError`.
+`foundry_provider.py`'s own existing caller-side guard (`if budget <=
+0 or not prompt_ids: ...`) protects only that one caller -- every
+OTHER caller of either public function (the bundled example script, a
+test, a future adapter) hit the identical unguarded crash.
+
+**Fixed** by raising a clear `ValueError` at the top of both
+functions when `prompt_ids` is empty, at the one place the real
+architectural constraint actually lives: a KV-cache prefill (or a
+from-scratch autoregressive step) needs at least one token to
+condition on -- even fixing just the dtype wouldn't make an empty
+prompt genuinely generatable, since prefilling zero positions leaves
+no "last" logit to sample from either (an `IndexError` one line
+later). Fixed in both sibling functions together, matching this
+project's established precedent of closing a propagation gap across
+documented drop-in-compatible siblings in one pass rather than one
+function at a time.
+
+**Verified live**: both functions now raise a clear `ValueError`
+instead of the raw `RuntimeError`; a genuine non-empty prompt still
+generates correctly in both, unaffected.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: the raw, implementation-leaking
+`RuntimeError` about scalar types, not the clean message.
+
+**2 new tests, 805 -> 807 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round,
+following established precedent: foundry model/inference-internals
+fixes are documented in this journal only.
+
+**Seventy-eight of the last seventy-nine rounds (46-67, 70-123) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** Two rounds in a row now finding real bugs in
+`foundry/sarva_foundry/` after 121 rounds mostly focused on
+`core/sarva/` -- confirms this really was an under-swept area, not a
+one-off. Also a fresh instance of an already-named heuristic: a fix
+correctly identified and applied at ONE caller's own layer
+(`foundry_provider.py`'s guard) can leave the SAME root cause live in
+the shared library function every other caller depends on -- the
+caller-side guard and the library-level fix are complementary, not
+redundant, and finding one doesn't mean the other isn't still needed.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
