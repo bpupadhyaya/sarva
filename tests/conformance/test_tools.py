@@ -470,6 +470,38 @@ async def test_run_shell_timeout_kills_the_child_process_and_its_side_effects(ct
     assert not os.path.exists(marker)
 
 
+async def test_run_shell_timeout_still_fires_after_the_command_closes_its_own_output_fds(
+    ctx, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep, one layer beyond the
+    # already-fixed timeout-doesn't-kill-the-process gap above:
+    # `_read_stream_bounded` returns as soon as the stdout PIPE hits
+    # EOF -- which happens the instant every process holding the write
+    # end closes its own stdout/stderr, an ordinary shell idiom (`exec
+    # 1>&- 2>&-`, or any command that redirects away its own fds and
+    # keeps running -- backgrounding/daemonizing a job is the common
+    # real case, not contrived). `_SHELL_TIMEOUT_SECONDS` only bounded
+    # that READ, not the command itself: the `else: await proc.wait()`
+    # branch below it had no timeout at all, so a command that closed
+    # its fds early but kept running was left completely unbounded.
+    # Confirmed live: a command configured against a 0.2s timeout that
+    # closed its fds then slept for 2s ran the full 2s and returned
+    # is_error=False, with no indication the timeout never engaged.
+    monkeypatch.setattr(tools_module, "_SHELL_TIMEOUT_SECONDS", 0.2)
+    shell = RunShellTool()
+    marker = ctx.workdir + "/side-effect-closed-fds.txt"
+
+    result = await shell.run({"command": f"exec 1>&- 2>&-; sleep 2 && echo done > {marker}"}, ctx)
+
+    assert result.is_error
+    assert "timed out" in result.content[0].text
+
+    # Same decisive proof as the sibling test above: the process (and
+    # its trailing side effect) must actually be dead.
+    await asyncio.sleep(3)
+    assert not os.path.exists(marker)
+
+
 @pytest.mark.asyncio
 async def test_run_shell_output_is_bounded_not_buffered_without_limit(ctx, monkeypatch):
     # A real bug found by giving this tool its own fresh-eyes sweep, one

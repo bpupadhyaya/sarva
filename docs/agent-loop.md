@@ -472,6 +472,43 @@ instead of 'does the old bug reproduce'" shape prior genuinely-new
 mechanisms in this project have used). 2 new tests, 720 → 722 Python
 tests.
 
+### The timeout only ever bounded the output READ, not the command itself — a third real gap in the same timeout, found by a much later fresh-eyes sweep
+
+`_SHELL_TIMEOUT_SECONDS` wraps `asyncio.wait_for(_read_stream_bounded
+(...), timeout=...)`, and the two fixes above both handle that call
+timing out or hitting its size cap correctly. What neither fix noticed:
+`_read_stream_bounded` returns the moment the stdout pipe hits EOF —
+which happens the instant every process holding the write end closes
+its own stdout/stderr, an ordinary shell idiom (`exec 1>&- 2>&-`, or
+any command that redirects away its own fds and keeps running —
+backgrounding or daemonizing a job is the common real case, not a
+contrived one). When that happens well within the timeout, `truncated`
+comes back `False`, and execution falls into the `else` branch's bare
+`await proc.wait()` — which had no timeout at all. `_SHELL_TIMEOUT_
+SECONDS` was bounding the read, never the command's actual lifetime.
+
+Confirmed live: a command configured against a 2-second timeout that
+closed its own file descriptors and then slept for 8 seconds ran the
+full 8 seconds and returned `is_error=False` — no indication the
+timeout guard had ever engaged. At the real 60-second default, an
+ordinary backgrounding/daemonizing shell command could hang the tool
+call far past its documented bound, defeating the exact "a destructive
+tool's confirmation gate exists to stop unwanted side effects, and a
+timeout must not leave one running unattended" guarantee the two fixes
+above already established for the read-timeout and size-cap paths.
+
+Fixed by tracking one deadline for the whole call, computed before the
+read starts: the subsequent `proc.wait()` now runs under `asyncio.
+wait_for` with whatever's left of that same budget, not an unbounded
+wait or a fresh timeout of its own — killing the process group and
+returning the identical `"command timed out"` result on expiry, same
+as the read-timeout branch. Verified live: the same repro now correctly
+times out at the configured bound and, per this tool's own established
+verification discipline, the trailing side-effect file genuinely never
+appears. Verified by reverting and watching the new test fail with the
+literal old bug's own shape — `is_error=False`, empty output, the full
+unbounded duration elapsed. 1 new test, 802 → 803 Python tests.
+
 ### Two destructive calls sharing the same `tool_call_id` could let a declined one run anyway — the confirm-gate's own key, not a tool bug
 
 **Worse than any crash in this file: a declined destructive call

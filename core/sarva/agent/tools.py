@@ -422,6 +422,11 @@ class RunShellTool:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        # `_SHELL_TIMEOUT_SECONDS` is meant to bound the WHOLE command,
+        # not just the output read below -- deadline-based so the later
+        # `proc.wait()` gets whatever's left of the same budget, not a
+        # fresh one.
+        deadline = asyncio.get_running_loop().time() + _SHELL_TIMEOUT_SECONDS
         try:
             stdout, truncated = await asyncio.wait_for(
                 _read_stream_bounded(proc.stdout, _MAX_SHELL_OUTPUT_BYTES),
@@ -458,7 +463,42 @@ class RunShellTool:
             # a size cap instead of a time cap.
             await _kill_process_group(proc)
         else:
-            await proc.wait()
+            # A real bug found by a fresh-eyes sweep: `_read_stream_
+            # bounded` returns as soon as the stdout PIPE hits EOF --
+            # which happens the instant every process holding the
+            # write end closes its stdout/stderr, an ordinary shell
+            # idiom (`exec 1>&- 2>&-`, or any command that redirects
+            # away its own fds and keeps running -- backgrounding/
+            # daemonizing a job is the common real case, not a
+            # contrived one). That left `_SHELL_TIMEOUT_SECONDS`
+            # bounding only the READ, not the command itself: `await
+            # proc.wait()` here had no timeout at all, so a command
+            # that closed its fds early but kept running was left
+            # completely unbounded -- confirmed live, a command
+            # configured against a 2s timeout that closed its fds then
+            # slept for 8s ran the full 8s and returned `is_error=False`
+            # with no indication the timeout never engaged. The same
+            # "a destructive tool's own confirmation gate exists to
+            # stop unwanted side effects, and a defeated timeout leaves
+            # it running unattended regardless of what was approved"
+            # reasoning as the read-timeout branch above -- `proc.wait()`
+            # now shares the exact same overall deadline the read
+            # already started counting down from, not a fresh budget.
+            try:
+                await asyncio.wait_for(
+                    proc.wait(), timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+                )
+            except TimeoutError:
+                await _kill_process_group(proc)
+                return ToolResultBlock(
+                    tool_call_id="",
+                    content=[
+                        TextBlock(
+                            text=f"command timed out after {_SHELL_TIMEOUT_SECONDS}s and was killed"
+                        )
+                    ],
+                    is_error=True,
+                )
         text = stdout.decode(errors="replace")
         if truncated:
             text += f"\n\n[truncated to {_MAX_SHELL_OUTPUT_BYTES} bytes and killed]"

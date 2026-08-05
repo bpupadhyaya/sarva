@@ -16808,3 +16808,80 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `RunShellTool`'s timeout only ever bounded the output READ, not the command itself -- a third real gap in the same timeout
+
+Round 121. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file covered in recent rounds. It found a third,
+previously-unnoticed gap in `RunShellTool`'s own timeout -- a tool
+already fixed twice before for this exact "unbounded despite a
+configured timeout" shape.
+
+**The bug**: `_SHELL_TIMEOUT_SECONDS` wraps `asyncio.wait_for(_read_
+stream_bounded(...), timeout=...)`, and the two earlier fixes both
+correctly handle that call timing out or hitting its size cap. What
+neither fix noticed: `_read_stream_bounded` returns the moment the
+stdout pipe hits EOF -- which happens the instant every process
+holding the write end closes its own stdout/stderr, an ordinary shell
+idiom (`exec 1>&- 2>&-`, or any command that redirects away its own
+fds and keeps running -- backgrounding or daemonizing a job is the
+common real case, not contrived). When that happens well within the
+timeout, `truncated` comes back `False`, and execution falls into the
+`else` branch's bare `await proc.wait()` -- which had no timeout at
+all. `_SHELL_TIMEOUT_SECONDS` was bounding the read, never the
+command's actual lifetime.
+
+**Confirmed live**: a command configured against a 2-second timeout
+that closed its own file descriptors and then slept for 8 seconds ran
+the full 8 seconds and returned `is_error=False` -- no indication the
+timeout guard had ever engaged. At the real 60-second default, an
+ordinary backgrounding/daemonizing shell command could hang the tool
+call far past its documented bound, defeating the exact "a destructive
+tool's confirmation gate exists to stop unwanted side effects, and a
+timeout must not leave one running unattended" guarantee the two
+earlier fixes already established for the read-timeout and size-cap
+paths.
+
+**Fixed** by tracking one deadline for the whole call, computed before
+the read starts: the subsequent `proc.wait()` now runs under
+`asyncio.wait_for` with whatever's left of that same budget, not an
+unbounded wait or a fresh timeout of its own -- killing the process
+group and returning the identical `"command timed out"` result on
+expiry, same as the read-timeout branch.
+
+**Verified live**: the same repro now correctly times out at the
+configured bound, and, per this tool's own established verification
+discipline, the trailing side-effect file genuinely never appears
+(confirmed with a real command that sleeps then writes a marker file
+after closing its fds).
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `is_error=False`, empty output, the full
+unbounded duration elapsed.
+
+**1 new test, 802 -> 803 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+chapter directly after the size-cap/deadlock chapter, in the same
+`RunShellTool` timeout narrative.
+
+**Seventy-six of the last seventy-seven rounds (46-67, 70-121) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** The third real bug found in this exact tool's timeout logic
+across the project's history -- worth remembering alongside `contains_
+match`/`answer_reward` and `spawn_subagent` as a function where
+"already fixed twice" was still not evidence of safety. The specific
+lesson generalizes beyond shell commands: any timeout implemented as
+"wrap the thing that produces output," rather than "wrap the actual
+resource's whole lifetime," is vulnerable to the exact same gap
+whenever the two aren't identical -- a process can stop producing
+output long before it actually exits.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
