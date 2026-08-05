@@ -231,7 +231,29 @@ class ByteLevelBPETokenizer:
             raise RuntimeError("tokenizer has not been trained or loaded")
 
         if self.special_tokens:
-            pattern = "|".join(re.escape(t) for t in self.special_tokens)
+            # A real bug found by a fresh-eyes sweep: `re`'s alternation
+            # (`a|b`) matches whichever alternative is listed FIRST in
+            # the pattern at a given position -- it does not prefer the
+            # longest match. `self.special_tokens` is a plain dict whose
+            # iteration order is training-call insertion order (set in
+            # `train()` above from its own public, documented
+            # `special_tokens: Iterable[str]` parameter), so whenever
+            # one trained special token is a literal prefix of another
+            # (e.g. "<|im_start|>" and "<|im_start|>user" -- an entirely
+            # ordinary chat-template naming convention, not contrived),
+            # whichever happened to be listed earlier always won,
+            # silently swallowing the longer token into "shorter
+            # special token + leftover plain text" with no error.
+            # Confirmed live: registering "<|im_start|>" before
+            # "<|im_start|>user" meant the longer token's own id never
+            # appeared in `encode()`'s output at all, for any input
+            # containing it -- confirmed purely order-dependent by
+            # reversing registration order and watching the id appear.
+            # Sorted longest-first so a longer alternative always gets
+            # the chance to match before any of its own prefixes do,
+            # the standard fix for this exact `re`-alternation pitfall.
+            tokens_longest_first = sorted(self.special_tokens, key=len, reverse=True)
+            pattern = "|".join(re.escape(t) for t in tokens_longest_first)
             pieces = re.split(f"({pattern})", text)
         else:
             pieces = [text]

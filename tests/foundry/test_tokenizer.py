@@ -109,6 +109,32 @@ def test_special_tokens_are_atomic_and_roundtrip():
     assert ids.count(special_id) == 1
 
 
+def test_a_special_token_that_is_a_prefix_of_another_still_matches_the_longer_one():
+    # A real bug found by a fresh-eyes sweep: re's alternation (`a|b`)
+    # matches whichever alternative is listed FIRST at a given position
+    # -- it does not prefer the longest match. special_tokens is a
+    # plain dict whose iteration order is training-call insertion
+    # order, so whenever one trained special token is a literal prefix
+    # of another (e.g. "<|im_start|>" and "<|im_start|>user" -- an
+    # entirely ordinary chat-template naming convention, not
+    # contrived), whichever happened to be registered earlier used to
+    # always win, silently swallowing the longer token into "shorter
+    # special token + leftover plain text" with no error. Confirmed
+    # live before this fix: registering the shorter token first meant
+    # the longer token's own id never appeared in encode()'s output at
+    # all, for any input containing it.
+    tok = _trained(vocab_size=300, special_tokens=("<|im_start|>", "<|im_start|>user"))
+    text = "hi <|im_start|>user says hi"
+
+    ids = tok.encode(text)
+
+    longer_id = tok.special_tokens["<|im_start|>user"]
+    shorter_id = tok.special_tokens["<|im_start|>"]
+    assert longer_id in ids
+    assert shorter_id not in ids
+    assert tok.decode(ids) == text
+
+
 def test_decode_replaces_invalid_utf8_instead_of_raising():
     # Real, not hypothetical: encode() always produces valid UTF-8 by
     # construction, but decode() also has to handle arbitrary token id

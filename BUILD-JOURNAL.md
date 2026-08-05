@@ -17248,3 +17248,76 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A special token that is a literal prefix of another special token was silently swallowed, purely based on training-call registration order
+
+Round 127. Following up on round 126's own lesson (re-enumerate a
+"fixed everywhere" claim broadly rather than trusting the prior fix's
+scope), the sweep found a genuinely different bug class instead, in a
+part of `foundry/sarva_foundry/` never touched by any of the four
+prior rounds' fixes: `foundry/sarva_foundry/tokenizer/bpe.py`'s
+from-scratch byte-level BPE tokenizer.
+
+**The bug**: `ByteLevelBPETokenizer.encode()` builds its special-token
+splitting regex as `"|".join(re.escape(t) for t in self.special_
+tokens)`. Python's `re` alternation (`a|b`) matches whichever
+alternative is listed FIRST in the pattern at a given position -- it
+does not prefer the longest match. `self.special_tokens` is a plain
+dict whose iteration order is training-call insertion order (set
+directly from `train()`'s own public, documented `special_tokens:
+Iterable[str]` parameter), so whenever one trained special token is a
+literal prefix of another -- `"<|im_start|>"` and
+`"<|im_start|>user"`, an entirely ordinary chat-template naming
+convention, not contrived -- whichever happened to be registered
+earlier always won, silently swallowing the longer token into
+"shorter special token + leftover plain text," with no error anywhere.
+
+**Confirmed live**: registering `"<|im_start|>"` before
+`"<|im_start|>user"` meant the longer token's own id never appeared in
+`encode()`'s output at all, for any input containing it -- it decoded
+back to the same text only by coincidence (the shorter token's id
+followed by the leftover plain-text bytes happened to re-render
+correctly), masking that the tokenization itself was wrong. Reversing
+registration order moved which token got swallowed, confirming the
+bug was purely about insertion order, not about the tokens themselves.
+
+**Fixed** by sorting special tokens longest-first before building the
+alternation (`sorted(self.special_tokens, key=len, reverse=True)`) --
+the standard fix for this exact `re`-alternation pitfall, so a longer
+alternative always gets the chance to match before any of its own
+prefixes do, regardless of training-call registration order.
+
+**Verified live**: the same repro now correctly encodes the longer
+token to its own id, and the shorter token's id no longer appears
+where the longer one should have matched.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: the longer token's id missing from the
+encoded output.
+
+**1 new test, 814 -> 815 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round,
+following established precedent for foundry-internals fixes with no
+existing dedicated chapter.
+
+**Eighty-two of the last eighty-three rounds (46-67, 70-127) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A new bug class for this project: not blocking I/O, not a
+truthy-cast validation gap, not a lookup-table completeness gap, but a
+classic regex-alternation-ordering pitfall (`re`'s `a|b` isn't
+longest-match) landing on a genuinely realistic input shape (prefix-
+related special-token names are common in real chat templates). Also
+the fifth consecutive round finding a real, previously-unfound bug in
+`foundry/sarva_foundry/`, now spanning model/, inference/, train/, and
+tokenizer/ -- this whole subtree continues to reward direct attention
+well past the point core/sarva/ alone would have kept producing at
+this rate.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
