@@ -121,6 +121,34 @@ class DecoderOnlyTransformer(nn.Module):
                 f"{n_placeholders} image-placeholder tokens in token_ids but "
                 f"{n_image_tokens} image embeddings were provided"
             )
+        # A real bug found by a fresh-eyes sweep: this docstring's own
+        # "assumes every batch item contributes the same number of
+        # image placeholder tokens" claim was never actually checked --
+        # the count above is an AGGREGATE (`mask.sum()` and `shape[0] *
+        # shape[1]` are both scalars), so it passes whenever the totals
+        # happen to match, even when individual batch items' own
+        # placeholder counts don't match `image_embeds`' uniform
+        # per-item count. Confirmed live: a 2-item batch with 1
+        # placeholder in item 0 and 3 in item 1 (total 4) against
+        # `image_embeds` shaped (2, 2, dim) (also 4 total) passed this
+        # check silently -- `x[mask] = image_embeds.reshape(-1, ...)`
+        # then spliced row-major across the FLATTENED mask, so item 1's
+        # own first placeholder position received item 0's unused
+        # second image embedding instead of any of item 1's real
+        # embeddings, with every following position shifted the same
+        # way -- cross-example contamination with no exception raised
+        # anywhere, silently corrupting both training and inference.
+        # Checked per row, not just in aggregate: every batch item must
+        # independently match `image_embeds`' own per-item count for
+        # the row-major splice below to actually line up positions with
+        # the images they're meant to represent.
+        per_item_placeholders = mask.sum(dim=1)
+        if not bool((per_item_placeholders == image_embeds.shape[1]).all()):
+            raise ValueError(
+                f"each batch item must contribute exactly {image_embeds.shape[1]} "
+                "image-placeholder tokens (image_embeds' own per-item count), got "
+                f"per-item counts {per_item_placeholders.tolist()}"
+            )
         x = x.clone()
         x[mask] = image_embeds.reshape(-1, image_embeds.shape[-1]).to(x.dtype)
         return x

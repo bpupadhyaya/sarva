@@ -16885,3 +16885,77 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `DecoderOnlyTransformer.embed_multimodal` validated only the AGGREGATE placeholder-token count, silently corrupting a mismatched-per-item batch with cross-example contamination
+
+Round 122. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file covered in recent rounds. It found a real bug in
+`foundry/sarva_foundry/model/transformer.py`'s `embed_multimodal` --
+the first round to find and fix a bug in the vision/multimodal
+transformer code specifically, rather than the text-only decoder path
+already swept several times.
+
+**The bug**: `embed_multimodal`'s own docstring states it "assumes
+every batch item contributes the same number of image placeholder
+tokens, matching `image_embeds`' uniform per-item token count" -- but
+the actual validation only ever compared AGGREGATE counts
+(`mask.sum()`, a scalar, against `image_embeds.shape[0] *
+image_embeds.shape[1]`, also a scalar), never each batch item's own
+placeholder count. Two batch items whose individual placeholder counts
+differ (1 and 3) but happen to sum to the same total (4) as
+`image_embeds`' own total (2 items x 2 tokens each = 4) passed this
+check silently.
+
+**Confirmed live**: with that mismatched-but-summing-to-the-same-total
+input, the flattened, row-major splice (`x[mask] = image_embeds.
+reshape(-1, ...)`) spliced item 0's own unused second image embedding
+into item 1's first placeholder position, shifting every one of item
+1's real embeddings one position over -- cross-example contamination
+with no exception raised anywhere, silently corrupting both training
+and inference on any real variable-image-count batch (e.g. VQA-style
+training where some examples have one image and others have more).
+
+**Fixed** by checking placeholder counts per row (`mask.sum(dim=1)`)
+against `image_embeds.shape[1]` for every batch item independently,
+not just in aggregate -- the per-item check is strictly stronger and
+subsumes the pre-existing aggregate check (if every item matches, the
+aggregate automatically matches too), so the old check is left in
+place unchanged as an even-earlier fast rejection and the new
+per-item check catches everything it doesn't.
+
+**Verified live**: the mismatched-but-aggregate-matching repro now
+correctly raises `ValueError` instead of silently corrupting the
+splice; the legitimate uniform case (every item genuinely has the same
+placeholder count) still succeeds exactly as before, each position
+receiving its own item's own embeddings.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: no exception raised at all for the
+mismatched-but-summing-equal input.
+
+**2 new tests, 803 -> 805 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round,
+following this project's own established precedent: foundry model-
+internals fixes (e.g. the earlier `MoEConfig` validation gap) are
+documented in this journal only, not in the `docs/` chapters, which
+cover the core `sarva` application layer.
+
+**Seventy-seven of the last seventy-eight rounds (46-67, 70-122) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** The first round to find a bug in the foundry vision/
+multimodal transformer path specifically -- worth naming as a reminder
+that the "already swept N times" heuristic protects against
+complacency in files that keep getting checked, but a genuinely
+under-swept area (this project's own vision-transformer code had never
+had a dedicated round before this one) can still be the highest-value
+place to look next.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

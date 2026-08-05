@@ -185,6 +185,59 @@ def test_forward_multimodal_raises_on_placeholder_count_mismatch():
         model.forward_multimodal(token_ids, wrong_embeds, image_token_id=29)
 
 
+def test_embed_multimodal_raises_on_uneven_per_item_placeholder_counts():
+    # A real bug found by a fresh-eyes sweep: the mismatch check above
+    # only ever compares AGGREGATE counts (mask.sum() vs. image_embeds'
+    # total token count), never each batch item's own count, despite
+    # this method's own docstring stating it "assumes every batch item
+    # contributes the same number of image placeholder tokens." Two
+    # batch items whose individual placeholder counts differ (1 and 3)
+    # but sum to the same total (4) as image_embeds' own total (2 items
+    # x 2 tokens each = 4) used to pass the aggregate check silently --
+    # confirmed live before this fix: the flattened, row-major splice
+    # then spliced item 0's own unused second image embedding into item
+    # 1's first placeholder position, shifting every one of item 1's
+    # real embeddings one position over, with no exception raised
+    # anywhere -- cross-example contamination in both training and
+    # inference.
+    import pytest
+
+    config = TransformerConfig(
+        vocab_size=30, dim=16, n_layers=1, n_heads=2, n_kv_heads=1, max_seq_len=16
+    )
+    model = DecoderOnlyTransformer(config)
+    token_ids = torch.full((2, 4), 5)
+    token_ids[0, 0] = 29  # item 0: 1 placeholder
+    token_ids[1, 0] = token_ids[1, 1] = token_ids[1, 2] = 29  # item 1: 3 placeholders
+    # 2 items x 2 tokens each = 4 total -- matches the aggregate count
+    # above (1 + 3 = 4) even though no single item actually has 2.
+    image_embeds = torch.randn(2, 2, 16)
+
+    with pytest.raises(ValueError, match="each batch item"):
+        model.embed_multimodal(token_ids, image_embeds, image_token_id=29)
+
+
+def test_embed_multimodal_still_works_when_every_item_has_the_same_placeholder_count():
+    # Regression guard for the fix above: the new per-item check must
+    # not reject the ordinary, genuinely uniform case it's meant to
+    # keep allowing.
+    config = TransformerConfig(
+        vocab_size=30, dim=16, n_layers=1, n_heads=2, n_kv_heads=1, max_seq_len=16
+    )
+    model = DecoderOnlyTransformer(config)
+    token_ids = torch.full((2, 4), 5)
+    token_ids[0, 0] = token_ids[0, 1] = 29
+    token_ids[1, 0] = token_ids[1, 1] = 29
+    image_embeds = torch.arange(2 * 2 * 16, dtype=torch.float32).reshape(2, 2, 16)
+
+    x = model.embed_multimodal(token_ids, image_embeds, image_token_id=29)
+
+    assert torch.equal(x[0, 0], image_embeds[0, 0])
+    assert torch.equal(x[0, 1], image_embeds[0, 1])
+    assert torch.equal(x[1, 0], image_embeds[1, 0])
+    assert torch.equal(x[1, 1], image_embeds[1, 1])
+
+
 def test_end_to_end_vision_encoder_projector_decoder_forward_shape():
     vconfig = _tiny_vision_config(image_size=16, patch_size=4, dim=32, n_layers=2)
     encoder = VisionEncoder(vconfig)
