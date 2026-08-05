@@ -15993,3 +15993,82 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The default `ConfirmPolicy` itself froze the whole event loop while waiting on the human -- including every concurrently-running sibling subagent
+
+Round 110. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file covered in the last several rounds, with a
+standing note that `core/sarva/memory/vector.py` is still the one file
+with no fully dedicated round of its own. It found a bug in a
+different, previously-untouched file instead: `core/sarva/cli.py`'s
+`_confirm_prompt`.
+
+**The bug**: `_confirm_prompt` -- the default `ConfirmPolicy` `sarva
+run` uses without `--auto`, wired in at `confirm = always_allow if
+auto else _confirm_prompt` -- called `typer.confirm()` directly inside
+its `async def`, with no `asyncio.to_thread`. `typer.confirm()`
+performs a genuinely blocking terminal read, no different from a bare
+`input()` call: the same event-loop-freeze shape already found and
+fixed at roughly six other call sites in this project (`NoteTool`,
+`VectorMemoryStore.__init__`, `SessionStore.locked`, the
+PDF-extraction degrader, the Ollama probe, `save_config`'s flock), just
+never applied here. It's invoked from `AgentLoop._run_impl` once per
+destructive tool call the model requests -- `WriteFileTool`,
+`EditFileTool`, and `RunShellTool` are all `destructive=True`, so this
+fires on any ordinary `sarva run` invocation that edits a file or runs
+a shell command without `--auto`.
+
+**Confirmed live**: awaiting `_confirm_prompt` directly froze the
+entire event loop for as long as a human took to answer the prompt -- a
+heartbeat coroutine that should tick every 0.05s made **zero** ticks
+of progress for the whole 3-second simulated wait.
+
+**Why it's worse than a single-user stall**: `AgentLoop.
+spawn_subagent` passes this exact same `ConfirmPolicy` down to every
+sub-`AgentLoop`, and sibling subagents from `delegate_task` run
+concurrently via `asyncio.gather` on the same event loop -- this
+project's own stated concurrency model. One subagent waiting on a
+human's destructive-call confirmation used to silently stall every
+*other* subagent's in-flight provider request too, directly
+contradicting the "tools execute concurrently, gated by one policy"
+design the agent-loop chapter itself documents.
+
+**Fixed** by wrapping the call: `await asyncio.to_thread(typer.confirm,
+...)`. Confirmations within a single `AgentLoop` were already awaited
+strictly one at a time (the `id(call)`-keyed confirmation loop awaits
+each destructive call's confirmation before moving to the next), so
+this fix doesn't reopen the kind of concurrent-access race an earlier
+`asyncio.to_thread` fix in this same file's neighbor (`loop.py`'s
+`_prune_old_runs`) had to guard against -- it only stops one pending
+confirmation from blocking unrelated concurrent work elsewhere in the
+process.
+
+**Verified live**: the same repro now shows the event loop ticking
+throughout the wait (59 of ~60 expected ticks) instead of freezing
+solid.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own number -- `0` ticks -- reproducing itself.
+
+**1 new test, 782 -> 783 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+chapter directly after the section introducing `ConfirmPolicy` and
+`sarva run --auto`.
+
+**Sixty-five of the last sixty-six rounds (46-67, 70-110) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A seventh real instance of bug-class heuristic #4 (a
+blocking call inside `async def` with no `asyncio.to_thread`), and the
+first one found in `cli.py` itself rather than a library/tool module --
+worth remembering that this lens is still finding real, previously-
+unchecked call sites even this many rounds in.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

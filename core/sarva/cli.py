@@ -356,7 +356,22 @@ def run(
 
 
 async def _confirm_prompt(call: Any) -> bool:
-    return typer.confirm(f"Allow {call.name}({call.arguments})?")
+    # A real bug found by a fresh-eyes sweep: `typer.confirm` performs a
+    # genuinely blocking terminal read (no different from a bare
+    # `input()` call), called directly here with no `asyncio.to_thread`
+    # -- the same event-loop-freeze shape already fixed at several other
+    # call sites in this project (NoteTool, VectorMemoryStore.__init__,
+    # SessionStore.locked, the PDF-extraction degrader, the Ollama
+    # probe, save_config's flock). Confirmed live: awaiting this
+    # directly froze the entire event loop for as long as the human
+    # took to answer the prompt -- a concurrent heartbeat coroutine that
+    # should tick every 0.05s made ZERO ticks of progress for the whole
+    # wait. `AgentLoop.spawn_subagent` passes this same callback down to
+    # every sub-`AgentLoop`, and sibling subagents run concurrently via
+    # `asyncio.gather` on the same event loop, so one subagent waiting
+    # on a human's destructive-call confirmation used to silently stall
+    # every other subagent's in-flight provider request too.
+    return await asyncio.to_thread(typer.confirm, f"Allow {call.name}({call.arguments})?")
 
 
 def _print_run_failure(state: str, detail: str | None) -> None:

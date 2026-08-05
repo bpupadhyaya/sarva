@@ -310,6 +310,43 @@ A tool that raises never crashes the loop — the exception becomes an
 same as any other tool failure it needs to react to. An unrecognized
 tool name gets the identical treatment rather than a hard stop.
 
+### The default `ConfirmPolicy` itself froze the whole event loop while waiting on the human — including every concurrently-running sibling subagent
+
+A much later fresh-eyes sweep found that `cli.py`'s `_confirm_prompt`
+— the default `ConfirmPolicy` `sarva run` uses without `--auto`, named
+two paragraphs above — called `typer.confirm()` directly inside its
+`async def`, with no `asyncio.to_thread`. `typer.confirm()` performs a
+genuinely blocking terminal read, no different from a bare `input()`
+call: the same event-loop-freeze shape already found and fixed at
+several other call sites in this project (`NoteTool`,
+`VectorMemoryStore.__init__`, `SessionStore.locked`, the
+PDF-extraction degrader, the Ollama probe, `save_config`'s flock), just
+never applied to this one. Confirmed live: awaiting `_confirm_prompt`
+froze the entire event loop for as long as a human took to answer — a
+heartbeat coroutine that should tick every 0.05s made **zero** ticks of
+progress for the whole wait.
+
+This mattered beyond a single-user CLI stall because of how far this
+callback travels: `spawn_subagent` (below) passes the exact same
+`ConfirmPolicy` down to every sub-`AgentLoop`, and sibling subagents
+from `delegate_task` run concurrently via `asyncio.gather` on the same
+event loop. One subagent waiting on a human's destructive-call
+confirmation used to silently stall every *other* subagent's in-flight
+provider request too, directly contradicting the "tools execute
+concurrently, gated by one policy" design this section opens with.
+
+Fixed by wrapping the call: `await asyncio.to_thread(typer.confirm,
+...)`. Confirmations within a single `AgentLoop` were already awaited
+strictly one at a time (see the `id(call)`-keyed confirmation loop
+below), so this fix doesn't introduce the kind of concurrent-access
+race the `_prune_old_runs` fix above had to guard against — it only
+stops one pending confirmation from blocking unrelated concurrent work
+elsewhere in the process. Verified live: the same repro now shows the
+event loop ticking throughout the wait instead of freezing solid.
+Verified by reverting and watching the new test fail with the literal
+old bug's own number — `0` ticks — reproducing itself. 1 new test,
+782 → 783 Python tests.
+
 **`WriteFileTool` writes atomically, not via a direct `Path.write_text`.**
 A real bug found by actually simulating an interrupted write: this tool
 runs on essentially every agent file-editing turn, against arbitrary

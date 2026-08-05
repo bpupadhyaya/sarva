@@ -1462,3 +1462,60 @@ def test_version_flag_prints_the_real_installed_version_and_exits():
 
     assert result.exit_code == 0
     assert f"sarva {version('sarva')}" in result.stdout
+
+
+async def test_confirm_prompt_does_not_freeze_the_event_loop_while_waiting_on_the_human(
+    monkeypatch,
+):
+    # A real bug found by a fresh-eyes sweep: `_confirm_prompt` (the
+    # default ConfirmPolicy for `sarva run` without --auto) called
+    # `typer.confirm()` directly inside an `async def` with no
+    # `asyncio.to_thread` -- a genuinely blocking terminal read, no
+    # different from a bare `input()` call. Confirmed live before the
+    # fix: awaiting `_confirm_prompt` froze the entire event loop for
+    # the whole time a human took to answer -- a heartbeat coroutine
+    # that should tick every 0.05s made ZERO ticks of progress.
+    # AgentLoop.spawn_subagent passes this same callback down to every
+    # sub-AgentLoop, and sibling subagents run concurrently via
+    # asyncio.gather on the same loop, so one subagent waiting on a
+    # human's destructive-call confirmation used to silently stall
+    # every other subagent's in-flight provider request too.
+    import asyncio
+
+    import typer._click.termui as termui
+    from sarva.cli import _confirm_prompt
+    from sarva.multimodal.content import ToolCallBlock
+
+    def fake_visible_prompt_func(prompt_text):
+        # Simulates the real blocking terminal read taking real
+        # wall-clock time to get a human response -- an ordinary "user
+        # stepped away for a moment before answering" scenario, not a
+        # contrived one.
+        import time
+
+        time.sleep(0.3)
+        return "y"
+
+    monkeypatch.setattr(termui, "visible_prompt_func", fake_visible_prompt_func)
+
+    call = ToolCallBlock(id="1", name="run_shell", arguments={"command": "rm -rf /tmp/x"})
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+
+    approved = await _confirm_prompt(call)
+
+    hb_task.cancel()
+    assert approved is True
+    # The real, decisive assertion: while the confirmation prompt waited
+    # on the (simulated) human, the event loop must have kept running
+    # other coroutines -- a near-zero tick count is the literal old bug
+    # reproducing itself (the loop frozen solid for the whole wait).
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
