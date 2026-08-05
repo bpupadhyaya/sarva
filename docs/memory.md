@@ -371,6 +371,50 @@ vectors at this project's memory-store size). A real embedding-provider
 tier can slot in alongside this later without changing the storage
 contract.
 
+### The tokenizer was ASCII-only, making any non-ASCII memory structurally unreachable — found by finally giving this module its own dedicated fresh-eyes round
+
+This module went untouched by more than a dozen prior rounds of
+fresh-eyes sweeps — only ever brushed tangentially once, in a round
+that was really about the lazy-singleton race in the *callers*
+(`RememberTool`/`RecallMemoryTool`, see below) — until a round finally
+gave `vector.py` itself the dedicated read the rest of the codebase had
+already had many times over. `_tokenize`'s pattern, `[a-z0-9]+`, is
+ASCII-only.
+
+Confirmed live, two distinct failure modes. A pure-CJK memory (e.g.
+Japanese, no ASCII characters at all) tokenized to an empty list —
+giving it a zero-norm TF-IDF vector that `_cosine_similarity`
+short-circuits to `0.0` for *every* query, including its own verbatim
+text used as the query, tied indistinguishably with completely
+unrelated English memories. That's not a ranking quirk; it means the
+memory can never be surfaced by `search()`/`RecallMemoryTool` at all,
+regardless of relevance — this section's own opening line promises
+"relevance ranking must actually reflect real topical similarity, not
+just return something," and for non-ASCII text that promise was
+structurally impossible to keep. An accented Latin word fared little
+better: `"café"` silently truncated to `"caf"` at the accented `é`,
+matching neither `"cafe"` nor `"café"` reliably. Sarva has no
+English-only restriction anywhere in its design, so a memory stored in
+Japanese, Chinese, Korean, Arabic, Russian, or accented Spanish/French
+is ordinary international usage, not a contrived input.
+
+Fixed by widening the pattern to `\w+` — Unicode-aware by default for a
+`str` pattern in Python 3 (no `re.ASCII` flag set), so it covers any
+script with real word characters. This is an honest, not a complete,
+fix: CJK scripts have no inter-word spacing, so a whole CJK sentence
+still tokenizes as one long token rather than genuine per-word
+segmentation — real segmentation needs a dedicated library (MeCab,
+jieba), a separate, much larger feature deliberately left out of scope
+here. What the fix closes is the difference between zero tokens (total
+unreachability) and at least one real token (an exact or overlapping
+CJK memory can now actually be found) — the specific property this
+section's opening promise depends on. Verified live: the same repro's
+exact-text CJK query now scores `1.0` and ranks first, instead of
+`0.0` tied with unrelated memories. Verified by reverting and watching
+both new tests fail with the literal old bug's own shape: `"café"`
+tokenizing to `["caf"]`, and the CJK exact-match query scoring `0.0`.
+2 new tests, 788 → 790 Python tests.
+
 ### Wired into the agent, honestly scoped
 
 `RememberTool` and `RecallMemoryTool` (`core/sarva/agent/tools.py`) put

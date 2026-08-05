@@ -16291,3 +16291,74 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The vector memory store's tokenizer was ASCII-only, making any non-ASCII memory structurally unreachable — found by finally giving this module its own dedicated fresh-eyes round
+
+Round 114. `core/sarva/memory/vector.py` had gone untouched by more
+than a dozen prior rounds of fresh-eyes sweeps -- only ever brushed
+tangentially once, in a round that was really about the lazy-singleton
+race in the *callers* (`RememberTool`/`RecallMemoryTool`). This round
+explicitly prioritized giving the file itself the dedicated read the
+rest of the codebase had already had many times over.
+
+**The bug**: `_tokenize`'s pattern, `[a-z0-9]+`, is ASCII-only.
+
+**Confirmed live, two distinct failure modes.** A pure-CJK memory
+(e.g. Japanese, no ASCII characters at all) tokenized to an empty
+list -- giving it a zero-norm TF-IDF vector that `_cosine_similarity`
+short-circuits to `0.0` for *every* query, including its own verbatim
+text used as the query, tied indistinguishably with completely
+unrelated English memories. That's not a ranking quirk -- it means the
+memory can never be surfaced by `search()`/`RecallMemoryTool` at all,
+regardless of relevance, directly contradicting this store's own
+conformance-test-file docstring promise that "relevance ranking must
+actually reflect real topical similarity, not just return something."
+An accented Latin word fared little better: `"café"` silently
+truncated to `"caf"` at the accented `é`, matching neither `"cafe"`
+nor `"café"` reliably. Sarva has no English-only restriction anywhere
+in its design, so a memory stored in Japanese, Chinese, Korean,
+Arabic, Russian, or accented Spanish/French is ordinary international
+usage, not a contrived input.
+
+**Fixed** by widening the pattern to `\w+` -- Unicode-aware by default
+for a `str` pattern in Python 3, so it covers any script with real
+word characters. Deliberately an honest, not a complete, fix: CJK
+scripts have no inter-word spacing, so a whole CJK sentence still
+tokenizes as one long token rather than genuine per-word segmentation
+-- real segmentation needs a dedicated library (MeCab, jieba), a
+separate, much larger feature left explicitly out of scope. What the
+fix closes is the difference between zero tokens (total
+unreachability) and at least one real token (an exact or overlapping
+CJK memory can now actually be found).
+
+**Verified live**: the same repro's exact-text CJK query now scores
+`1.0` and ranks first, instead of `0.0` tied with unrelated memories.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: `"café"` tokenizing to `["caf"]`, and the
+CJK exact-match query scoring `0.0`.
+
+**2 new tests, 788 -> 790 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new chapter
+directly after the "why TF-IDF" section.
+
+**Sixty-nine of the last seventy rounds (46-67, 70-114) have found and
+shipped real fixes; rounds 68-69 remain the only two clean sweeps.**
+This round closes out the longest-standing item on this project's own
+sweep backlog: `vector.py` had been explicitly flagged as needing a
+dedicated round since round 103, carried forward unresolved through
+rounds 104-113 while sweeps kept finding real bugs elsewhere first.
+Worth noting for future backlog items of this shape: a file can sit
+untouched for a long stretch not because it's safe, but because it's
+never been anyone's *main* target -- this round's fix was found within
+minutes once a sweep was told to actually spend its main effort there
+instead of treating it as a fallback.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

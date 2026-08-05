@@ -40,10 +40,32 @@ from pathlib import Path
 
 DEFAULT_MEMORY_DB_PATH = Path.home() / ".sarva" / "memory.db"
 
-_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+_TOKEN_PATTERN = re.compile(r"\w+")
 
 
 def _tokenize(text: str) -> list[str]:
+    # A real bug found by giving this module -- never fully swept in
+    # 13+ prior rounds -- its own dedicated fresh-eyes read: the
+    # previous pattern, `[a-z0-9]+`, is ASCII-only, so it silently
+    # dropped or truncated every non-ASCII token. Confirmed live, two
+    # distinct failure modes: a pure-CJK memory (e.g. Japanese, with no
+    # ASCII characters at all) tokenized to `[]`, giving it a zero-norm
+    # TF-IDF vector that `_cosine_similarity` short-circuits to `0.0`
+    # for EVERY query -- including its own verbatim text used as the
+    # query, tied indistinguishably with completely unrelated memories,
+    # making it structurally unreachable via `search()`/`RecallMemoryTool`
+    # regardless of relevance; and an accented Latin word like "café"
+    # tokenized to the silently-truncated "caf", matching neither "cafe"
+    # nor "café" reliably. `\w` is Unicode-aware by default for a `str`
+    # pattern in Python 3 (no `re.ASCII` flag set here), so this covers
+    # any script with real word characters -- CJK's own lack of
+    # inter-word spacing means a whole CJK sentence still tokenizes as
+    # one long token rather than real per-word segmentation (a genuine,
+    # separate, much larger feature -- real CJK segmentation needs a
+    # dedicated library like MeCab/jieba, out of scope for this fix),
+    # but that's no longer zero tokens: an exact or overlapping CJK
+    # memory can now actually be found, which is the property this
+    # store's own docstring promises and the old pattern silently broke.
     return _TOKEN_PATTERN.findall(text.lower())
 
 

@@ -32,6 +32,17 @@ def test_tokenize_lowercases_and_splits_on_non_alphanumerics():
     assert _tokenize("Hello, World! 123") == ["hello", "world", "123"]
 
 
+def test_tokenize_does_not_drop_or_truncate_non_ascii_text():
+    # A real bug found by giving this module -- never fully swept in
+    # 13+ prior rounds -- its own dedicated fresh-eyes read: the old
+    # pattern, `[a-z0-9]+`, was ASCII-only. An accented Latin word like
+    # "café" silently truncated to "caf" (dropped at the accented "é"),
+    # and a pure-CJK string (no ASCII characters at all) tokenized to
+    # an empty list.
+    assert _tokenize("café") == ["café"]
+    assert _tokenize("東京にラーメンを食べに行った") != []
+
+
 def test_cosine_similarity_of_identical_vectors_is_one():
     vec = {"a": 1.0, "b": 2.0}
     assert _cosine_similarity(vec, vec) == pytest.approx(1.0)
@@ -92,6 +103,24 @@ def test_search_ranks_the_topically_relevant_entry_first(store):
     scores_by_text = {entry.text: score for entry, score in results}
     revenue_score = next(s for t, s in scores_by_text.items() if "revenue" in t)
     assert top_score > revenue_score
+
+
+def test_search_can_find_a_non_ascii_memory_by_its_own_exact_text(store):
+    # The end-to-end proof of the tokenizer fix above: before it, a
+    # pure-CJK memory tokenized to an empty token list, giving it a
+    # zero-norm TF-IDF vector that _cosine_similarity short-circuits to
+    # 0.0 for EVERY query -- including its own verbatim text used as
+    # the query -- tying it indistinguishably with unrelated English
+    # memories and making it structurally unreachable via search().
+    store.add("s1", "東京にラーメンを食べに行った")
+    store.add("s1", "I bought a new laptop yesterday")
+    store.add("s1", "The weather in Tokyo is nice today")
+
+    results = store.search("東京にラーメンを食べに行った", top_k=3, session_id="s1")
+
+    top_entry, top_score = results[0]
+    assert top_entry.text == "東京にラーメンを食べに行った"
+    assert top_score > 0.0
 
 
 def test_search_respects_top_k(store):
