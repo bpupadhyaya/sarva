@@ -841,6 +841,41 @@ externally rather than timing out cleanly, about as unambiguous a
 confirmation as this project's revert-and-verify discipline has
 produced. All 29 pre-existing agent-loop tests pass unchanged.
 
+### A registered-but-unconfigured `model_override` crashed with a raw `KeyError`, not the clean `FAILED` state its own sibling error already produces
+
+A much later fresh-eyes sweep found a gap immediately downstream of
+`UnknownModelError` handling above: `Router.pick()`'s `override`
+parameter deliberately bypasses the router's own availability check —
+it only requires the named model to be *registered* (present in
+`models.yaml`), never that its provider is actually configured at
+runtime (the matching API key set, a local runtime reachable). That's
+intentional, tested behavior (`Router`'s own docstring, and
+`test_router_pick_with_a_real_override_bypasses_availability_and_modality`
+in the provider-layer tests) — the gap was one line downstream of it:
+`provider = self._providers[model.provider]`, an unguarded dict lookup
+with no corresponding `except`.
+
+So an entirely ordinary mistake — `sarva run --model claude-opus-4-8`
+(or the equivalent `/chat`/`/ws/chat` request) on a machine that hasn't
+set `ANTHROPIC_API_KEY`, no typo involved at all, the model name is
+completely real — reached that lookup with a registered model whose
+provider was never added to `self._providers`. Confirmed live: this
+exact call raised an uncaught `KeyError('anthropic')` straight out of
+`AgentLoop.run()`'s async generator, before a single `AgentEvent` was
+ever yielded — a raw Python traceback in the CLI, an unhandled-exception
+crash in the server, instead of the same clean `FAILED` state
+`UnknownModelError` already produces two branches above for the
+"doesn't exist at all" case.
+
+Fixed by wrapping the lookup in its own `try`/`except KeyError`,
+producing the identical `FAILED`-state shape every other failure path
+in this function already uses, with a `detail` naming both the model
+and its unconfigured provider. Verified live: the same repro now yields
+a clean `state_changed`/`run_done` pair instead of crashing. Verified
+by reverting and watching the new test fail with the literal old bug's
+own shape: an uncaught `KeyError` at the exact same line. 1 new test,
+783 → 784 Python tests.
+
 ## Subagent fan-out: `delegate_task`, one level deep
 
 The design doc's own architecture section names "subagent fan-out" and

@@ -482,7 +482,34 @@ class AgentLoop:
                 if transcript_out is not None:
                     transcript_out.extend(messages)
                 return
-        provider = self._providers[model.provider]
+        try:
+            provider = self._providers[model.provider]
+        except KeyError:
+            # A real bug found by a fresh-eyes sweep: `model_override`
+            # deliberately bypasses `Router.pick()`'s own availability
+            # check (see that method's own docstring and its dedicated
+            # test, `test_router_pick_with_a_real_override_bypasses_
+            # availability_and_modality`) -- it only requires the model
+            # to be REGISTERED (present in models.yaml), never that its
+            # provider is actually configured at runtime (e.g. the
+            # matching API key is set). So an entirely ordinary mistake
+            # -- `--model claude-opus-4-8` with no ANTHROPIC_API_KEY set,
+            # no typo involved at all -- used to crash here with a raw,
+            # uncaught `KeyError` before a single event was ever yielded,
+            # confirmed live, instead of the same clean FAILED state
+            # `UnknownModelError` already produces two branches above for
+            # the "doesn't exist at all" case.
+            state = AgentState.FAILED
+            detail = (
+                f"model {model.id!r} is registered but its provider "
+                f"{model.provider!r} isn't configured -- see 'sarva models' "
+                "or check the relevant API key"
+            )
+            yield await emit(StateChangedEvent(state=state, detail=detail))
+            yield await emit(RunDoneEvent(state=state, final_message=None, spend=spend))
+            if transcript_out is not None:
+                transcript_out.extend(messages)
+            return
 
         # A real bug found by actually dispatching TWO concurrent
         # delegate_task calls in one TOOL_USE round (ordinary usage --

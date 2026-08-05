@@ -16072,3 +16072,75 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A registered-but-unconfigured `model_override` crashed with a raw `KeyError`, not the clean `FAILED` state its own sibling error already produces
+
+Round 111. Delegated a fresh-eyes sweep to a subagent, carrying
+forward the full accumulated bug-class heuristic list and steering it
+away from every file covered in the last several rounds, with a
+standing note that `core/sarva/memory/vector.py` is still the one file
+with no fully dedicated round of its own. It found a bug in a
+different, previously-untouched call site instead: `core/sarva/agent/
+loop.py`'s `AgentLoop.run()`, one line downstream of the existing
+`UnknownModelError` handling.
+
+**The bug**: `Router.pick()`'s `override` parameter deliberately
+bypasses the router's own availability check -- it only requires the
+named model to be *registered* (present in `models.yaml`), never that
+its provider is actually configured at runtime (the matching API key
+set, a local runtime reachable). That's intentional, already-tested
+behavior, not itself the bug -- `Router`'s own docstring says so, and
+a dedicated test
+(`test_router_pick_with_a_real_override_bypasses_availability_and_modality`)
+already pins it. The real gap was one line downstream, in `AgentLoop.
+run()`: `provider = self._providers[model.provider]`, an unguarded
+dict lookup with no corresponding `except`.
+
+**Confirmed live**: an entirely ordinary mistake -- `sarva run --model
+claude-opus-4-8` (or the equivalent `/chat`/`/ws/chat` request) on a
+machine that hasn't set `ANTHROPIC_API_KEY`, no typo involved at all,
+the model name is completely real -- reached that lookup with a
+registered model whose provider was never added to `self._providers`.
+This raised an uncaught `KeyError('anthropic')` straight out of
+`AgentLoop.run()`'s async generator, before a single `AgentEvent` was
+ever yielded -- a raw Python traceback in the CLI, an unhandled-
+exception crash in the server, instead of the same clean `FAILED`
+state `UnknownModelError` already produces two branches above for the
+"doesn't exist at all" case.
+
+**Fixed** by wrapping the lookup in its own `try`/`except KeyError`,
+producing the identical `FAILED`-state shape every other failure path
+in this function already uses (`StateChangedEvent` + `RunDoneEvent`,
+transcript extended, clean return), with a `detail` naming both the
+model and its unconfigured provider.
+
+**Verified live**: the same repro now yields a clean `state_changed`/
+`run_done` pair instead of crashing.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: an uncaught `KeyError` at the exact same
+line.
+
+**1 new test, 783 -> 784 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+chapter directly after the retry/budget failure-handling material it
+sits alongside.
+
+**Sixty-six of the last sixty-seven rounds (46-67, 70-111) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** A useful reminder from this one: the router's own
+override-bypasses-availability behavior was already deliberate and
+tested, so the fresh-eyes lens that mattered here wasn't "does this
+function have a gap" but "does every DOWNSTREAM consumer of this
+function's documented, intentional escape hatch actually handle the
+case it deliberately allows through" -- the bug was one hop away from
+where the design decision itself lives, not in the decision.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

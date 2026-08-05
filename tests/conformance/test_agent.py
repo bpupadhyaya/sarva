@@ -1069,6 +1069,64 @@ async def test_unknown_model_override_fails_cleanly_without_silent_substitution(
     assert "totally-not-a-real-model" in state_changed.detail
 
 
+def _real_but_unconfigured_provider_model() -> ModelInfo:
+    return ModelInfo(
+        id="real-but-unconfigured",
+        provider="not-configured-provider",
+        display_name="Registered But Its Provider Was Never Configured",
+        capabilities=ModelCapabilities(
+            modalities_in={Modality.TEXT},
+            modalities_out={Modality.TEXT},
+            tool_use=True,
+            thinking=False,
+            context_window=100_000,
+            max_output=8_000,
+        ),
+        cost=ModelCost(),
+    )
+
+
+def _router_with_unconfigured_provider_model() -> Router:
+    model = _real_but_unconfigured_provider_model()
+    registry = Registry(models={model.id: model})
+    # Nothing "available" -- proves the *override* path, which
+    # deliberately bypasses Router.pick()'s own availability check, is
+    # what reaches this model, not the ordinary routing loop.
+    return Router(registry, routing={}, available=set())
+
+
+@pytest.mark.asyncio
+async def test_model_override_naming_a_registered_but_unconfigured_provider_fails_cleanly(
+    run_root,
+):
+    # A real bug found by a fresh-eyes sweep: `model_override`
+    # deliberately bypasses Router.pick()'s own availability check (see
+    # test_router_pick_with_a_real_override_bypasses_availability_and_modality
+    # in test_provider.py) -- it only requires the model to be
+    # REGISTERED (present in models.yaml), never that its provider is
+    # actually configured at runtime (e.g. the matching API key is set).
+    # So an entirely ordinary mistake -- naming a real, registered model
+    # whose provider was never configured (no typo involved at all,
+    # e.g. `--model claude-opus-4-8` with no ANTHROPIC_API_KEY set) --
+    # used to crash at `self._providers[model.provider]` with a raw,
+    # uncaught KeyError, before a single event was ever yielded,
+    # confirmed live before this fix.
+    provider = MockProvider(script=[ScriptedTurn(text="should never be reached")])
+    loop = AgentLoop(
+        router=_router_with_unconfigured_provider_model(),
+        providers={"mock": provider},  # deliberately no "not-configured-provider" entry
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("hi", model_override="real-but-unconfigured")]
+
+    assert events[-1].type == "run_done"
+    assert events[-1].state == AgentState.FAILED
+    state_changed = next(e for e in events if e.type == "state_changed")
+    assert "real-but-unconfigured" in state_changed.detail
+    assert "not-configured-provider" in state_changed.detail
+
+
 @pytest.mark.asyncio
 async def test_run_session_id_reaches_the_tool_context(run_root):
     """The actual proof session_id threading works end to end: a tool
