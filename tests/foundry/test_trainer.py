@@ -42,6 +42,30 @@ def test_train_step_returns_a_finite_loss_and_advances_step_count():
     assert trainer.step == 1
 
 
+def test_trainer_config_rejects_a_non_finite_or_non_positive_grad_clip():
+    # A real bug found by a fresh-eyes sweep, more severe than any
+    # sibling config-validation fix elsewhere in this package:
+    # torch.nn.utils.clip_grad_norm_'s own scaling math has no sign or
+    # finiteness guard. Confirmed live: clip_grad_norm_(params, max_norm
+    # =-1.0) on a real gradient [3.0, 4.0] returned [-0.6, -0.8] -- the
+    # gradient's SIGN was flipped, not just zeroed or unclipped. Since
+    # train_step/dpo_step/grpo_step all apply this unconditionally
+    # whenever grad_clip is not None, a negative grad_clip used to
+    # silently turn every training step into gradient ASCENT for the
+    # rest of the run. grad_clip=nan poisons every gradient to NaN (the
+    # identical shape already fixed for norm_eps/RopeScalingConfig.
+    # factor); grad_clip=0.0 silently zeroes every gradient, making
+    # every step a no-op with no error. None (no clipping) is still
+    # allowed through unchanged.
+    with pytest.raises(ValueError, match="grad_clip"):
+        TrainerConfig(grad_clip=-1.0)
+    with pytest.raises(ValueError, match="grad_clip"):
+        TrainerConfig(grad_clip=0.0)
+    with pytest.raises(ValueError, match="grad_clip"):
+        TrainerConfig(grad_clip=float("nan"))
+    TrainerConfig(grad_clip=None)  # still allowed: "no clipping"
+
+
 def test_checkpoint_resume_is_bit_identical_to_uninterrupted_training(tmp_path):
     config = _config()
     x, y = _fixed_batch(config)

@@ -20443,3 +20443,81 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `TrainerConfig.grad_clip` was never validated — a negative value silently turned every training step into gradient ASCENT for the rest of the run
+
+Round 176. With the Agent tool's per-session subagent spawn limit
+still exhausted, this round's sweep was again done directly. After
+confirming `MoEConfig` (foundry/sarva_foundry/model/moe.py) is now
+fully validated across all five of its own fields, the search moved to
+`TrainerConfig` (foundry/sarva_foundry/train/trainer.py) -- a genuinely
+different, previously-unaudited class with no `__post_init__` at all.
+`lr`/`weight_decay` turned out already safe (`torch.optim.AdamW`
+itself raises a clean `ValueError` for either a negative or NaN
+value, confirmed live). `grad_clip` was not safe, and this is the most
+severe bug found in this session so far.
+
+`torch.nn.utils.clip_grad_norm_`'s own scaling math (`clip_coef =
+max_norm / (total_norm + eps)`, applied unconditionally whenever it's
+below 1) has no sign or finiteness guard of its own. `train_step`/
+`dpo_step`/`grpo_step` -- every one of this class's three training-step
+methods -- apply it identically and unconditionally whenever `config.
+grad_clip is not None`.
+
+**Confirmed live**: `clip_grad_norm_(params, max_norm=-1.0)` on a real
+gradient `[3.0, 4.0]` returned `[-0.6, -0.8]` -- not merely zeroed or
+left unclipped, the gradient's *sign* was flipped. A negative
+`grad_clip` would silently turn every single training step into
+gradient ASCENT for the rest of a run -- actively increasing the loss
+instead of decreasing it, across pretraining, SFT, DPO, and GRPO
+alike. Not a crash, not a stalled metric: a loss curve climbing
+steadily under this bug could easily be mistaken for "learning rate
+too high" rather than a sign error one config field away, making it
+harder to diagnose than every other bug fixed in this project so far,
+not just more severe in effect. `grad_clip=nan` reproduces the
+identical NaN-poisoning shape already fixed for `norm_eps`/
+`RopeScalingConfig.factor` elsewhere in this same package (confirmed
+live: every gradient becomes NaN); `grad_clip=0.0` confirmed live too,
+silently zeroing every gradient so every subsequent step becomes a
+complete no-op with no error, wasting real compute for the rest of the
+run.
+
+**Fixed** with `TrainerConfig`'s first `__post_init__`: `grad_clip`
+must be a finite positive number, or `None` (still allowed, meaning
+"no clipping," unchanged) -- matching the exact `math.isfinite(...) or
+... <= 0` pattern already established for `norm_eps`/`RopeScalingConfig.
+factor`.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for a
+negative, zero, and NaN `grad_clip`.
+
+**1 new test, 876 -> 877 Python tests, all passing, `ruff
+check`/`format --check` clean, no other test in the whole suite broke**
+(confirming no existing test used a negative/zero/NaN `grad_clip`
+either). `docs/foundry/training.md` gained a new paragraph in "The
+trainer" chapter, following the precedent that `Trainer`-level
+correctness bugs (unlike pure dataclass-field validation elsewhere in
+`foundry/`) do get documented -- the sibling `dpo_step` LR-schedule
+bug in this exact chapter already established that.
+
+**One hundred thirty-one of the last one hundred thirty-two rounds
+(46-67, 70-176) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** Broadening the "sibling parameter"
+search beyond classes with an *existing* `__post_init__` (this class
+had none at all before this fix) to any config class feeding a
+training-critical numeric parameter into third-party library code
+(`torch.nn.utils.clip_grad_norm_`) found the highest-severity bug
+shipped this session. Rounds 173-176 were all completed via direct
+tool use (Grep/Read/Bash/Edit) rather than a dispatched background
+agent, with identical workflow discipline throughout. The already-known
+`bpe.py`/`provenance.py` leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

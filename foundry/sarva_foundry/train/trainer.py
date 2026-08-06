@@ -35,6 +35,7 @@ exactly the log-probability term the REINFORCE gradient estimator needs.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +57,40 @@ class TrainerConfig:
     # schedule is an opt-in choice tied to a specific planned run length,
     # not something to impose silently on every caller).
     schedule: WarmupCosineSchedule | None = None
+
+    def __post_init__(self) -> None:
+        # A real bug found by a fresh-eyes sweep, more severe than any
+        # of the sibling config-validation fixes elsewhere in this
+        # package: `grad_clip` was never validated, and `torch.nn.utils.
+        # clip_grad_norm_`'s own scaling math (`clip_coef = max_norm /
+        # (total_norm + eps)`, applied unconditionally when it's below
+        # 1) has no sign or finiteness guard of its own. Confirmed
+        # live: `clip_grad_norm_(params, max_norm=-1.0)` on a real
+        # gradient `[3.0, 4.0]` returned `[-0.6, -0.8]` -- not just
+        # zeroed or unclipped, the gradient's SIGN was flipped. Every one
+        # of `train_step`/`dpo_step`/`grpo_step` applies this
+        # unconditionally whenever `grad_clip is not None`, so a
+        # negative `grad_clip` silently turns EVERY training step into
+        # gradient ASCENT for the rest of the run -- actively increasing
+        # the loss instead of decreasing it, not merely failing to
+        # train, the most severe direction any bug in this training
+        # package can corrupt a run in. `grad_clip=nan` is the identical
+        # shape already fixed for `norm_eps`/`RopeScalingConfig.factor`
+        # elsewhere in this package: confirmed live, it poisons every
+        # gradient to NaN. `grad_clip=0.0` confirmed live too: it
+        # silently zeroes every gradient, making every subsequent step a
+        # complete no-op with no error or signal, wasting real compute
+        # for the rest of the run. Reachable the same way every other
+        # config field in this package is -- a caller computing
+        # `grad_clip` programmatically (e.g. deriving it from a budget
+        # that can go non-positive) or a simple sign-flip typo in a
+        # training script, not an adversarial input.
+        if self.grad_clip is not None and (
+            not math.isfinite(self.grad_clip) or self.grad_clip <= 0
+        ):
+            raise ValueError(
+                f"grad_clip must be a finite positive number or None, got {self.grad_clip}"
+            )
 
 
 class Trainer:

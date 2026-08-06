@@ -137,6 +137,39 @@ tests fail with the literal old bug's own shape: zero `fsync` calls,
 and a `TypeError` for the `mode` keyword that didn't exist yet. 2 new
 tests, 857 → 859 Python tests.
 
+**`TrainerConfig.grad_clip` was never validated -- a negative value
+silently turned every training step into gradient ASCENT for the rest
+of the run, the most severe direction any bug in this package can
+corrupt training in.** A much later fresh-eyes sweep found `torch.nn.
+utils.clip_grad_norm_`'s own scaling math (`clip_coef = max_norm /
+(total_norm + eps)`, applied unconditionally whenever it's below 1)
+has no sign or finiteness guard of its own, and `grad_clip` was the
+one field in `TrainerConfig` with no `__post_init__` check at all.
+Confirmed live: `clip_grad_norm_(params, max_norm=-1.0)` on a real
+gradient `[3.0, 4.0]` returned `[-0.6, -0.8]` -- not merely zeroed or
+left unclipped, the gradient's *sign* was flipped. `train_step`/
+`dpo_step`/`grpo_step` all apply this identically and unconditionally
+whenever `grad_clip is not None`, so a negative value would silently
+increase the loss instead of decreasing it on every single step across
+pretraining, SFT, DPO, and GRPO alike -- not a crash, not a stalled
+metric, active corruption a loss curve climbing steadily could easily
+be mistaken for "learning rate too high" rather than a sign error one
+config field away. `grad_clip=nan` is the identical NaN-poisoning shape
+already fixed for `norm_eps`/`RopeScalingConfig.factor` elsewhere in
+this package (confirmed live: every gradient becomes NaN);
+`grad_clip=0.0` confirmed live too, silently zeroing every gradient so
+every subsequent step becomes a complete no-op with no error, wasting
+real compute for the rest of the run. Reachable the same way every
+other config field in this package is -- a caller deriving `grad_clip`
+programmatically (e.g. from a budget that can go non-positive) or a
+simple sign-flip typo in a training script, not an adversarial input.
+Fixed with `TrainerConfig`'s first `__post_init__`: `grad_clip` must be
+a finite positive number, or `None` (still allowed, meaning "no
+clipping," unchanged). Verified by reverting and watching the new test
+fail with the literal old bug's own shape: `DID NOT RAISE ValueError`
+for a negative, zero, and NaN `grad_clip`. 1 new test, 876 → 877
+Python tests.
+
 ## The learning-rate schedule: warmup, then cosine decay
 
 `WarmupCosineSchedule` replaces what was originally a flat learning
