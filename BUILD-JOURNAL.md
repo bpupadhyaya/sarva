@@ -18643,3 +18643,62 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `dedup_near_duplicates`'s `threshold` -- the third sibling parameter in this exact function -- was likewise unvalidated, silently collapsing an entire diverse corpus down to one document
+
+Round 150. Two rounds after fixing `shingle_size` (the sibling of
+`num_hashes`), this round's sweep found the same shape a third time in
+the same function: `threshold` -- sitting directly next to
+`num_hashes` and `shingle_size`, both already validated -- was never
+checked at all.
+
+`_estimated_jaccard_similarity` always returns a value in `[0.0,
+1.0]`, so any `threshold <= 0.0` makes `similarity >= threshold` true
+for every single pairwise comparison. The result: every document after
+the first is unconditionally treated as a near-duplicate of the first
+and silently dropped -- a corpus-cleaning function that collapses an
+entire, genuinely diverse corpus down to one document, with no
+exception, no warning, and no log line explaining why.
+
+**Confirmed live**: four topically unrelated real sentences
+(fox/park, photosynthesis, stock market, cake recipe) collapsed from 4
+kept documents to 1 the instant `threshold` was `0.0` or negative.
+
+Not contrived: a caller deriving `threshold` programmatically (e.g.
+`threshold = 1.0 - estimated_noise_level`, where the noise estimate
+saturates at or above `1.0`) or hitting a simple sign-flip bug
+upstream lands on exactly this with no adversarial intent -- the same
+"sign-flip bug upstream" scenario round 147's `flops_per_second` fix
+already used to justify identical reasoning.
+
+**Fixed** by rejecting `threshold` outside `(0.0, 1.0]` at the same
+choke point `num_hashes`/`shingle_size` are already validated at. A
+threshold above `1.0` is comparatively harmless (dedup becomes a
+no-op, no data lost) but is rejected too, since Jaccard similarity is
+only ever in `[0.0, 1.0]` and such a threshold could never match
+anything -- silently doing nothing is itself worth surfacing.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 839 -> 840 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for this module.
+
+**One hundred five of the last one hundred six rounds (46-67, 70-150)
+have found and shipped real fixes; rounds 68-69 remain the only two
+clean sweeps.** `_dedup_near_duplicates_by_key` has now had all three
+of its numeric parameters (`num_hashes`, `shingle_size`, `threshold`)
+individually found missing validation across three separate rounds --
+this function's own numeric-parameter surface is now believed fully
+validated (with the caveat, per round 139's own lesson, that such
+claims have been premature before).
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -101,6 +101,25 @@ def _dedup_near_duplicates_by_key[T](
     # down to 1 with shingle_size=0.
     if shingle_size <= 0:
         raise ValueError(f"shingle_size must be positive, got {shingle_size}")
+    # A real bug found by a later fresh-eyes sweep, the third sibling
+    # parameter in this exact function to get this treatment: threshold
+    # was likewise never validated. _estimated_jaccard_similarity always
+    # returns a value in [0.0, 1.0], so any threshold <= 0.0 makes
+    # `similarity >= threshold` true for every single pairwise
+    # comparison -- every document after the first is unconditionally
+    # treated as a near-duplicate of the first and silently dropped,
+    # collapsing an entire, genuinely diverse corpus down to one
+    # document. Confirmed live: four topically unrelated real sentences
+    # collapsed from 4 kept down to 1 the instant threshold was 0.0 or
+    # negative. A caller deriving threshold programmatically (e.g.
+    # `1 - estimated_noise_level`, where the noise estimate saturates at
+    # or above 1.0) can land on exactly this with no adversarial intent.
+    # A threshold above 1.0 is comparatively harmless (dedup becomes a
+    # no-op, no data lost) but is rejected too since Jaccard similarity
+    # is only ever in [0.0, 1.0] -- such a threshold could never match
+    # anything, and silently doing nothing is itself worth surfacing.
+    if not (0.0 < threshold <= 1.0):
+        raise ValueError(f"threshold must be in (0.0, 1.0], got {threshold}")
     kept: list[T] = []
     kept_signatures: list[tuple[int, ...]] = []
     for item in items:

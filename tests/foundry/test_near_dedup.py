@@ -148,3 +148,27 @@ def test_dedup_near_duplicates_rejects_a_non_positive_shingle_size():
         dedup_near_duplicates([_DOC_A, _DOC_C], shingle_size=0)
     with pytest.raises(ValueError, match="shingle_size"):
         dedup_near_duplicates([_DOC_A, _DOC_C], shingle_size=-1)
+
+
+def test_dedup_near_duplicates_rejects_a_threshold_outside_zero_to_one():
+    # A real bug found by a later fresh-eyes sweep, the third sibling
+    # parameter in this exact function to get this treatment: threshold
+    # was likewise never validated. _estimated_jaccard_similarity always
+    # returns a value in [0.0, 1.0], so any threshold <= 0.0 used to
+    # make `similarity >= threshold` true for every single pairwise
+    # comparison -- every document after the first was unconditionally
+    # treated as a near-duplicate of the first and silently dropped,
+    # collapsing an entire, genuinely diverse corpus down to one
+    # document with no crash, no warning, and no record of the
+    # collision. A caller deriving threshold programmatically (e.g.
+    # `1 - estimated_noise_level`, saturating at or above 1.0) can land
+    # on exactly this with no adversarial intent.
+    import pytest
+
+    docs = [_DOC_A, _DOC_C]
+    with pytest.raises(ValueError, match="threshold"):
+        dedup_near_duplicates(docs, threshold=0.0)
+    with pytest.raises(ValueError, match="threshold"):
+        dedup_near_duplicates(docs, threshold=-0.1)
+    with pytest.raises(ValueError, match="threshold"):
+        dedup_near_duplicates(docs, threshold=1.1)
