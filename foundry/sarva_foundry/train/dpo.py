@@ -27,6 +27,7 @@ padding, and loss-mask construction a second time.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch.nn.functional as F
@@ -86,7 +87,28 @@ def dpo_loss(
     """The DPO objective itself, taking already-computed sequence
     log-probabilities (see `sequence_logprobs`) rather than models —
     kept separate from `Trainer.dpo_step` so the loss math is testable
-    in complete isolation from any model forward pass."""
+    in complete isolation from any model forward pass.
+
+    A real bug found by a fresh-eyes sweep, the same severity class as
+    `TrainerConfig.grad_clip`/`WarmupCosineSchedule.peak_lr`'s own
+    fixes elsewhere in this package: `beta` was never validated, and
+    nothing in this function's own math guards its sign. Confirmed
+    live with a real model, a real tokenizer, and real DPO training
+    steps: `beta=-0.1` took a real (chosen - rejected) log-probability
+    margin from +5.07 to -6.30 over 10 real `Trainer.dpo_step` calls --
+    the policy was actively trained to PREFER the rejected response
+    over the chosen one, the exact opposite of what DPO exists to do,
+    not merely a failure to improve. `beta=0` is degenerate too (though
+    less severe): `logits` still varies per example, but `beta *
+    logits` is identically zero regardless, so `-F.logsigmoid(0).mean()`
+    is a constant loss with zero gradient with respect to either
+    log-probability difference -- every `dpo_step` becomes a real,
+    silent no-op that still advances the step counter. Reachable the
+    same way every other numeric parameter in this package is -- a
+    caller deriving `beta` programmatically or a simple sign-flip typo
+    in a training script, not an adversarial input."""
+    if not math.isfinite(beta) or beta <= 0:
+        raise ValueError(f"beta must be a finite positive number, got {beta}")
     pi_logratios = policy_chosen_logprobs - policy_rejected_logprobs
     ref_logratios = ref_chosen_logprobs - ref_rejected_logprobs
     logits = pi_logratios - ref_logratios

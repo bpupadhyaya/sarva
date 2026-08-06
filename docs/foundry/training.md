@@ -422,6 +422,31 @@ single DPO preference pair shifts the margin dramatically toward the
 chosen response — no reward model, no sampled rollouts, just the one
 preference pair.
 
+### `beta` was never validated — a negative value silently trained the policy to prefer the rejected response
+
+A much later fresh-eyes sweep found `dpo_loss`'s own `beta` parameter
+had no validation at all, and nothing in the loss formula's math guards
+its sign. Confirmed live with a real model, a real tokenizer, and real
+`Trainer.dpo_step` calls, not just an isolated-tensor version of the
+formula: `beta=-0.1` took a real (chosen − rejected) log-probability
+margin from `+5.07` to `-6.30` over 10 real training steps — the
+policy was actively trained to *prefer* the rejected response over the
+chosen one, the exact opposite of what DPO exists to do, not merely a
+failure to improve. The same severity class as `TrainerConfig.
+grad_clip`/`WarmupCosineSchedule.peak_lr`'s own fixes elsewhere in this
+package, found by checking the remaining unaudited numeric parameters
+in the sibling post-training methods (`train_step`, `dpo_step`,
+`grpo_step`) those two fixes share a module with. `beta=0` is
+degenerate too, though less severely: `beta * logits` is identically
+zero regardless of the real log-probability margin, so the loss
+becomes a constant with zero gradient — every `dpo_step` becomes a
+real, silent no-op that still advances the step counter, wasting real
+compute with no error. Fixed by requiring `beta` to be finite and
+strictly positive. Verified by reverting and watching the new test
+fail with the literal old bug's own shape: `DID NOT RAISE ValueError`
+for a negative, zero, and NaN `beta`. 1 new test, 879 → 880 Python
+tests.
+
 ### A much later fresh-eyes sweep found `dpo_step` silently never applied the configured LR schedule
 
 `Trainer.dpo_step` "shares the same optimizer, gradient clipping, and

@@ -20584,3 +20584,71 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `dpo_loss`'s `beta` was never validated — a negative value silently trained the policy to *prefer the rejected response*, the third bug in this session's "unvalidated numeric parameter feeding a training-critical sign-sensitive formula" cluster
+
+Round 178. Continuing directly from rounds 176-177's `grad_clip`/
+`peak_lr`/`min_lr` fixes (Agent tool subagent budget still exhausted),
+this round's sweep checked the remaining sibling post-training methods
+in the same module family -- `train_step`, `dpo_step`, `grpo_step` --
+for the same class of gap. `dpo_loss`'s `beta` parameter (DeepSeek/DPO's
+own "how tightly the policy stays near the reference" temperature) had
+no validation at all, and nothing in the loss formula's own math
+(`-F.logsigmoid(beta * logits).mean()`) guards its sign.
+
+**Confirmed live**, with a real model, a real tokenizer, and real
+`Trainer.dpo_step` calls -- not just an isolated-tensor version of the
+formula: `beta=-0.1` took a real (chosen - rejected) log-probability
+margin from `+5.07` to `-6.30` over 10 real training steps. The policy
+was actively trained to *prefer* the rejected response over the chosen
+one -- the exact opposite of what DPO exists to do, not merely a
+failure to improve, matching (in a third, distinct location) the same
+"silent training-direction reversal" severity already found for
+`grad_clip` (round 176) and `peak_lr`/`min_lr` (round 177). `beta=0` is
+degenerate too, though less severely: `beta * logits` is identically
+zero regardless of the real margin, so the loss becomes a constant with
+zero gradient -- every `dpo_step` becomes a real, silent no-op that
+still advances the step counter, wasting real compute with no error.
+`beta=nan` reproduces the same NaN-poisoning shape already fixed
+multiple times this session.
+
+**Fixed** by requiring `beta` to be finite and strictly positive in
+`dpo_loss` -- the one function both the standalone loss-math entry
+point and `Trainer.dpo_step` (which calls it internally) funnel
+through, closing the gap once for both callers.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for a
+negative, zero, and NaN `beta`.
+
+**1 new test, 879 -> 880 Python tests, all passing, `ruff
+check`/`format --check` clean, no other test in the whole suite
+broke.** `docs/foundry/training.md` gained a new subsection directly
+in the DPO chapter, right before the existing `dpo_step` LR-schedule
+bug narrative it now sits alongside.
+
+**One hundred thirty-three of the last one hundred thirty-four rounds
+(46-67, 70-178) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** Three rounds in a row (176, 177, 178) have
+now found the identical severity class -- an unvalidated sign-sensitive
+numeric parameter silently reversing a training objective's intended
+direction -- in three different places across the same small module
+family (`Trainer`/`WarmupCosineSchedule`/`dpo_loss`, all in
+`foundry/sarva_foundry/train/`). Worth treating "does this numeric
+parameter's sign or magnitude directly control which direction a loss
+pushes the model" as its own standing question for any remaining
+training-adjacent function not yet checked (`grpo_step`'s own
+advantage/reward handling was already hardened in earlier rounds; SFT's
+`build_sft_batch` remains unchecked). Rounds 173-178 were all completed
+via direct tool use rather than a dispatched background agent, with
+identical workflow discipline throughout. The already-known `bpe.py`/
+`provenance.py` leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

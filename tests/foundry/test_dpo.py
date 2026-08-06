@@ -64,6 +64,24 @@ def test_dpo_loss_rewards_a_larger_chosen_over_rejected_margin():
     assert large_margin_loss.item() < small_margin_loss.item()
 
 
+def test_dpo_loss_rejects_a_non_finite_or_non_positive_beta():
+    # A real bug found by a fresh-eyes sweep, the same severity class as
+    # TrainerConfig.grad_clip/WarmupCosineSchedule.peak_lr's own fixes:
+    # beta was never validated, and nothing in dpo_loss's own math
+    # guards its sign. Confirmed live with a real model and real DPO
+    # training steps: beta=-0.1 took a real (chosen - rejected)
+    # log-probability margin from +5.07 to -6.30 over 10 real dpo_step
+    # calls -- the policy was actively trained to PREFER the rejected
+    # response, the exact opposite of what DPO exists to do.
+    zero = torch.zeros(3)
+    with pytest.raises(ValueError, match="beta"):
+        dpo_loss(zero, zero, zero, zero, beta=-0.1)
+    with pytest.raises(ValueError, match="beta"):
+        dpo_loss(zero, zero, zero, zero, beta=0.0)
+    with pytest.raises(ValueError, match="beta"):
+        dpo_loss(zero, zero, zero, zero, beta=float("nan"))
+
+
 def test_sequence_logprobs_only_sums_masked_positions(tokenizer):
     config = _tiny_config(tokenizer.vocab_size)
     model = DecoderOnlyTransformer(config)
