@@ -52,6 +52,24 @@ def test_vision_encoder_config_rejects_non_positive_n_layers():
         _tiny_vision_config(n_layers=-2)
 
 
+def test_vision_encoder_config_rejects_non_positive_n_kv_heads():
+    # A real bug found by a later fresh-eyes sweep, the identical gap
+    # just closed one field over (n_layers, above) and one file over
+    # (TransformerConfig.n_kv_heads): n_kv_heads was never validated
+    # here either. n_kv_heads=0 used to construct cleanly, then raise a
+    # raw ZeroDivisionError only when VisionEncoder was actually built;
+    # a negative n_kv_heads whose magnitude divides n_heads evenly slips
+    # past GroupedQueryAttention's own `n_heads % n_kv_heads` check
+    # entirely (Python's modulo is defined for negative divisors too),
+    # then crashes nn.Linear with a raw "negative dimension" RuntimeError.
+    import pytest
+
+    with pytest.raises(ValueError, match="n_kv_heads"):
+        _tiny_vision_config(n_kv_heads=0)
+    with pytest.raises(ValueError, match="n_kv_heads"):
+        _tiny_vision_config(n_heads=4, n_kv_heads=-4)
+
+
 def test_n_patches_matches_the_grid():
     config = _tiny_vision_config(image_size=32, patch_size=8)
     assert config.patches_per_side == 4

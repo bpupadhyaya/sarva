@@ -17748,3 +17748,66 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `n_kv_heads` was never validated in either `TransformerConfig` or `VisionEncoderConfig` -- the sibling field the last two rounds' `n_layers` fixes never reached
+
+Round 135. One round after fixing `VisionEncoderConfig.n_layers` (which
+itself followed round 133's identical fix to `TransformerConfig.
+n_layers`), this round's sweep found that both classes have a second,
+never-validated sibling field: `n_kv_heads`. Unlike `n_layers`, it's
+never checked in either `__post_init__` at all -- not even for zero.
+The only place it's checked is deep inside `GroupedQueryAttention.
+__init__` (`n_heads % n_kv_heads != 0`), and Python's modulo is defined
+for negative divisors too, so even that check doesn't catch every
+invalid value.
+
+**Confirmed live, two distinct failure shapes** for both `TransformerConfig`
+and `VisionEncoderConfig`:
+
+- `n_kv_heads=0` constructs the dataclass with no error at all, then
+  raises a raw `ZeroDivisionError: integer modulo by zero` only when
+  the model is actually built (`DecoderOnlyTransformer`/`VisionEncoder`).
+- `n_kv_heads=-4` (with `n_heads=8`) passes `GroupedQueryAttention`'s
+  own divisibility check silently (`8 % -4 == 0` in Python), then
+  crashes `nn.Linear` with a raw `RuntimeError: Trying to create tensor
+  with negative dimension` building `wk`/`wv` with a negative
+  `out_features`.
+
+Both are reachable through the identical untrusted `config.json` path
+already established for `n_layers` and `MoEConfig`'s own fields (see
+`foundry_provider.py`'s own docstring: "a checkpoint saved mid-crash, a
+hand-edited/rolled-back config.json, or a training-script bug computing
+this field incorrectly") -- `n_kv_heads` was simply the sibling field
+those earlier passes missed, in both classes.
+
+**Fixed** by adding the same `<= 0` positivity check to both classes'
+`__post_init__`, giving a clean `ValueError` at construction time
+instead of a raw exception leaking implementation detail two layers
+downstream.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old shape: `DID NOT RAISE ValueError`.
+
+**2 new tests, 822 -> 824 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for foundry-internals-only config-validation
+fixes in this file family.
+
+**Ninety of the last ninety-one rounds (46-67, 70-135) have found and
+shipped real fixes; rounds 68-69 remain the only two clean sweeps.**
+Three rounds in a row have now found an unvalidated block-count/
+head-count field in these same two sibling config classes
+(`TransformerConfig`, `VisionEncoderConfig`) -- both classes' every
+remaining field (`dim`, `n_heads`, `max_seq_len`/`image_size`,
+`patch_size`, `n_channels`, `norm_eps`) is now validated at least for
+the shape of invalidity that's actually reachable; no further fields
+in either class are known to be missing a check as of this round.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

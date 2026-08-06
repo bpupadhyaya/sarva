@@ -64,6 +64,25 @@ class TransformerConfig:
         # n_shared_experts' negative-only check.
         if self.n_layers <= 0:
             raise ValueError(f"n_layers must be positive, got {self.n_layers}")
+        # A real bug found by a later fresh-eyes sweep, one field over
+        # from the n_layers fix directly above: n_kv_heads is the one
+        # sibling field in this same __post_init__ that was never
+        # validated at all -- not even for zero. The only place it's
+        # checked is deep inside GroupedQueryAttention.__init__
+        # (`n_heads % n_kv_heads != 0`), and Python's modulo is defined
+        # for negative divisors too, so that check doesn't even catch a
+        # negative n_kv_heads whose magnitude happens to divide evenly.
+        # Confirmed live: n_kv_heads=0 constructs this dataclass with no
+        # error, then raises a raw ZeroDivisionError only when
+        # DecoderOnlyTransformer is actually built; n_kv_heads=-4 (with
+        # n_heads=8) passes the `8 % -4 == 0` divisibility check
+        # silently, then crashes nn.Linear with a raw RuntimeError
+        # ("negative dimension") building wk/wv with a negative
+        # out_features -- both far from this class's own established
+        # clean-ValueError-at-construction-time convention. Reachable
+        # through the identical untrusted config.json path as n_layers.
+        if self.n_kv_heads <= 0:
+            raise ValueError(f"n_kv_heads must be positive, got {self.n_kv_heads}")
 
     @property
     def head_dim(self) -> int:

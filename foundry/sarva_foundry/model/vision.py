@@ -79,6 +79,20 @@ class VisionEncoderConfig:
         # constructed cleanly and produced a working 0-block encoder.
         if self.n_layers <= 0:
             raise ValueError(f"n_layers must be positive, got {self.n_layers}")
+        # A real bug found by a later fresh-eyes sweep, the identical gap
+        # just closed one field over (n_layers, above) and one file over
+        # (TransformerConfig.n_kv_heads): n_kv_heads feeds straight into
+        # GroupedQueryAttention the same way it does for the text
+        # decoder, and was never validated here either. n_kv_heads=0
+        # constructs cleanly, then raises a raw ZeroDivisionError only
+        # when VisionEncoder is actually built; a negative n_kv_heads
+        # whose magnitude happens to divide n_heads evenly slips past
+        # GroupedQueryAttention's own `n_heads % n_kv_heads` check
+        # entirely (Python's modulo is defined for negative divisors
+        # too), then crashes nn.Linear with a raw "negative dimension"
+        # RuntimeError instead.
+        if self.n_kv_heads <= 0:
+            raise ValueError(f"n_kv_heads must be positive, got {self.n_kv_heads}")
 
     @property
     def patches_per_side(self) -> int:

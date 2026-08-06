@@ -166,6 +166,24 @@ def test_transformer_config_rejects_non_positive_n_layers():
         _tiny_config(n_layers=-3)
 
 
+def test_transformer_config_rejects_non_positive_n_kv_heads():
+    # A real bug found by a later fresh-eyes sweep, one field over from
+    # the n_layers fix above: n_kv_heads was never validated at all --
+    # not even for zero. n_kv_heads=0 used to construct this dataclass
+    # with no error, then raise a raw ZeroDivisionError only when
+    # DecoderOnlyTransformer was actually built; n_kv_heads=-4 (with
+    # n_heads=8) passed the `8 % -4 == 0` divisibility check inside
+    # GroupedQueryAttention silently (Python's modulo is defined for
+    # negative divisors too), then crashed nn.Linear with a raw
+    # "negative dimension" RuntimeError instead of a clean error here.
+    import pytest
+
+    with pytest.raises(ValueError):
+        _tiny_config(n_kv_heads=0)
+    with pytest.raises(ValueError):
+        _tiny_config(n_heads=8, n_kv_heads=-4)
+
+
 def test_forward_raises_a_clear_error_past_max_seq_len():
     # Found by running examples/03_train_toy_transformer.py's generation
     # loop, which grows the sequence one token at a time past
