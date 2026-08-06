@@ -18961,3 +18961,76 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `ws_chat`'s own cleanup could crash with a raw `RuntimeError` -- a `finally` block assuming a precondition the exception it was cleaning up after had already invalidated
+
+Round 155. This round's sweep found `ws_chat`'s `finally: await
+websocket.close()` -- the very last line of the handler, meant to be an
+unconditional safety net -- could itself raise. A send-side disconnect
+(the client's TCP connection dropping while the handler is mid-stream
+inside `websocket.send_text()`, well inside the streaming loop -- a
+phone losing signal, a laptop sleeping, a proxy timeout; most of a
+streaming turn's wall-clock time is spent sending, not waiting on a
+client reply, so this is the more common disconnect shape, not a rare
+one) already transitions Starlette's own `application_state` to
+`DISCONNECTED` and raises `WebSocketDisconnect`, caught cleanly by the
+`except` a few lines up. But the unconditional `close()` in `finally`
+then sends another `websocket.close` ASGI message, and Starlette's own
+`send()` refuses that once `application_state` is already
+`DISCONNECTED` -- raising a raw `RuntimeError('Cannot call "send" once
+a close message has been sent.')` that propagated straight out of the
+whole ASGI call, unlike every other failure path on this endpoint.
+
+A receive-side disconnect (e.g. the client closing while `ws_confirm`
+awaits a reply) doesn't hit this: `application_state` is still
+`CONNECTED` when `WebSocketDisconnect` is raised from `receive()`, so
+`close()` succeeds normally -- exactly why this survived this file's
+own otherwise thorough, many-rounds-deep error-handling hardening
+(11 prior documented fixes on this same endpoint): every prior fix
+happened to exercise the receive-side shape, never the send-side one.
+
+**Confirmed live**, driving the real ASGI app directly (scope/receive/
+send, not FastAPI's `TestClient` WebSocket session -- a genuinely
+unhandled exception in the app leaves `TestClient`'s background-thread
+reader blocked forever waiting for a message that will never arrive,
+rather than failing fast, which is itself a real discovery from
+building this test) with a `send_text` reproducing exactly what
+Starlette's real `send()` does internally on an `OSError`: mark the
+socket `DISCONNECTED`, then raise `WebSocketDisconnect`. The subsequent
+`finally`-block `close()` then raised the raw `RuntimeError`.
+
+**Fixed** by guarding the `finally` block: only call `close()` when
+`application_state != WebSocketState.DISCONNECTED`.
+
+**Verified live**: the identical repro now completes with no exception.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: the raw `RuntimeError` propagating out of
+the ASGI call (confirmed via the direct-ASGI test harness, which fails
+fast rather than hanging the way the equivalent `TestClient`-based
+approach did during test development).
+
+**1 new test, 848 -> 849 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the `SessionStore.load`/`.save`
+blocking-I/O fix, continuing the same `/ws/chat` per-bug narrative.
+
+**One hundred ten of the last one hundred eleven rounds (46-67,
+70-155) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** A genuinely new lens for this session: not
+an unvalidated parameter, not a sibling-comparison gap, but an
+error-recovery path (`finally`) whose own cleanup step silently
+assumed a precondition that the very exception it exists to clean up
+after can invalidate -- worth checking any other `finally`/`except...
+finally` cleanup block that performs an action (a close, a release, a
+second write) without first re-checking whether the resource is still
+in the state that action expects.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

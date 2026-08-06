@@ -794,6 +794,53 @@ watching both new tests fail with the literal old bug's own shape —
 near-zero heartbeat ticks for both the load and save call sites. 2 new
 tests, 799 → 801 Python tests.
 
+### `ws_chat`'s own cleanup could crash with a raw `RuntimeError` — a `finally` block assuming a precondition the exception it was cleaning up after had already invalidated
+
+A much later fresh-eyes sweep found `ws_chat`'s `finally: await
+websocket.close()` — the very last line of the handler, meant to be an
+unconditional safety net — could itself raise. A **send-side**
+disconnect (the client's TCP connection dropping while the handler is
+mid-stream inside `websocket.send_text()`, well inside the `async for
+event in loop.run(...)` loop — a phone losing signal, a laptop
+sleeping, a proxy timeout; most of a streaming turn's wall-clock time
+is spent sending, not waiting on a client reply, so this is the more
+common disconnect shape, not a rare one) already transitions
+Starlette's own `application_state` to `DISCONNECTED` and raises
+`WebSocketDisconnect`, caught cleanly by the `except WebSocketDisconnect:
+pass` a few lines up. But the unconditional `close()` in `finally` then
+sends another `websocket.close` ASGI message, and Starlette's own
+`send()` refuses that once `application_state` is already
+`DISCONNECTED` — raising a raw `RuntimeError('Cannot call "send" once a
+close message has been sent.')` that propagated straight out of the
+whole ASGI call, unlike every other failure path on this endpoint,
+which is deliberately routed through a clean frame or muted.
+
+A **receive-side** disconnect (e.g. the client closing while
+`ws_confirm` awaits a reply) doesn't hit this: `application_state` is
+still `CONNECTED` when `WebSocketDisconnect` is raised from `receive()`,
+so `close()` there succeeds normally — which is exactly why this
+survived this file's own otherwise thorough, many-rounds-deep
+error-handling hardening: every prior fix on this endpoint happened to
+exercise the receive-side shape, never the send-side one. Confirmed
+live, driving the real ASGI app directly (scope/receive/send, not
+FastAPI's `TestClient` WebSocket session — see the new test's own
+comment for why: a genuinely unhandled exception in the app leaves
+`TestClient`'s background-thread reader blocked forever waiting for a
+message that will never arrive, rather than failing fast) with a
+`send_text` simulating exactly what Starlette's real `send()` does
+internally on an `OSError`: mark the socket `DISCONNECTED`, then raise
+`WebSocketDisconnect`. The subsequent `finally`-block `close()` then
+raised the raw `RuntimeError` shown above.
+
+Fixed by guarding the `finally` block: `if websocket.application_state
+!= WebSocketState.DISCONNECTED: await websocket.close()` — a socket
+that's already disconnected needs no further closing; one that's
+genuinely still open still gets its own explicit close, unchanged.
+Verified live the identical repro now completes with no exception.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape: the raw `RuntimeError` propagating out of the ASGI
+call. 1 new test, 848 → 849 Python tests.
+
 ## First-run guided setup — a real gap between what was promised and what shipped
 
 T4's own definition of done, and the README's own quickstart text, have

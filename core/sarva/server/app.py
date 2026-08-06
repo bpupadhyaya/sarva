@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.websockets import WebSocketState
 
 from sarva.agent.budget import Spend
 from sarva.agent.events import AgentState, RunDoneEvent, StateChangedEvent
@@ -635,7 +636,33 @@ def create_app() -> FastAPI:
         except WebSocketDisconnect:
             pass
         finally:
-            await websocket.close()
+            # A real bug found by a fresh-eyes sweep: this `finally` used
+            # to call `websocket.close()` unconditionally, but a SEND-side
+            # disconnect (the client's TCP connection dropping while this
+            # handler is mid-stream inside `websocket.send_text()` above --
+            # a phone losing signal, a laptop sleeping, a proxy timeout;
+            # most of a streaming turn's wall-clock time is spent sending,
+            # not waiting on a client reply, so this is the more common
+            # disconnect shape, not a rare one) already transitions
+            # Starlette's own `application_state` to `DISCONNECTED` and
+            # raises `WebSocketDisconnect` -- caught cleanly above. But
+            # `close()` unconditionally sends another `websocket.close`
+            # ASGI message, and Starlette's own `send()` refuses that once
+            # `application_state` is already `DISCONNECTED`, raising a raw
+            # `RuntimeError('Cannot call "send" once a close message has
+            # been sent.')` that propagates straight out of this handler --
+            # unlike every OTHER failure path in this file, which is
+            # deliberately routed through a clean frame or muted. A
+            # RECEIVE-side disconnect (e.g. the client closing while
+            # `ws_confirm` awaits a reply) leaves `application_state` at
+            # `CONNECTED` when `WebSocketDisconnect` is raised, so `close()`
+            # there already succeeded -- that's why this survived this
+            # file's own otherwise thorough error-handling hardening.
+            # Confirmed live before this fix. Guarded here rather than
+            # broadening the `except` above, since a genuinely still-open
+            # socket still needs its own explicit close.
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                await websocket.close()
 
     if _STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="web-ui")

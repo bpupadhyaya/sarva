@@ -668,6 +668,86 @@ def test_websocket_streams_events_and_ends_with_run_done(monkeypatch):
     assert any(e["type"] == "model_stream" for e in events)
 
 
+async def test_websocket_send_side_disconnect_closes_cleanly_not_a_raw_runtimeerror(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: ws_chat's `finally` block
+    # used to call `websocket.close()` unconditionally, but a SEND-side
+    # disconnect (the client's TCP connection dropping while this
+    # handler is mid-stream inside `websocket.send_text()` -- a phone
+    # losing signal, a laptop sleeping, a proxy timeout; most of a
+    # streaming turn's wall-clock time is spent sending, not waiting on
+    # a client reply, so this is the more common disconnect shape, not
+    # a rare one) already transitions Starlette's own
+    # `application_state` to DISCONNECTED and raises
+    # `WebSocketDisconnect`, caught cleanly by the `except` above. But
+    # `close()` then unconditionally sent another `websocket.close`
+    # ASGI message, and Starlette's own `send()` refuses that once
+    # `application_state` is already DISCONNECTED, raising a raw
+    # `RuntimeError('Cannot call "send" once a close message has been
+    # sent.')` that propagated straight out of this handler -- unlike
+    # every OTHER failure path in this file. Simulated here by making
+    # the first `send_text` call reproduce exactly what Starlette's
+    # real `send()` does internally when the underlying ASGI `send()`
+    # raises `OSError` (confirmed directly against the installed
+    # starlette/websockets.py source): mark the socket DISCONNECTED,
+    # then raise `WebSocketDisconnect`.
+    #
+    # Driven directly against the raw ASGI callable (scope/receive/send),
+    # not FastAPI's TestClient WebSocket session: TestClient's own
+    # WebSocketTestSession runs the app in a background thread behind an
+    # anyio memory-object-stream queue, and a genuinely unhandled
+    # exception in the app (the exact old bug this test exists to catch)
+    # leaves that queue with nothing ever sent to it -- `receive_json()`
+    # on the client side then blocks forever instead of failing fast,
+    # since nothing in that machinery is watching the app task's own
+    # exception state. Driving the ASGI callable directly sidesteps that
+    # entirely: this test simply awaits the app call and asserts on
+    # what it does or doesn't raise.
+    from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
+
+    real_send_text = WebSocket.send_text
+    calls = {"n": 0}
+
+    async def flaky_send_text(self, data):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            self.application_state = WebSocketState.DISCONNECTED
+            raise WebSocketDisconnect(code=1006)
+        return await real_send_text(self, data)
+
+    monkeypatch.setattr(WebSocket, "send_text", flaky_send_text)
+    _force_mock_only(monkeypatch)
+    app = create_app()
+
+    scope = {
+        "type": "websocket",
+        "path": "/ws/chat",
+        "headers": [(b"host", b"testserver"), (b"origin", b"http://testserver")],
+        "query_string": b"",
+        "client": ("testclient", 123),
+        "server": ("testserver", 80),
+        "subprotocols": [],
+    }
+    incoming = [
+        {"type": "websocket.connect"},
+        {"type": "websocket.receive", "text": json.dumps({"message": "hi"})},
+        {"type": "websocket.disconnect", "code": 1000},
+    ]
+
+    async def receive():
+        return incoming.pop(0) if incoming else {"type": "websocket.disconnect", "code": 1000}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    # Must not raise a raw RuntimeError -- the handler's own cleanup
+    # must tolerate a socket that's already disconnected. This await
+    # itself is the real assertion: it must complete normally.
+    await app(scope, receive, send)
+    assert calls["n"] >= 1  # the flaky send_text path was actually exercised
+
+
 def test_websocket_rejects_a_cross_origin_connection(monkeypatch):
     # A real bug found by actually connecting a TestClient WebSocket
     # session with Origin: https://evil.example.com set: the handshake
