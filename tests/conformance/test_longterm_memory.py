@@ -56,6 +56,28 @@ def test_repeated_writes_to_the_same_topic_append_not_overwrite(store):
     assert "second decision" in text
 
 
+def test_write_recovers_cleanly_when_the_existing_note_file_is_empty(store):
+    # A real bug found by a fresh-eyes sweep: only "the file doesn't
+    # exist yet" was special-cased -- a file that EXISTS but is empty
+    # (0 bytes) fell straight through to `existing.splitlines()[0]`,
+    # and "".splitlines() is [], not [""], so indexing [0] raised a
+    # raw, uncaught IndexError before atomic_write_text was ever
+    # reached, silently losing the write. Not contrived: this store's
+    # own docstring calls these files "human-readable ... a person can
+    # open in any editor and read or hand-edit directly," so a user
+    # clearing a note file's contents is ordinary use. Confirmed live
+    # before this fix.
+    path = store.write("Q3 Planning", "initial note")
+    path.write_text("", encoding="utf-8")  # simulate a hand-cleared note file
+
+    result_path = store.write("Q3 Planning", "a follow-up note")
+
+    assert result_path == path
+    text = path.read_text()
+    assert "# Q3 Planning" in text
+    assert "a follow-up note" in text
+
+
 def test_different_topics_land_in_different_files(store):
     store.write("topic-a", "content a")
     store.write("topic-b", "content b")

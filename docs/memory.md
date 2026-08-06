@@ -830,6 +830,43 @@ tests cover both underlying store types this fix touches
 — the other two tools share the identical fix and mechanism. 2 new
 tests, 773 → 775 Python tests.
 
+### A file that exists but is empty crashed `write()` with a raw `IndexError`, silently losing the note — only "doesn't exist yet" had ever been special-cased
+
+A much later fresh-eyes sweep found a gap in `write()`'s own
+read-existing-content step: `path.is_file()` only distinguishes "no
+file yet" from "a file is there" — it says nothing about whether that
+file actually has any content. `existing = path.read_text(...) if
+file_exists else f"# {stripped_topic}\n"` special-cases the former but
+not a real third state: a topic `.md` file that exists on disk but is
+0 bytes. `"".splitlines()` returns `[]`, not `[""]`, so the very next
+line, `existing.splitlines()[0].removeprefix("#").strip()`, raised a
+raw, uncaught `IndexError` — before `atomic_write_text` was ever
+reached, so the new note was silently lost, not just delayed.
+
+This isn't a contrived state to reach: this store's own docstring
+calls its files "human-readable ... a person can open in any editor
+and read or hand-edit directly" — a user (or any external process)
+clearing a note file's contents is ordinary use of the exact feature
+this tier is designed around, not adversarial input. `NoteTool.run()`
+only catches `LongTermMemoryError`, so this bug leaked straight past
+the "reject, don't guess" discipline every sibling case in `write()`
+already follows correctly — saved from crashing a live `sarva serve`
+process only by `AgentLoop.run_one()`'s own incidental broad `except
+Exception` one layer up, a safety net no other/future direct caller of
+this store would have.
+
+Confirmed live: a note written, then its file truncated to 0 bytes,
+then written to again, reliably raised `IndexError: list index out of
+range` inside `write()`. Fixed by treating an existing-but-blank file
+the same as "doesn't exist yet" for heading purposes — there's no real
+original topic left to compare against or preserve, so the file is
+reseeded with a fresh `# Topic` heading exactly like a brand-new file
+gets, rather than crashing. Verified live the identical repro now
+succeeds, producing a correctly re-seeded file. Verified by reverting
+and watching the new test fail with the literal old bug's own shape:
+`IndexError: list index out of range` at the same line. 1 new test,
+816 → 817 Python tests.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools

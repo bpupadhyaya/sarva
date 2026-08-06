@@ -138,6 +138,32 @@ class LongTermMemoryStore:
         with exclusive_lock(lock_path):
             file_exists = path.is_file()
             existing = path.read_text(encoding="utf-8") if file_exists else f"# {stripped_topic}\n"
+            # A real bug found by a fresh-eyes sweep: only "the file
+            # doesn't exist yet" was special-cased -- a file that
+            # EXISTS but is empty (0 bytes) fell straight through to
+            # `existing.splitlines()[0]`, and `"".splitlines()` is `[]`,
+            # not `[""]`, so indexing `[0]` raised a raw, uncaught
+            # `IndexError` before `atomic_write_text` was ever reached,
+            # silently losing the write. Not a contrived state: this
+            # store's own docstring calls these files "human-readable
+            # ... a person can open in any editor and read or hand-edit
+            # directly," so a user clearing a note file's contents (or
+            # any external process leaving it empty) is ordinary use,
+            # not adversarial -- confirmed live before this fix.
+            # `NoteTool.run()` only catches `LongTermMemoryError`, so
+            # this leaked past its own documented "reject, don't guess"
+            # discipline every sibling case here already follows
+            # correctly, saved only by `AgentLoop.run_one()`'s
+            # incidental broad `except Exception` one layer up, which
+            # any other/future direct caller wouldn't have. Fixed by
+            # treating an existing-but-blank file the same as
+            # "doesn't exist yet" for heading purposes: there's no real
+            # original topic left to compare against or preserve, so
+            # the file is reseeded with a fresh `# Topic` heading
+            # exactly like a brand-new file gets, rather than crashing.
+            if not existing.strip():
+                existing = f"# {stripped_topic}\n"
+                file_exists = False
             original_topic = existing.splitlines()[0].removeprefix("#").strip()
             timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
             heading = (

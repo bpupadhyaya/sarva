@@ -17391,3 +17391,63 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A file that exists but is empty crashed `LongTermMemoryStore.write()` with a raw `IndexError`, silently losing the note
+
+Round 129. Found back in `core/sarva/memory/longterm.py`'s `write()` --
+a gap in the read-existing-content step nobody had special-cased
+before: `path.is_file()` only distinguishes "no file yet" from "a file
+is there," saying nothing about whether that file actually has any
+content. A topic `.md` file that exists on disk but is 0 bytes fell
+straight through to `existing.splitlines()[0]` -- and `"".splitlines()`
+returns `[]`, not `[""]`, so indexing `[0]` raised a raw, uncaught
+`IndexError` before `atomic_write_text` was ever reached, silently
+losing the write rather than merely delaying it.
+
+Not a contrived state: this store's own docstring calls its files
+"human-readable ... a person can open in any editor and read or
+hand-edit directly" -- a user (or any external process) clearing a
+note file's contents is ordinary use of the exact feature this tier is
+built around, not adversarial input. `NoteTool.run()` only catches
+`LongTermMemoryError`, so this leaked straight past the "reject, don't
+guess" discipline every sibling case in `write()` already follows
+correctly, saved from crashing a live `sarva serve` process only by
+`AgentLoop.run_one()`'s own incidental broad `except Exception` one
+layer up -- a safety net no other/future direct caller of this store
+would have.
+
+**Confirmed live**: a note written, then its file truncated to 0
+bytes, then written to again, reliably raised `IndexError: list index
+out of range` inside `write()`.
+
+**Fixed** by treating an existing-but-blank file the same as "doesn't
+exist yet" for heading purposes -- there's no real original topic left
+to compare against or preserve, so the file is reseeded with a fresh
+`# Topic` heading exactly like a brand-new file gets, rather than
+crashing.
+
+**Verified live**: the identical repro now succeeds, producing a
+correctly re-seeded file with the new entry appended.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `IndexError: list index out of range` at
+the same line.
+
+**1 new test, 816 -> 817 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md`'s long-term-memory
+chapter gained a new subsection, directly after the singleton-race fix,
+in the same ongoing per-bug narrative this module has accumulated
+across many prior rounds.
+
+**Eighty-four of the last eighty-five rounds (46-67, 70-129) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
