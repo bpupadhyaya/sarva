@@ -726,6 +726,71 @@ async def test_video_degrade_survives_a_native_decoder_crash_not_just_a_python_e
     assert isinstance(out[0], TextBlock)
 
 
+def test_video_worker_writes_the_nan_duration_sentinel_for_a_negative_container_duration(
+    monkeypatch,
+):
+    # A real bug found by a fresh-eyes sweep: `_run()`'s sampling branch
+    # (`if not duration_s or duration_s <= 0:`) already treats a NEGATIVE
+    # duration_s the same as None/0 -- "no known duration" -- but the
+    # write-back below only substituted the NaN sentinel when duration_s
+    # was exactly None, so a negative value (a real, non-null float
+    # straight from a lightly-corrupted container's metadata -- exactly
+    # the "corrupted metadata, still-decodable frames" threat model this
+    # whole worker exists to defend against, see this module's own
+    # docstring) sailed through unmodified into the field this module's
+    # own docstring promises is "NaN if no known duration," surfacing all
+    # the way to the user/model as a nonsensical "-5.0s" instead of
+    # "unknown duration." Confirmed live before this fix with the exact
+    # fake container below. Fixed by normalizing duration_s to None
+    # inside that same branch, so the write-back matches the branch's own
+    # sampling decision.
+    import sarva.multimodal.degraders._video_worker as worker_module
+
+    class _FakeFrame:
+        def __init__(self, pts):
+            self.pts = pts
+
+        def to_image(self):
+            return Image.new("RGB", (2, 2))
+
+    class _FakeStream:
+        duration = -5.0
+        time_base = 1
+
+    class _FakeStreams(list):
+        video = property(lambda self: self)
+
+    class _FakeContainer:
+        def __init__(self, stream):
+            self.streams = _FakeStreams([stream])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def seek(self, *args, **kwargs):
+            pass
+
+        def decode(self, stream):
+            yield _FakeFrame(pts=0)
+
+    fake_stream = _FakeStream()
+    monkeypatch.setattr(worker_module.av, "open", lambda *a, **k: _FakeContainer(fake_stream))
+
+    fake_stdout = io.BytesIO()
+    monkeypatch.setattr(worker_module.sys, "stdout", type("S", (), {"buffer": fake_stdout})())
+
+    returncode = worker_module._run(b"irrelevant -- av.open is faked")
+
+    assert returncode == 0
+    (duration_raw,) = struct.unpack(">d", fake_stdout.getvalue()[:8])
+    assert duration_raw != duration_raw, (  # NaN check -- NaN is the only float that != itself
+        f"expected the NaN 'unknown duration' sentinel, got a real value: {duration_raw}"
+    )
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="resource.getrusage (RSS measurement) is POSIX-only",

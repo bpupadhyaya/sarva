@@ -17572,3 +17572,63 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The video worker's sampling logic already treated a negative duration as "unknown" -- but the output write-back never got the memo, leaking a bogus negative duration to the user
+
+Round 132. Found in `core/sarva/multimodal/degraders/_video_worker.py`'s
+`_run()`: the sampling branch (`if not duration_s or duration_s <= 0:`)
+already treats a NEGATIVE `duration_s` -- not just `None` or `0` -- as
+"no known duration" for deciding how to sample frames. But the output
+write-back at the end only substituted the NaN "unknown duration"
+sentinel when `duration_s` was exactly `None`, so a negative value (a
+real, non-null float straight from a lightly-corrupted container's
+`duration` field) sailed through unmodified into the 8-byte duration
+field this module's own docstring promises is "NaN if no known
+duration."
+
+Downstream, `video.py`'s `_sample_frames()` only converts the field
+back to `None` when it's actually NaN, so the negative value survives
+all the way to the final user/model-facing text: `f"{duration_s:.1f}s"`
+produces `"-5.0s"` instead of `"unknown duration"`.
+
+Not contrived: `stream.duration` comes straight from the container's
+parsed metadata, an `int64_t` field FFmpeg doesn't sign-validate when
+lightly-corrupted atoms are still otherwise decodable -- exactly the
+"corrupted metadata, still-decodable frames" threat model this whole
+worker exists to defend against (see its own SIGBUS-fuzzing docstring).
+The mirror image of an earlier, already-fixed `AudioToTextDegrader`
+bug: there, a genuinely known zero duration got wrongly reported as
+unknown; here, a genuinely unknown duration gets wrongly reported as a
+bogus known (and negative) one.
+
+**Confirmed live**: calling `_run()` directly against a faked container
+whose stream reports `duration=-5.0` wrote the literal `-5.0` into the
+duration field instead of NaN; replayed through `video.py`'s own
+parsing/formatting logic, the final text read `"-5.0s"`.
+
+**Fixed** by normalizing `duration_s` to `None` inside the same branch
+that already decided "no known duration" for sampling purposes, so the
+write-back matches that decision exactly.
+
+**Verified live**: the identical repro now writes the NaN sentinel.
+
+**Verified by reverting** and watching the new test fail with the
+literal old value: `-5.0` where NaN was expected.
+
+**1 new test, 819 -> 820 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/multimodal.md` gained a new
+paragraph in the video-degrader's own ongoing per-bug narrative,
+directly after the memory-exhaustion fix.
+
+**Eighty-seven of the last eighty-eight rounds (46-67, 70-132) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

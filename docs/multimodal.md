@@ -185,6 +185,30 @@ uses) against a real 3000-frame synthetic video: the reverted, old
 list-based code measured ~549 MB peak RSS for that file; the new code
 stays comfortably under 200 MB.
 
+**A third real bug in the same worker, found much later by a
+fresh-eyes sweep: a negative duration slipped past the NaN sentinel
+this module's own docstring promises.** `_run()`'s sampling branch
+(`if not duration_s or duration_s <= 0:`) already treats a negative
+`duration_s` — not just `None` or `0` — as "no known duration" for
+sampling purposes, but the output write-back only substituted the NaN
+sentinel when `duration_s` was exactly `None`. A negative value (a
+real, non-null float straight from a lightly-corrupted container's
+`duration` field — precisely the "corrupted metadata, still-decodable
+frames" threat model this whole worker exists to defend against, per
+the SIGBUS bug above) sailed through unmodified into the field this
+module's own docstring calls "NaN if no known duration," surfacing all
+the way to the user/model as a nonsensical `"-5.0s"` instead of
+`"unknown duration"` — the mirror image of an earlier, already-fixed
+bug in `AudioToTextDegrader` (an `or`-fallback reporting a genuinely
+known zero duration as unknown; here a genuinely unknown duration
+reports as a bogus known one). Confirmed live with a faked container
+whose stream reports `duration=-5.0`: the worker wrote the literal
+`-5.0` into the duration field instead of NaN. Fixed by normalizing
+`duration_s` to `None` inside that same branch, so the write-back
+matches the branch's own sampling decision exactly. Verified by
+reverting and watching the new test fail with the literal old value:
+`-5.0` where NaN was expected.
+
 `default_degraders()` wires all three into every real `AgentLoop` call
 site (CLI, server) — but degradation itself is opt-in at the loop level
 (`AgentLoop(degraders=...)`), not automatic: without it, a conversation

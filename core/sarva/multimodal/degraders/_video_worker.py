@@ -113,6 +113,22 @@ def _run(raw: bytes) -> int:
                 # spaced timestamps, so just take whatever the first
                 # decoded frame is (still bounded: at most one GOP's
                 # worth of frames scanned, via the same helper).
+                #
+                # A real bug found by a fresh-eyes sweep: this branch
+                # already treats a NEGATIVE duration_s (not just None/0)
+                # as "no known duration" for sampling purposes -- but the
+                # write-back below only substituted the NaN sentinel when
+                # duration_s was exactly None, so a negative value (a
+                # real, non-null float straight from a lightly-corrupted
+                # container's metadata -- exactly the "corrupted metadata,
+                # still-decodable frames" threat model this whole worker
+                # exists to defend against) sailed through unmodified into
+                # the duration field this module's own docstring promises
+                # is "NaN if no known duration," surfacing all the way to
+                # the user/model as a nonsensical "-5.0s" instead of
+                # "unknown duration." Normalized here so the write-back
+                # matches this branch's own sampling decision exactly.
+                duration_s = None
                 frame = _sample_near(container, stream, 0)
                 sampled = [frame] if frame is not None else []
             else:
