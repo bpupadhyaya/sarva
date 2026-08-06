@@ -109,6 +109,34 @@ checkpoint bundle's `config.json` write in `sarva.providers.
 foundry_provider.save_checkpoint_bundle` had the identical unfixed bug
 and got the identical fix.
 
+**The mirrored `atomic_write_text` never actually finished mirroring
+its `core` counterpart — it was missing the one line that makes the
+rename durable.** A much later fresh-eyes sweep, checking this exact
+"mirrored, not shared" claim against the real `core` source rather than
+trusting the docstring, found `sarva_foundry.atomic_write.
+atomic_write_text` still wrote its temp file via a plain
+`Path.write_text()`, with no `os.fsync()` — while `core.sarva.
+atomic_write.atomic_write_text` (via `atomic_write_bytes`) has always
+called `fsync` before the rename. The temp-file+rename pattern already
+fixes the truncate-on-open scenario named above, but without `fsync`
+the write isn't durable against an OS-level crash or power loss (a
+laptop battery dying, a kernel panic, an unclean container shutdown —
+realistic for this project's own laptop-scale training story) between
+the write returning and the kernel actually flushing dirty pages to
+disk: the standard "rename() without fsync() can still leave a
+zero-length or garbage file after a crash" filesystem gotcha. Confirmed
+live: monkeypatching `os.fsync` to count calls showed the old version
+of `atomic_write_text` never reached it at all, while the `core`
+sibling calls it exactly once per write. Fixed by rewriting
+`atomic_write_text` to go through `os.open`/`os.fdopen` with an
+explicit `flush()` + `fsync()`, matching `core`'s `atomic_write_bytes`
+exactly — including gaining the same `mode` parameter `core`'s version
+already has, for parity, not because anything in `foundry` currently
+needs a non-default mode. Verified by reverting and watching both new
+tests fail with the literal old bug's own shape: zero `fsync` calls,
+and a `TypeError` for the `mode` keyword that didn't exist yet. 2 new
+tests, 857 → 859 Python tests.
+
 ## The learning-rate schedule: warmup, then cosine decay
 
 `WarmupCosineSchedule` replaces what was originally a flat learning

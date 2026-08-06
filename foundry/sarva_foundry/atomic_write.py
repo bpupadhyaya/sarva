@@ -63,8 +63,34 @@ def atomic_write(path: Path, write_fn: Callable[[Path], None]) -> None:
         raise
 
 
-def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8", mode: int = 0o644) -> None:
+    """A real, checked gap found by a fresh-eyes sweep, against this
+    module's own docstring claim of mirroring `sarva.atomic_write`:
+    that sibling's `atomic_write_text` writes through `atomic_write_bytes`,
+    which `os.fsync()`s the temp file's contents before `atomic_write()`
+    renames it into place -- this one used a plain `Path.write_text()`
+    with no `fsync` at all. The temp-file+rename pattern already fixes
+    the truncate-on-open scenario this module's own docstring names, but
+    without `fsync`, the write is not durable against an OS-level
+    crash/power loss (a laptop battery dying, a kernel panic, an
+    unclean container shutdown -- all realistic for this project's own
+    laptop-scale training story) between `write_text()` returning and
+    the kernel actually flushing dirty pages to disk: the well-known
+    "rename() without fsync() before it can still leave a zero-length
+    or garbage file after a crash" filesystem gotcha, exactly why the
+    `core` sibling this module claims to mirror already calls it.
+    Confirmed live: monkeypatching `os.fsync` to count calls showed the
+    old version never reached it at all. Fixed by writing through
+    `os.open`/`os.fdopen` with an explicit `flush()` + `fsync()`,
+    matching `sarva.atomic_write.atomic_write_bytes` exactly (including
+    the `mode` parameter, for the same reason that sibling has one --
+    anything holding sensitive data can pass a tighter mode)."""
+
     def _write(tmp_path: Path) -> None:
-        tmp_path.write_text(content, encoding=encoding)
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
 
     atomic_write(path, _write)

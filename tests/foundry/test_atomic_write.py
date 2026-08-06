@@ -19,6 +19,40 @@ def test_atomic_write_text_writes_the_content(tmp_path):
     assert path.read_text() == '{"merges": []}'
 
 
+def test_atomic_write_text_fsyncs_before_replacing(tmp_path, monkeypatch):
+    # A real, checked gap found by a fresh-eyes sweep, against this
+    # module's own docstring claim of mirroring sarva.atomic_write: that
+    # sibling's atomic_write_text calls os.fsync() on the temp file
+    # before the rename; this one used a plain Path.write_text() with no
+    # fsync at all, so the write was not durable against an OS-level
+    # crash/power loss between write_text() returning and the kernel
+    # actually flushing dirty pages to disk. Confirmed live before the
+    # fix: monkeypatching os.fsync to count calls showed zero calls for
+    # a real atomic_write_text write.
+    calls = []
+    real_fsync = os_module.fsync
+
+    def spy_fsync(fd):
+        calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os_module, "fsync", spy_fsync)
+
+    path = tmp_path / "tokenizer.json"
+    atomic_write_text(path, '{"merges": []}')
+
+    assert len(calls) == 1
+    assert path.read_text() == '{"merges": []}'
+
+
+def test_atomic_write_text_uses_the_requested_mode(tmp_path):
+    import stat
+
+    path = tmp_path / "secret.json"
+    atomic_write_text(path, '{"k": "v"}', mode=0o600)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_atomic_write_cleans_up_the_tmp_file_if_write_fn_raises(tmp_path):
     # Mirrors the identical fix in sarva.atomic_write -- see that
     # module's own test for the live-confirmed leak: a write_fn failure

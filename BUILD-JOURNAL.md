@@ -19466,3 +19466,70 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `sarva_foundry.atomic_write.atomic_write_text` never finished mirroring its `core` counterpart — missing the one line that makes the rename durable
+
+Round 162. This round's sweep checked `foundry/sarva_foundry/
+atomic_write.py`'s own docstring claim -- "the `sarva.atomic_write`
+helper, mirrored here" -- against the real `core/sarva/atomic_write.py`
+source rather than trusting it, and found the mirror was incomplete:
+`atomic_write_text` still wrote its temp file via a plain
+`Path.write_text()`, with no `os.fsync()`, while `core`'s
+`atomic_write_text` (via `atomic_write_bytes`) has always called
+`fsync` on the temp file before the rename.
+
+The temp-file+rename pattern this module's own docstring already
+credits itself for already fixes the truncate-on-open scenario named
+there (a crash between `open()` and the write completing destroying a
+previously-trained, real tokenizer). But without `fsync`, the write is
+not durable against an OS-level crash or power loss -- a laptop battery
+dying, a kernel panic, an unclean container shutdown, all realistic for
+this project's own laptop-scale training story -- between the write
+returning and the kernel actually flushing dirty pages to disk: the
+well-known "rename() without fsync() can still leave a zero-length or
+garbage file after a crash" filesystem gotcha, exactly why `core`'s
+sibling already calls it.
+
+**Confirmed live**: monkeypatching `os.fsync` to count calls showed the
+old `atomic_write_text` never reached it at all -- zero calls for a
+real write -- while `core`'s version calls it exactly once per write, a
+direct, live-confirmed asymmetry between two functions with the
+identical name and identical documented purpose.
+
+**Fixed** by rewriting `atomic_write_text` to go through
+`os.open`/`os.fdopen` with an explicit `flush()` + `fsync()`, matching
+`core`'s `atomic_write_bytes` exactly -- including gaining the same
+`mode` parameter `core`'s version already has, for parity.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: zero `fsync` calls where one was expected,
+and a `TypeError` for the `mode` keyword that didn't exist yet.
+
+**2 new tests, 857 -> 859 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/training.md` gained a
+new paragraph directly after the existing atomic-write-for-checkpoints
+narrative -- this bug sits squarely inside that existing durability
+story, not the foundry-internals-only config-validation precedent
+(rounds 133-140/161), which doesn't apply here.
+
+**One hundred seventeen of the last one hundred eighteen rounds
+(46-67, 70-162) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** The sweep's own guidance this round --
+"consider whether other config dataclasses have similarly incomplete
+validation" -- generalized past config dataclasses specifically: the
+same "a docstring claims parity with a sibling module; check the
+sibling's actual source, not the claim" lens found this gap in a
+helper function, not a config class. Worth remembering as its own
+reusable lens going forward, not narrowly scoped to `__post_init__`
+validation. The already-known `bpe.py` duplicate-`special_tokens`
+off-by-one remains unreachable -- no caller in the repo passes
+duplicates.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
