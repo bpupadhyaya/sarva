@@ -358,11 +358,18 @@ async def test_wired_into_degrade_message_end_to_end():
 # ---------- AudioToTextDegrader ----------
 
 
-async def test_audio_degrade_decodes_real_wav_duration_from_bytes():
+async def test_audio_degrade_decodes_real_wav_duration_from_bytes(monkeypatch):
     # Unlike the image degrader (which always decodes via Pillow), this
     # is the one format AudioToTextDegrader *can* genuinely decode --
     # proves it actually reads the bytes rather than only ever trusting
-    # declared metadata.
+    # declared metadata. Forces the metadata-fallback path explicitly
+    # (rather than depending on whether sarva[audio] happens to be
+    # installed) -- this test means to check duration decoding, not
+    # transcription.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module, "stt_extra_installed", lambda: False)
+
     raw = _wav_bytes(duration_s=2.5, framerate=8000)
     block = AudioBlock(media_type="audio/wav", data=raw)
 
@@ -392,7 +399,7 @@ async def test_audio_degrade_reports_unknown_duration_when_nothing_is_knowable()
     assert "unknown duration" in out[0].text
 
 
-async def test_audio_degrade_reports_a_real_zero_duration_instead_of_unknown():
+async def test_audio_degrade_reports_a_real_zero_duration_instead_of_unknown(monkeypatch):
     # A real bug found by a fresh-eyes sweep: the old code combined the
     # decoded duration with `block.duration_s` using `or`, a truthiness
     # fallback rather than a None-check. `_decode_wav_duration` returns
@@ -403,6 +410,12 @@ async def test_audio_degrade_reports_a_real_zero_duration_instead_of_unknown():
     # discarded the correctly-decoded `0.0` and fell through to
     # `block.duration_s` (None here) instead, wrongly reporting
     # "unknown duration" for a duration that genuinely WAS known: zero.
+    # Forces the metadata-fallback path explicitly -- this test means to
+    # check duration decoding, not transcription.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module, "stt_extra_installed", lambda: False)
+
     raw = _wav_bytes(duration_s=0.0)
     block = AudioBlock(media_type="audio/wav", data=raw, duration_s=None)
 
@@ -412,10 +425,16 @@ async def test_audio_degrade_reports_a_real_zero_duration_instead_of_unknown():
     assert "unknown duration" not in out[0].text
 
 
-async def test_audio_degrade_prefers_real_zero_duration_over_a_stale_declared_one():
+async def test_audio_degrade_prefers_real_zero_duration_over_a_stale_declared_one(monkeypatch):
     # Same bug, other side of the same `or`: a stale/wrong caller-supplied
     # `block.duration_s` (nonzero, so truthy) used to silently win over
     # the correctly-decoded real `0.0` from the WAV bytes themselves.
+    # Forces the metadata-fallback path explicitly -- this test means to
+    # check duration decoding, not transcription.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module, "stt_extra_installed", lambda: False)
+
     raw = _wav_bytes(duration_s=0.0)
     block = AudioBlock(media_type="audio/wav", data=raw, duration_s=42.0)
 
@@ -425,11 +444,40 @@ async def test_audio_degrade_prefers_real_zero_duration_over_a_stale_declared_on
     assert "42.0s" not in out[0].text
 
 
-async def test_audio_degrade_does_not_fabricate_content():
+async def test_audio_degrade_does_not_fabricate_content(monkeypatch):
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module, "stt_extra_installed", lambda: False)
+
     raw = _wav_bytes(duration_s=1.0)
     block = AudioBlock(media_type="audio/wav", data=raw)
     out = await AudioToTextDegrader().degrade(block)
     assert "could not be transcribed" in out[0].text
+
+
+async def test_audio_degrade_reports_a_real_empty_transcript_instead_of_a_false_failure(
+    monkeypatch,
+):
+    # A real bug found by the same truthiness lens that had already found
+    # `duration_s or ...` a few lines below this: `if text:` treated a
+    # legitimate, successful-but-empty transcription (silence, a blank/
+    # near-instant voice memo, ambient noise -- `transcribe()`'s own
+    # documented behavior when faster-whisper finds no speech segments)
+    # identically to a genuine transcription exception. Confirmed live:
+    # patching `transcribe` to return `""` for a valid WAV produced the
+    # false "could not be transcribed" message even though transcription
+    # was attempted and succeeded.
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(audio_module, "stt_extra_installed", lambda: True)
+    monkeypatch.setattr(audio_module, "transcribe", lambda raw: "")
+
+    raw = _wav_bytes(duration_s=1.0)
+    block = AudioBlock(media_type="audio/wav", data=raw)
+    out = await AudioToTextDegrader().degrade(block)
+
+    assert "could not be transcribed" not in out[0].text
+    assert "found no speech" in out[0].text
 
 
 @pytest.mark.skipif(

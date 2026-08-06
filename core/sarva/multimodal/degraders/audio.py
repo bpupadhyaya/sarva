@@ -79,12 +79,34 @@ class AudioToTextDegrader:
             # process would freeze too for as long as this one
             # transcription takes -- up to this module's own 10-minute
             # cap for a long attachment, not milliseconds.
+            #
+            # A second real bug found immediately after fixing the one
+            # above, by the same "or"/truthiness lens applied one branch
+            # up: `if text:` is a truthiness check, not an
+            # exception-vs-success check. `transcribe()` legitimately
+            # returns `""` whenever faster-whisper finds no speech
+            # segments at all -- silence, a blank/near-instant voice
+            # memo, ambient noise, a music clip -- a *successful*
+            # transcription that correctly found nothing to say, not a
+            # failure. `if text:` sent that down the exact same path as
+            # a genuine transcription exception, so the message claimed
+            # "could not be transcribed" even though transcription was
+            # attempted and succeeded. Confirmed live: patching
+            # `transcribe` to return `""` (simulating a real successful-
+            # but-silent transcription) for a valid WAV produced the
+            # false "could not be transcribed" message. Fixed by keying
+            # off whether `transcribe()` raised (`try`/`else`), not off
+            # the returned text's truthiness, and giving the genuinely-
+            # empty case its own honest message instead of collapsing it
+            # into the "couldn't transcribe at all" one.
             try:
                 text = await asyncio.to_thread(transcribe, raw)
-                if text:
-                    return [TextBlock(text=f"[Audio transcript: {text}]")]
             except Exception:
                 pass
+            else:
+                if text:
+                    return [TextBlock(text=f"[Audio transcript: {text}]")]
+                return [TextBlock(text="[Audio attached: transcription found no speech]")]
 
         # A real bug found by a fresh-eyes sweep: `or` is a truthiness
         # fallback, not a None-check -- `_decode_wav_duration` returns a

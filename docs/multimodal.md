@@ -434,6 +434,62 @@ the exact old bug's own shape — `"unknown duration"` and `"42.0s"`
 respectively, instead of the correct `"0.0s"`. 2 new tests, 780 → 782
 Python tests.
 
+### A successful-but-empty transcription was reported as a transcription failure — the same truthiness shape, one branch up
+
+A later fresh-eyes sweep found a third bug in the same method, one
+branch above the duration fix: `if text: return [TextBlock(text=f"[Audio
+transcript: {text}]")]` inside the `try` around `transcribe()`. `sarva.
+audio.transcribe()` legitimately returns `""` whenever faster-whisper
+finds no speech segments at all — silence, a blank or near-instant
+voice memo, ambient noise, a music clip — a *successful* transcription
+that correctly found nothing to say, not a failure. `if text:` sent
+that down the exact same path as a genuine transcription exception, so
+the degrader's output claimed *"the current model does not support
+audio input, so its content could not be transcribed"* even though
+transcription was attempted and succeeded. The identical "truthiness
+treats a legitimate empty/zero value as absent/failed" shape as the
+duration bug directly above, and as two other fixes elsewhere in this
+project (`_decode_audio_isolated`'s stdout check, `sarva.config.
+get_env()`'s env-var check) — reintroduced, unnoticed, one branch up in
+this same method.
+
+It's also the direct downstream continuation of the audio-decode
+isolation fix (see the packaging doc's own per-bug narrative for
+`_decode_audio_isolated`): that fix made a real zero-frame WAV decode
+*successfully* to an empty sample array, so `transcribe()` correctly
+returns `""` for it — but this `if text:` check still misreported that
+as failure, undoing the user-facing benefit of that earlier fix for
+the exact scenario it was meant to help.
+
+Confirmed live: patching `transcribe` to return `""` (simulating a
+real successful-but-silent transcription) for a valid WAV produced the
+false "could not be transcribed" message.
+
+Fixed by keying the branch off whether `transcribe()` raised
+(`try`/`else`), not off the returned text's truthiness, and giving the
+genuinely-empty case its own honest message — `"[Audio attached:
+transcription found no speech]"` — instead of collapsing it into the
+same message as "couldn't transcribe at all." Verified by reverting and
+watching the new test fail with the exact old bug's own shape: the
+false "could not be transcribed" message for a transcription that
+actually succeeded.
+
+**A quieter, pre-existing gap this also surfaced:** four existing tests
+for the duration-decoding fallback path never forced `stt_extra_
+installed()` to `False`, so on a machine with `sarva[audio]` installed
+they were incidentally relying on real `transcribe()` returning `""`
+for their synthetic tone/silence WAVs and the *old* buggy `if text:`
+falling through to the metadata path by accident — an unintentional
+coupling between two independent code paths, invisible until this fix
+made the empty-transcription branch behave differently on purpose.
+Fixed by having those four tests explicitly monkeypatch `stt_extra_
+installed` to `False`, matching the pattern already used by `test_
+audio_wired_into_degrade_message_end_to_end` for the same reason: they
+mean to test duration decoding, not transcription, and should pass
+identically regardless of whether the audio extra happens to be
+installed in the environment running them. 1 new test, 852 → 853
+Python tests.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

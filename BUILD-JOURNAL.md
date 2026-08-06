@@ -19237,3 +19237,90 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `AudioToTextDegrader.degrade()` reported a successful-but-empty transcription as a transcription failure — the same truthiness shape, one branch up
+
+Round 159. This round's sweep found `core/sarva/multimodal/degraders/
+audio.py`'s `AudioToTextDegrader.degrade()`: `if text: return
+[TextBlock(text=f"[Audio transcript: {text}]")]` inside the `try`
+around `transcribe()`. `sarva.audio.transcribe()` legitimately returns
+`""` whenever faster-whisper finds no speech segments at all -- silence,
+a blank or near-instant voice memo, ambient noise, a music clip -- a
+*successful* transcription that correctly found nothing to say, not a
+failure. `if text:` sent that down the exact same path as a genuine
+transcription exception, so the degrader's output claimed the model
+"does not support audio input, so its content could not be
+transcribed" even though transcription was attempted and succeeded.
+
+The identical "truthiness treats a legitimate empty/zero value as
+absent/failed" shape already fixed three times in this project
+(`_decode_audio_isolated`'s stdout check, round 157;
+`sarva.config.get_env()`'s env-var check, round 158; and this same
+method's own `duration_s or ...` fix a few lines below this one,
+earlier) -- reintroduced, unnoticed, one branch up in the same method.
+It's also the direct downstream continuation of round 157's own fix:
+that fix made a real zero-frame WAV decode *successfully* to an empty
+sample array, so `transcribe()` correctly returns `""` for it -- but
+this `if text:` check still misreported that as failure, undoing the
+user-facing benefit of round 157's fix for the exact scenario it was
+meant to help.
+
+**Confirmed live**: patching `transcribe` to return `""` (simulating a
+real successful-but-silent transcription) for a valid WAV produced the
+false "could not be transcribed" message.
+
+**Fixed** by keying the branch off whether `transcribe()` raised
+(`try`/`else`), not off the returned text's truthiness, and giving the
+genuinely-empty case its own honest message -- "[Audio attached:
+transcription found no speech]" -- instead of collapsing it into the
+same message as "couldn't transcribe at all."
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: the false "could not be transcribed"
+message for a transcription that actually succeeded.
+
+**A quieter, pre-existing gap this also surfaced**: four existing tests
+for the duration-decoding fallback path never forced `stt_extra_
+installed()` to `False`, so on a machine with `sarva[audio]` installed
+they were incidentally relying on real `transcribe()` returning `""`
+for their synthetic tone/silence WAVs and the *old* buggy `if text:`
+falling through to the metadata path by accident -- invisible until
+this fix made the empty-transcription branch behave differently on
+purpose. Fixed by having those four tests explicitly monkeypatch
+`stt_extra_installed` to `False`, matching the pattern already used by
+`test_audio_wired_into_degrade_message_end_to_end` for the same
+reason.
+
+**1 new test, 852 -> 853 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/multimodal.md` gained a new
+subsection directly after the zero-duration fix, in the same
+`AudioToTextDegrader` per-bug narrative.
+
+**One hundred fourteen of the last one hundred fifteen rounds (46-67,
+70-159) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** The "truthiness treats a legitimate
+empty/zero value as absent/failed" lens has now found four real bugs
+across three unrelated subsystems (audio decode, audio transcription,
+config) -- still worth a direct grep for other `not <value>`/`if
+<value>:`/`<value> or <fallback>` checks anywhere a legitimately-empty
+or -zero real value could be silently confused with "missing."
+
+**A secondary lead surfaced by this round's sweep, deferred**: a
+latent bug in `foundry/sarva_foundry/tokenizer/bpe.py`'s
+`ByteLevelBPETokenizer.train()` -- a duplicate entry in `special_
+tokens` causes the id-assignment loop to skip a slot, producing a
+token id equal to `vocab_size` itself (one past the valid range),
+which raises `IndexError` when used to index an embedding table sized
+via `tokenizer.vocab_size`. Real and reproducible, but no current
+caller in this repo ever passes duplicate special tokens, so it's a
+real latent bug rather than one currently reachable through this
+project's own exercised code paths -- worth a follow-up round.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
