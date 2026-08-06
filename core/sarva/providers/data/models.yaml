@@ -101,13 +101,32 @@ models:
       # (a real DocumentToTextDegrader already exists, just not yet
       # wired to a CLI flag) so it's removed for the same reason,
       # proactively, before it ships a flag and reproduces the same
-      # bug. `audio`/`video` are NOT part of this bug class and stay:
-      # routing.yaml's `audio` chain is `[mock]` alone, with no real
-      # model ahead of it to preempt -- mock resolving audio isn't
-      # defeating a better available path, it's the last-resort,
-      # zero-config guarantee routing.yaml's own header comment
-      # promises, working exactly as intended.
-      modalities_in: [text, audio, video]
+      # bug.
+      #
+      # A much later fresh-eyes sweep found the reasoning that used to
+      # sit right here -- "audio/video are NOT part of this bug class,
+      # routing.yaml's audio chain is [mock] alone" -- only ever
+      # considered the dedicated `audio`/`vision` TaskClass routing
+      # chains, never the fact that mock is ALSO listed in `main`'s
+      # chain, the ONE chain AgentLoop actually consults for every real
+      # message (`self._task_class` defaults to `TaskClass.MAIN` and is
+      # only ever overridden to `SUBTASK` for delegated/verify subtasks
+      # -- confirmed live, nothing anywhere ever passes
+      # `TaskClass.AUDIO`/`TaskClass.VISION` outside two test call
+      # sites). So the identical bug this comment already fixed for
+      # image/document was still live for audio/video, just one layer
+      # removed: `Router.pick(MAIN, needs={TEXT, AUDIO})` resolved
+      # straight to mock instead of raising LookupError, silently
+      # defeating AgentLoop's degradation-fallback branch -- which would
+      # otherwise invoke the fully-built, wired-by-default
+      # AudioToTextDegrader/VideoToTextDegrader (see
+      # sarva.multimodal.degraders.default_degraders). Confirmed live: a
+      # real AgentLoop.run(..., extra_content=[AudioBlock(...)]) against
+      # the real shipped registry (only "mock" available) completed with
+      # state=DONE and mock's fake echoed text, the real audio silently
+      # discarded, zero calls to AudioToTextDegrader.degrade(). Removed
+      # for the same reason image/document were.
+      modalities_in: [text]
       modalities_out: [text]
       tool_use: true
       thinking: true

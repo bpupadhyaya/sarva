@@ -19885,3 +19885,81 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `mock`'s registry entry still falsely claimed audio/video support — the identical bug already fixed for image/document, exempted by reasoning that only ever considered a routing chain nothing real uses
+
+Round 168. An earlier round fixed `mock`'s registry entry
+(`core/sarva/providers/data/models.yaml`) falsely claiming `image`/
+`document` support, which let `Router.pick(MAIN, needs={TEXT, IMAGE})`
+resolve straight to `mock` instead of raising the `LookupError` that's
+the *only* thing that triggers `AgentLoop`'s degradation-fallback
+branch. That fix's own comment explicitly exempted `audio`/`video`:
+"routing.yaml's `audio` chain is `[mock]` alone, with no real model
+ahead of it to preempt."
+
+This round's sweep found that exemption's own reasoning was incomplete:
+it only ever considered the *dedicated* `TaskClass.AUDIO`/`VISION`
+routing chains in isolation, never the fact that `mock` is *also*
+listed in `main`'s own chain -- the *one* chain `AgentLoop` actually
+consults for every real message. `AgentLoop._task_class` defaults to
+`TaskClass.MAIN` and is only ever overridden to `SUBTASK` for delegated/
+verify subtasks; nothing anywhere ever passes `TaskClass.AUDIO`/
+`TaskClass.VISION` outside two test call sites. So the identical bug
+already fixed for image/document was still fully live for audio/video,
+one modality later: `Router.pick(MAIN, needs={TEXT, AUDIO})` resolved
+straight to `mock` instead of raising `LookupError`, silently defeating
+`AgentLoop`'s entire degradation-fallback branch for a real, wired-by-
+default `AudioToTextDegrader`/`VideoToTextDegrader` (see `sarva.
+multimodal.degraders.default_degraders`).
+
+**Confirmed live**: a real `AgentLoop.run(..., extra_content=[
+AudioBlock(...)])` against the real shipped registry (only `mock`
+available) completed with `state=DONE` and `mock`'s fake echoed text,
+the real audio silently discarded, zero calls to `AudioToTextDegrader.
+degrade()`.
+
+**A genuine wrinkle this fix had to reconcile**: an existing test,
+`test_router_pick_resolves_audio_with_zero_config`, had encoded the
+flawed exemption's own premise as its literal assertion -- that
+`TaskClass.AUDIO` must resolve to `mock` with zero config, framed at
+the time as its own "zero-config guarantee" fix. Since `TaskClass.
+AUDIO`/`VISION` are dead routing paths in production (no real caller
+ever uses them), keeping `mock`'s false audio/video claim just to
+satisfy that isolated chain directly reintroduced the more consequential
+bug on the chain that actually matters. Rewrote that test to assert the
+opposite -- `LookupError` for `TaskClass.AUDIO`'s own dead chain and for
+`TaskClass.MAIN` with an audio/video need -- matching the sibling image
+invariant test right next to it.
+
+**Fixed** by removing `audio`/`video` from `mock`'s `modalities_in` in
+`models.yaml`, mirroring the image/document fix exactly.
+
+**Verified by reverting** and watching three tests fail with the literal
+old bug's own shape: two new `AgentLoop`-level tests (audio and video)
+came back with `mock`'s fake echoed text instead of the degrader's
+honest "could not be transcribed"/"could not be described" text, and
+the rewritten router-level test failed to raise `LookupError` at all.
+
+**2 new tests (`test_agent.py`), 1 test rewritten (`test_provider.py`),
+864 -> 866 Python tests, all passing, `ruff check`/`format --check`
+clean.** `docs/agent-loop.md` gained a new subsection directly after the
+image/document degradation-fallback narrative it directly follows up
+on.
+
+**One hundred twenty-three of the last one hundred twenty-four rounds
+(46-67, 70-168) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** A useful lesson for future sweeps: an
+"exemption" comment reasoning about why a fix doesn't need to extend to
+a sibling case is exactly the kind of claim worth re-verifying with
+fresh eyes, the same way a "this class is done" completeness claim
+already proved worth re-checking in rounds 161/166/167. The already-known
+`bpe.py`/`provenance.py` leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

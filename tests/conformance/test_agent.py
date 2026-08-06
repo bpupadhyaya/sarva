@@ -15,14 +15,18 @@ from sarva.agent.loop import AgentLoop, _required_modalities
 from sarva.agent.subagents import DelegateTool
 from sarva.agent.tools import ToolContext, always_allow
 from sarva.multimodal.content import (
+    AudioBlock,
     ImageBlock,
     Message,
     Modality,
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
+    VideoBlock,
 )
+from sarva.multimodal.degraders.audio import AudioToTextDegrader
 from sarva.multimodal.degraders.image import ImageToTextDegrader
+from sarva.multimodal.degraders.video import VideoToTextDegrader
 from sarva.providers.base import (
     DoneEvent,
     ModelCapabilities,
@@ -1074,6 +1078,61 @@ async def test_real_registry_degrades_an_image_instead_of_silently_dropping_it_v
     # and the response honestly says the image itself couldn't be seen --
     # not a confident-looking answer that silently never looked at it.
     assert "describe this photo" in echoed
+    assert "could not be described" in echoed
+
+
+@pytest.mark.asyncio
+async def test_real_registry_degrades_an_audio_attachment_instead_of_silently_dropping_it_via_mock(
+    run_root,
+):
+    # The identical bug the image test above already closed, found one
+    # modality later by a much later fresh-eyes sweep: mock's own
+    # capabilities entry ALSO (mis)declared `audio`/`video` support --
+    # the reasoning that had exempted them ("routing.yaml's own audio
+    # chain is [mock] alone") only ever considered that DEDICATED,
+    # never-actually-used TaskClass.AUDIO chain, not the fact that mock
+    # sits in `main`'s chain too, the one chain AgentLoop actually
+    # consults for every real message. Confirmed live before fixing:
+    # this exact setup completed with state=AgentState.DONE and mock's
+    # fake echoed text, the real audio silently discarded, zero calls to
+    # AudioToTextDegrader.degrade(). Fixed by removing `audio`/`video`
+    # from mock's modalities_in in models.yaml -- see its own comment.
+    provider = MockProvider()  # echo mode
+    loop = AgentLoop(
+        router=_router(),  # real models.yaml/routing.yaml; available={"mock"} only
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.AUDIO: AudioToTextDegrader()},
+    )
+    audio = AudioBlock(media_type="audio/wav", data=b"not real wav bytes")
+
+    events = [e async for e in loop.run("what's in this recording?", extra_content=[audio])]
+
+    assert events[-1].state == AgentState.DONE
+    echoed = events[-1].final_message.text()
+    assert "what's in this recording?" in echoed
+    assert "could not be transcribed" in echoed
+
+
+@pytest.mark.asyncio
+async def test_real_registry_degrades_a_video_attachment_instead_of_silently_dropping_it_via_mock(
+    run_root,
+):
+    # Same bug, the sibling VIDEO modality -- see the AUDIO test above.
+    provider = MockProvider()  # echo mode
+    loop = AgentLoop(
+        router=_router(),  # real models.yaml/routing.yaml; available={"mock"} only
+        providers={"mock": provider},
+        run_root=run_root,
+        degraders={Modality.VIDEO: VideoToTextDegrader()},
+    )
+    video = VideoBlock(media_type="video/mp4", data=b"not real mp4 bytes")
+
+    events = [e async for e in loop.run("what's in this clip?", extra_content=[video])]
+
+    assert events[-1].state == AgentState.DONE
+    echoed = events[-1].final_message.text()
+    assert "what's in this clip?" in echoed
     assert "could not be described" in echoed
 
 

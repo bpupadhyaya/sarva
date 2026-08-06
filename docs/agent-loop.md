@@ -888,6 +888,45 @@ existing tests had encoded the buggy behavior as the expectation
 and needed rewriting to use a genuinely vision-capable test model
 instead of relying on mock's now-corrected claim.
 
+### The `audio`/`video` exemption above was itself wrong — it only ever reasoned about a routing chain nothing real ever uses
+
+A much later fresh-eyes sweep re-examined the exemption right above
+this paragraph and found its own reasoning incomplete: "`routing.yaml`'s
+`audio` chain is `[mock]` alone" is true, but `TaskClass.AUDIO`/`VISION`
+are never actually passed to `Router.pick()` by any real caller —
+`AgentLoop._task_class` defaults to `TaskClass.MAIN` and is only ever
+overridden to `SUBTASK` for delegated/verify subtasks, confirmed live by
+grepping the entire codebase for `TaskClass.AUDIO`/`TaskClass.VISION`
+outside test files. So the exemption's own premise — "mock resolving
+audio isn't defeating a better available path" — never accounted for
+`mock` also sitting in `main`'s own chain, the *one* chain every real
+audio/video attachment actually routes through. The identical bug
+already fixed for `image`/`document` two paragraphs above was still
+fully live for `audio`/`video`, one modality later: `Router.pick(MAIN,
+needs={TEXT, AUDIO})` resolved straight to `mock` instead of raising
+`LookupError`, silently defeating the degradation-fallback branch for a
+real, wired-by-default `AudioToTextDegrader`/`VideoToTextDegrader` (see
+`sarva.multimodal.degraders.default_degraders`).
+
+Confirmed live using the real shipped `models.yaml`/`routing.yaml`: a
+real `AgentLoop.run(..., extra_content=[AudioBlock(...)])` against the
+real registry (only `mock` available) completed with `state=done` and
+`mock`'s fake echoed text, the real audio silently discarded — zero
+calls to `AudioToTextDegrader.degrade()`.
+
+Fixed by removing `audio`/`video` from `mock`'s `modalities_in` too,
+closing the same gap the same way. One existing test,
+`test_router_pick_resolves_audio_with_zero_config`, had encoded the
+flawed exemption's own premise as its literal assertion (`TaskClass.
+AUDIO` must resolve to `mock` with zero config) — rewritten to assert
+the opposite, `LookupError`, for both `TaskClass.AUDIO`'s own dead
+routing chain and `TaskClass.MAIN` with an audio/video need, matching
+the image invariant test right next to it. Verified by reverting and
+watching the new `AgentLoop`-level tests fail with the literal old
+bug's own shape: `mock`'s fake echoed text where the degrader's honest
+"could not be transcribed"/"could not be described" text was expected.
+2 new tests, 864 → 866 Python tests.
+
 ## Failure handling, named explicitly rather than left implicit
 
 - A provider crash (any exception escaping `provider.generate()`, not
