@@ -46,6 +46,7 @@ export interface ChatStreamHandlers {
 export class SarvaChatStream {
   private ws: WebSocket;
   private sawRunDone = false;
+  private closedByCaller = false;
 
   constructor(
     url: string,
@@ -92,7 +93,24 @@ export class SarvaChatStream {
       // real WebSocket implementation passes a real CloseEvent, but
       // this must not itself become a new way to crash if some
       // WebSocketImpl doesn't).
-      if (!this.sawRunDone) {
+      //
+      // A real bug found by a much later fresh-eyes sweep: this check
+      // never distinguished a genuinely dropped connection from the
+      // caller's OWN `close()` call -- `close()` just called
+      // `this.ws.close()` directly, which fires this exact same
+      // `onclose` handler. Confirmed live: a caller building an
+      // entirely ordinary "Stop" button (cancelling an in-progress
+      // agent turn -- ordinary UI, not a contrived scenario) that calls
+      // `stream.close()` before `run_done` arrives got a spurious
+      // `onError` firing "the turn did not complete," even though
+      // nothing actually went wrong -- the caller asked for exactly
+      // this outcome. `!this.sawRunDone` alone can't tell "the server/
+      // network failed" apart from "I chose to stop listening," even
+      // though this file's own comment above claimed the distinction
+      // was unambiguous -- it wasn't, for this one case. Fixed by also
+      // checking `!this.closedByCaller`, set by `close()` itself before
+      // it ever asks the transport to close.
+      if (!this.sawRunDone && !this.closedByCaller) {
         handlers.onError?.(
           new Error(
             `WebSocket closed before a run_done event arrived (code=${ev?.code ?? "unknown"}, ` +
@@ -112,7 +130,13 @@ export class SarvaChatStream {
     this.ws.send(JSON.stringify({ approved }));
   }
 
+  /** Closes the connection. Deliberately does NOT report an error via
+   * `onError` even if `run_done` hasn't arrived yet -- an intentional,
+   * caller-initiated close (e.g. a "Stop" button cancelling an
+   * in-progress turn) is not a failure the way a dropped connection is;
+   * see `onclose`'s own comment above for the real bug this closes. */
   close(): void {
+    this.closedByCaller = true;
     this.ws.close();
   }
 }

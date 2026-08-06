@@ -819,6 +819,31 @@ test is real: reverted the fix and watched it fail with the literal
 old bug reproducing itself, a raw `SyntaxError` instead of
 `SarvaApiError`. 1 new test, 18 → 19 TypeScript SDK tests.
 
+### The caller's own `close()` spuriously reported an error — the exact same signal a genuinely dropped connection uses
+
+`SarvaChatStream`'s `onclose` handler already closed a real gap in an
+earlier round: if the socket closes with no terminal `run_done` ever
+seen, that's surfaced as an `onError` rather than leaving the SDK's own
+documented "resolve on `run_done`" consumer pattern hanging forever.
+That fix's own reasoning called this "unambiguously an error" — but a
+much later fresh-eyes sweep found one case it wasn't: `close()` itself
+just called `this.ws.close()` directly, which fires this exact same
+`onclose` handler with no way to tell "the caller chose to stop
+listening" apart from "the connection genuinely dropped." Confirmed
+live: a caller building an entirely ordinary "Stop" button — cancelling
+an in-progress agent turn, not a contrived scenario — that calls
+`stream.close()` before `run_done` arrives got a spurious `onError`
+firing "the turn did not complete," even though nothing had actually
+gone wrong; the caller asked for exactly that outcome. Fixed with a
+`closedByCaller` flag, set by `close()` itself before it ever asks the
+transport to close, and checked alongside `sawRunDone` in `onclose`
+before deciding whether to report an error. `close()` itself gained a
+docstring explicitly stating the (previously implicit, and wrong)
+contract: an intentional close is never reported as a failure. Verified
+by reverting and watching the new test fail with the literal old bug's
+own shape — a spurious `onError` call where zero were expected. 1 new
+test, 20 → 21 TypeScript SDK tests.
+
 ### `POST /config` itself froze the whole server under lock contention — the one blocking call in this file that never got wrapped in `asyncio.to_thread`
 
 A much later fresh-eyes sweep, applying the same "does this blocking

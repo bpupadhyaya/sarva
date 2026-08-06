@@ -297,6 +297,38 @@ describe("SarvaClient.chatStream", () => {
     expect(closes).toHaveLength(1); // onClose still fires too, in addition to onError
   });
 
+  it("does NOT report an error when the caller's own close() cancels an in-progress turn", () => {
+    // A real bug found by a much later fresh-eyes sweep: close() just
+    // called this.ws.close() directly, which fires the exact same
+    // onclose handler as a genuinely dropped connection -- nothing
+    // distinguished "the caller chose to stop listening" (an entirely
+    // ordinary "Stop" button cancelling an in-progress turn) from "the
+    // server/network failed." Confirmed live before this fix: calling
+    // stream.close() before run_done arrived produced a spurious
+    // onError saying "the turn did not complete," even though nothing
+    // had gone wrong.
+    MockWebSocket.instances = [];
+    const client = new SarvaClient({
+      baseUrl: "http://example.com",
+      fetchImpl: fakeFetch(200, {}),
+      webSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    const errors: Error[] = [];
+    const closes: number[] = [];
+
+    const stream = client.chatStream(
+      { message: "hi" },
+      { onError: (e) => errors.push(e), onClose: () => closes.push(1) },
+    );
+    const ws = MockWebSocket.instances.at(-1)!;
+    ws.open();
+    ws.emit({ type: "state_changed", state: "calling_model" });
+    stream.close();
+
+    expect(errors).toHaveLength(0);
+    expect(closes).toHaveLength(1);
+  });
+
   it("does NOT report an error when the connection closes cleanly after run_done", () => {
     MockWebSocket.instances = [];
     const client = new SarvaClient({

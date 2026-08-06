@@ -20789,3 +20789,65 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `SarvaChatStream`'s caller-initiated `close()` spuriously reported an error — the exact same signal a genuinely dropped connection uses
+
+Round 181. Continuing the direct-tool-use sweep (Agent tool subagent
+budget still exhausted), this round checked `sdks/typescript/src/
+client.ts`'s `SarvaChatStream` -- the WebSocket-side counterpart to the
+REST-side fix already documented in this same chapter, and an area not
+recently swept. An earlier round's fix made `onclose` report `onError`
+whenever the socket closed with no terminal `run_done` ever seen,
+closing a real "hangs forever with zero signal" gap -- but its own
+reasoning called that "unambiguously an error," which turned out not
+to hold for one case.
+
+`close()` itself just called `this.ws.close()` directly, which fires
+the exact same `onclose` handler a genuinely dropped connection does,
+with nothing to distinguish "the caller chose to stop listening" from
+"the connection actually failed."
+
+**Confirmed live**: a caller building an entirely ordinary "Stop"
+button -- cancelling an in-progress agent turn, not a contrived
+scenario -- that calls `stream.close()` before `run_done` arrives got
+a spurious `onError` firing "the turn did not complete," even though
+nothing had actually gone wrong; the caller asked for exactly that
+outcome.
+
+**Fixed** with a `closedByCaller` flag, set by `close()` itself before
+it ever asks the transport to close, and checked alongside
+`sawRunDone` in `onclose` before deciding whether to report an error.
+`close()` gained a docstring stating the (previously implicit, and
+wrong) contract explicitly: an intentional close is never reported as
+a failure.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: a spurious `onError` call where zero were
+expected.
+
+**1 new test, 20 -> 21 TypeScript SDK tests, `npm run build` and `npm
+test` (which now genuinely type-checks test files, per round 165's
+own fix) both clean.** No Python files changed this round; the full
+Python suite (883 tests) was re-verified unaffected. `docs/packaging.md`
+gained a new subsection directly after the existing `SarvaApiError`
+parsing fix, in the same TypeScript SDK per-bug narrative that already
+documents the `onclose`/dropped-connection fix this one directly
+follows up on.
+
+**One hundred thirty-six of the last one hundred thirty-seven rounds
+(46-67, 70-181) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** A fix's own stated reasoning ("unambiguously
+an error") is itself worth re-checking with fresh eyes, the same lesson
+already drawn from round 168's "exemption comment" lens -- applied here
+to a *justification* rather than an *exemption*, on the non-Python side
+of the codebase this time. The already-known `bpe.py`/`provenance.py`
+leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
