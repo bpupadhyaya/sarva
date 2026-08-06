@@ -981,6 +981,36 @@ with a live "Check again" re-poll, or a key-paste form that `POST
 for now" escape hatch (remembered in `localStorage`) for anyone who just
 wants the always-available Mock provider.
 
+**`get_env()`'s own precedence rule — "a real environment variable
+always wins" — silently broke for the ordinary case of clearing one.**
+`get_env()`'s docstring states the precedence explicitly: a real
+process environment variable if set, else whatever's saved in
+`config.json`, else `None`. But the check was `if env_value:`, plain
+truthiness, not `is not None` — the same "legitimate empty/zero value
+collapsed into absent" shape already found and fixed twice in this
+project's audio subsystem (`_decode_audio_isolated`'s stdout check,
+`AudioToTextDegrader`'s duration check), reappearing here on a third
+kind of value (an env var string) in a third, unrelated subsystem.
+`os.environ.get(name)` already distinguishes "not set" (`None`) from
+"set to empty string" (`""`) correctly; the truthiness check collapsed
+both into the same branch. The ordinary shell idiom `ANTHROPIC_API_KEY=
+sarva ...` — explicitly clearing an inherited or previously-saved key
+for one invocation, not a contrived input — was indistinguishable here
+from the variable never having been exported at all, so it silently
+fell through to the stale saved config value instead, directly
+contradicting the function's own stated precedence. **Confirmed live**:
+a key saved earlier via `sarva config set` resurrected itself and got
+used to construct a real, authenticated provider client even after the
+env var was explicitly cleared for that run. **Fixed** with `if
+env_value is not None:` — matching `os.environ.get`'s own real
+`None`/`""` distinction instead of collapsing it. Verified every
+`get_env()` call site in `sarva.runtime` (`build_providers`,
+`run_diagnostics`) already treats an `""` return as falsy/not-configured,
+so nothing downstream needed to change. Verified by reverting and
+watching the new test fail with the literal old bug's own shape — the
+stale `"sk-from-config"` value where `""` was expected. 1 new test,
+851 → 852 Python tests.
+
 ## The web UI and the desktop app
 
 `apps/desktop/` is a React 18 + TypeScript + Vite project (`npm run

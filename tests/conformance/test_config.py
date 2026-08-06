@@ -343,6 +343,24 @@ def test_get_env_prefers_a_real_environment_variable_over_the_saved_config(tmp_p
     assert get_env("ANTHROPIC_API_KEY", path=path) == "sk-from-env"
 
 
+def test_get_env_honors_an_explicitly_cleared_env_var(tmp_path, monkeypatch):
+    # A real bug found by a fresh-eyes sweep, the same "truthiness
+    # treats a legitimate empty/falsy-but-valid value as absent" shape
+    # already found and fixed twice in this project's audio subsystem:
+    # `if env_value:` used to collapse "not set" and "set to empty
+    # string" into the same branch, so the ordinary shell idiom
+    # `ANTHROPIC_API_KEY= sarva ...` -- explicitly clearing an inherited
+    # or previously-saved value for one invocation, not a contrived
+    # input -- silently fell through to whatever's saved in config.json
+    # instead of being honored, directly contradicting this function's
+    # own docstring precedence rule.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    path = tmp_path / "config.json"
+    save_config({"ANTHROPIC_API_KEY": "sk-from-config"}, path=path)
+
+    assert get_env("ANTHROPIC_API_KEY", path=path) == ""
+
+
 def test_a_config_file_only_key_actually_authenticates_the_real_sdk_client(tmp_path, monkeypatch):
     # The property that actually matters, not just that build_providers()
     # doesn't crash: the anthropic/openai/google SDKs each read

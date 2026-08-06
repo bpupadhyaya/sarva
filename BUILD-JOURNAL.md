@@ -19170,3 +19170,70 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `sarva.config.get_env()`'s own stated precedence rule silently broke for the ordinary case of explicitly clearing an env var
+
+Round 158. This round's sweep found `core/sarva/config.py`'s `get_env()`:
+`env_value = os.environ.get(name); if env_value: return env_value` --
+plain truthiness, not `is not None`. The same "legitimate empty/zero
+value silently confused with absent" shape already found and fixed
+twice in this project's audio subsystem (`_decode_audio_isolated`'s
+stdout check, round 157; `AudioToTextDegrader`'s duration check,
+earlier), reappearing here on a third kind of value -- an env var
+string -- in a third, unrelated subsystem.
+
+`os.environ.get(name)` already correctly distinguishes "not set"
+(`None`) from "set to empty string" (`""`); the truthiness check
+collapsed both into the same branch. The ordinary shell idiom
+`ANTHROPIC_API_KEY= sarva ...` -- explicitly clearing an inherited or
+previously-saved key for one invocation, not a contrived input -- was
+indistinguishable here from the variable never having been exported at
+all, so it silently fell through to whatever's saved in `config.json`
+instead, directly contradicting `get_env()`'s own docstring: "a real
+process environment variable if set, else whatever's saved in the
+config file, else `None`." The env var IS set here, just empty.
+
+**Confirmed live**: a key saved earlier via `sarva config set` (or the
+desktop onboarding flow) resurrected itself and got used to construct
+a real, authenticated provider client even after the user explicitly
+cleared the env var for that run in their own shell -- reproduced
+through the real public surface (`run_diagnostics`/`build_providers`),
+not just the bare function.
+
+**Fixed** with `if env_value is not None:` -- matching
+`os.environ.get`'s own real `None`/`""` distinction instead of
+collapsing it via truthiness.
+
+**Verified downstream**: every `get_env(...)` call site in
+`core/sarva/runtime.py` (lines 157, 190, 192, 259, 270, 369, 376)
+already goes through `if get_env(...):` or `bool(get_env(...))`, so an
+`""` return is still safely treated as falsy/not-configured everywhere
+it matters -- this fix only changes what `get_env()` itself returns for
+an explicitly-empty env var, not how any existing caller interprets it.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `get_env` returning the stale
+`"sk-from-config"` instead of the expected `""`.
+
+**1 new test, 851 -> 852 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the first-run guided setup chapter, in the
+same `sarva.config`/`get_env` per-bug narrative.
+
+**One hundred thirteen of the last one hundred fourteen rounds (46-67,
+70-158) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** The "truthiness treats a legitimate
+empty/zero value as absent/failed" lens has now found three real bugs
+across two unrelated subsystems (audio, config) -- still worth a
+direct grep for other `not <value>`/`if <value>:`/`<value> or
+<fallback>` checks anywhere a legitimately-empty or -zero real value
+could be silently confused with "missing."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

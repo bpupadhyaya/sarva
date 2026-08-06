@@ -288,7 +288,27 @@ def get_env(name: str, path: Path | None = None) -> str | None:
     `sarva.runtime` goes through this instead of `os.environ.get`
     directly, so config-file support can't accidentally be forgotten at
     a new call site."""
+    # A real bug found by a fresh-eyes sweep, the same "truthiness
+    # treats a legitimate empty/falsy-but-valid value as absent" shape
+    # already found and fixed twice in this project's audio subsystem:
+    # `os.environ.get(name)` correctly distinguishes "not set" (`None`)
+    # from "set to empty string" (`""`), but `if env_value:` collapsed
+    # both into the same branch. An env var a caller has explicitly set
+    # to `""` -- the ordinary shell idiom `ANTHROPIC_API_KEY= sarva ...`
+    # used to override/clear an inherited or previously-saved value for
+    # one invocation, not a contrived input -- was indistinguishable
+    # here from the variable never being exported at all, so this
+    # silently fell through to whatever's saved in config.json instead,
+    # directly contradicting this function's own docstring ("a real
+    # process environment variable if set, else whatever's saved"): the
+    # env var IS set, just empty. Confirmed live through the real public
+    # surface (run_diagnostics/build_providers): a previously-`sarva
+    # config set`-saved key silently resurrected itself and got used to
+    # construct a real, authenticated provider client, even after the
+    # user explicitly cleared the env var for that run in their own
+    # shell. `is not None` matches `os.environ.get`'s own real
+    # None/"" distinction instead of collapsing it via truthiness.
     env_value = os.environ.get(name)
-    if env_value:
+    if env_value is not None:
         return env_value
     return load_config(path).get(name)
