@@ -67,6 +67,24 @@ def _dedup_near_duplicates_by_key[T](
     num_hashes: int,
     shingle_size: int,
 ) -> list[T]:
+    # A real bug found by a fresh-eyes sweep, the identical "unvalidated
+    # numeric parameter used as a range() bound/divisor" shape round 141
+    # already fixed for ablation.py's record_every: num_hashes is a
+    # plain, unvalidated public int kwarg on both entry points
+    # (dedup_near_duplicates, dedup_near_duplicate_sourced_documents).
+    # num_hashes=0 makes every document's MinHash signature an empty
+    # tuple regardless of content -- the first document is always kept
+    # (any() over an empty kept_signatures list is vacuously False), but
+    # the second document processed hits _estimated_jaccard_similarity's
+    # `matches / len(sig_a)`, a raw, undocumented ZeroDivisionError with
+    # zero indication of the real cause. A caller tuning num_hashes down
+    # for a fast smoke-test run, or computing it programmatically from a
+    # compute/time budget, can land on 0 with nothing to catch it.
+    # Confirmed live at both public entry points. Checked once here,
+    # the single choke point both funnel through, rather than
+    # duplicating the check in each public wrapper.
+    if num_hashes <= 0:
+        raise ValueError(f"num_hashes must be positive, got {num_hashes}")
     kept: list[T] = []
     kept_signatures: list[tuple[int, ...]] = []
     for item in items:

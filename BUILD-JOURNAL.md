@@ -18173,3 +18173,65 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `dedup_near_duplicates`'s `num_hashes` was a plain, unvalidated int -- a zero value crashed on the second document with a raw `ZeroDivisionError`
+
+Round 142. Applying the identical "unvalidated numeric parameter used
+as a `range()` bound/divisor" lens round 141 used for `ablation.py`'s
+`record_every`, this round's sweep found the same shape in `foundry/
+sarva_foundry/data/near_dedup.py`: `num_hashes` (default `128`) is a
+plain, unvalidated public `int` keyword argument on both entry points
+that funnel through `_dedup_near_duplicates_by_key` --
+`dedup_near_duplicates` and `provenance.py`'s `dedup_near_duplicate_
+sourced_documents`.
+
+`num_hashes=0` makes every document's MinHash signature an empty tuple
+regardless of content. The first document is always kept (`any()` over
+an empty `kept_signatures` list is vacuously `False`), but the second
+document processed hits `_estimated_jaccard_similarity`'s own `matches
+/ len(sig_a)`, a raw, undocumented `ZeroDivisionError: division by
+zero` with zero indication of the real cause.
+
+Not contrived: both functions are top-level exports of `sarva_foundry.
+data`, the corpus-sourcing/cleaning pipeline this project's own spec
+names -- exactly the kind of building block a training/recipe script
+calls directly with a numeric hyperparameter. `num_hashes` controls a
+real accuracy-vs-compute tradeoff; a caller tuning it down for a fast
+smoke-test run, or computing it programmatically from a compute/time
+budget, can land on `0` with nothing to catch it. No existing test
+exercised this parameter at all.
+
+**Confirmed live**: `dedup_near_duplicates(['hello world', 'goodbye
+world'], num_hashes=0)` raised `ZeroDivisionError: division by zero`.
+
+**Fixed** by rejecting `num_hashes <= 0` with a clean `ValueError` at
+the single choke point (`_dedup_near_duplicates_by_key`) both public
+entry points funnel through, rather than duplicating the check in each
+wrapper.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: the raw `ZeroDivisionError` propagating
+uncaught.
+
+**1 new test, 831 -> 832 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update: no dedicated
+chapter exists for this module.
+
+**Ninety-seven of the last ninety-eight rounds (46-67, 70-142) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** Two rounds in a row (141, 142) have now found the identical
+"unvalidated numeric parameter feeding a `range()`/divisor" shape in
+two different `foundry/sarva_foundry` modules -- worth a direct grep
+for `range(` and bare `/`/`%` divisions across the rest of
+`sarva_foundry` for any remaining unvalidated caller-supplied
+parameter of this shape, rather than waiting for a third
+rediscovery.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

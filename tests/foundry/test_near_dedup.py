@@ -111,3 +111,21 @@ def test_dedup_near_duplicates_composes_with_exact_dedup():
 
     after_near = dedup_near_duplicates(after_exact, threshold=0.8)
     assert after_near == [_DOC_A, _DOC_C]  # doc_b now also dropped as a near-dup
+
+
+def test_dedup_near_duplicates_rejects_a_non_positive_num_hashes():
+    # A real bug found by a fresh-eyes sweep, the identical "unvalidated
+    # numeric parameter used as a range() bound/divisor" shape round 141
+    # already fixed for ablation.py's record_every: num_hashes is a
+    # plain, unvalidated public int kwarg. num_hashes=0 made every
+    # document's MinHash signature an empty tuple -- the first document
+    # was always kept (vacuously), but the second document processed hit
+    # _estimated_jaccard_similarity's own `matches / len(sig_a)`, a raw,
+    # undocumented ZeroDivisionError with zero indication of the real
+    # cause.
+    import pytest
+
+    with pytest.raises(ValueError, match="num_hashes"):
+        dedup_near_duplicates([_DOC_A, _DOC_B], num_hashes=0)
+    with pytest.raises(ValueError, match="num_hashes"):
+        dedup_near_duplicates([_DOC_A, _DOC_B], num_hashes=-1)
