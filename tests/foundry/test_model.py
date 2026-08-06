@@ -145,6 +145,27 @@ def test_gqa_config_rejects_indivisible_heads():
         _tiny_config(n_heads=5, n_kv_heads=2)
 
 
+def test_transformer_config_rejects_non_positive_n_layers():
+    # A real bug found by a fresh-eyes sweep, applying the identical lens
+    # already used five times over on MoEConfig's own sibling fields in
+    # moe.py: range() of a non-positive number is silently empty in
+    # Python, so DecoderOnlyTransformer.__init__'s
+    # `[TransformerBlock(config) for _ in range(config.n_layers)]` never
+    # raised for n_layers <= 0 -- it silently built a model with ZERO
+    # transformer blocks instead of raising, and forward() still ran,
+    # returning plausible-shaped logits from a model that never computes
+    # attention or a feedforward pass at all. Reachable through the same
+    # untrusted config.json path (a hand-edited/rolled-back checkpoint
+    # config, or a training-script bug) already established for
+    # MoEConfig's own fields.
+    import pytest
+
+    with pytest.raises(ValueError):
+        _tiny_config(n_layers=0)
+    with pytest.raises(ValueError):
+        _tiny_config(n_layers=-3)
+
+
 def test_forward_raises_a_clear_error_past_max_seq_len():
     # Found by running examples/03_train_toy_transformer.py's generation
     # loop, which grows the sequence one token at a time past

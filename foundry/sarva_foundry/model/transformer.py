@@ -37,6 +37,33 @@ class TransformerConfig:
             raise ValueError(f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
         if self.hidden_dim is None:
             self.hidden_dim = default_swiglu_hidden_dim(self.dim)
+        # A real bug found by a fresh-eyes sweep, applying the identical
+        # lens already used five times over on MoEConfig's own sibling
+        # fields in moe.py (most recently n_shared_experts): range() of a
+        # non-positive number is silently empty in Python, so
+        # DecoderOnlyTransformer.__init__'s `[TransformerBlock(config)
+        # for _ in range(config.n_layers)]` never raised for n_layers <= 0
+        # -- it silently built a model with ZERO transformer blocks
+        # instead, just an embedding table, a final norm, and a tied
+        # output head. forward() still ran and returned plausible-shaped
+        # logits from a model that never computes attention or a
+        # feedforward pass at all. Reachable through the identical
+        # untrusted `config.json` path as MoEConfig's own fields (see
+        # foundry_provider.py's own docstring: "a checkpoint saved
+        # mid-crash, a hand-edited/rolled-back config.json, or a
+        # training-script bug computing this field incorrectly").
+        # Confirmed live two ways: direct construction with n_layers=0
+        # built successfully with 0 blocks instead of raising; a real
+        # trained checkpoint's config.json hand-edited to n_layers=0 and
+        # reloaded produced a confusing raw RuntimeError deep inside
+        # load_state_dict naming implementation-detail state-dict keys,
+        # instead of a clean error at construction time naming the real
+        # cause. Unlike n_shared_experts, zero is never legitimate here --
+        # a transformer needs at least one block to do anything -- so this
+        # uses the same `<= 0` check dim/n_heads-adjacent fields use, not
+        # n_shared_experts' negative-only check.
+        if self.n_layers <= 0:
+            raise ValueError(f"n_layers must be positive, got {self.n_layers}")
 
     @property
     def head_dim(self) -> int:

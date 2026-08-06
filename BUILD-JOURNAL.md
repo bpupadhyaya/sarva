@@ -17632,3 +17632,57 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `TransformerConfig` never validated `n_layers` -- the one field five prior rounds' worth of the identical fix on `MoEConfig`'s sibling fields never reached
+
+Round 133. Applying the identical lens already used five separate
+times on `MoEConfig`'s own fields in `foundry/sarva_foundry/model/
+moe.py` (most recently `n_shared_experts`), this round's sweep found
+that `TransformerConfig` -- the actual outer, most-used config class,
+constructed from the identical untrusted `config.json` in the
+identical `foundry_provider.load_checkpoint_bundle` path -- never got
+the same treatment for its own `n_layers` field.
+
+`range()` of a non-positive number is silently empty in Python, so
+`DecoderOnlyTransformer.__init__`'s `[TransformerBlock(config) for _ in
+range(config.n_layers)]` never raised for `n_layers <= 0` -- it
+silently built a model with ZERO transformer blocks instead: just an
+embedding table, a final norm, and a tied output head. `forward()`
+still ran and returned plausible-shaped logits from a model that never
+computes attention or a feedforward pass at all, no error anywhere.
+
+**Confirmed live two ways**, matching the established precedent's own
+two angles: direct construction with `n_layers=0`/`n_layers=-3` built
+successfully with 0 blocks instead of raising; a real trained
+checkpoint's `config.json` hand-edited to `n_layers=0` (simulating
+`foundry_provider.py`'s own named "hand-edited/rolled-back config.json"
+threat model) and reloaded produced a confusing raw `RuntimeError` deep
+inside `load_state_dict` naming implementation-detail state-dict keys,
+instead of a clean error at construction time naming the real cause.
+
+**Fixed** with the same `<= 0` check `dim`/`n_heads` already use in
+this class (not `n_shared_experts`' negative-only check -- unlike zero
+shared experts, zero transformer blocks is never a legitimate
+configuration).
+
+**Verified by reverting** and watching the new test fail with the
+literal old shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 820 -> 821 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update: matching
+established precedent, `MoEConfig`'s own five sibling fixes in this
+same file never got one either -- foundry-internals-only fixes without
+an existing dedicated chapter stay in BUILD-JOURNAL.md alone.
+
+**Eighty-eight of the last eighty-nine rounds (46-67, 70-133) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
