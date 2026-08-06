@@ -9,6 +9,7 @@ of sync on availability logic.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,54 +50,78 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 # one request.
 _OLLAMA_PROBE_CACHE_SECONDS = 2.0
 _ollama_probe_cache: dict[str, tuple[float, bool, set[str]]] = {}
+# A real bug found by a fresh-eyes sweep, one layer beyond the fix
+# right above this: the cache's own read-check (`_ollama_probe_cache.
+# get(host)`) and its write-back at the end of this function are two
+# separate, unsynchronized steps with a real, blocking `httpx.get()`
+# in between -- an unguarded check-then-act race, the identical shape
+# `agent/loop.py`'s own `spend_lock` was added to close for concurrent
+# subagent budget grants, just never applied here. Confirmed live:
+# `build_router()`/`build_providers()` are called from every `/chat`,
+# `/ws/chat`, `/models`, and `/doctor` handler via `asyncio.to_thread`,
+# so genuine concurrent requests (the desktop app's own two independent
+# `useEffect` hooks fire `/doctor` and `/models` simultaneously on
+# page load, not a contrived scenario) land in separate real OS
+# threads -- 6 concurrent `build_router()` calls against a cold cache
+# made 6 real network calls, not the 1 the cache exists to guarantee,
+# silently reintroducing the exact redundant-network-call regression
+# (up to 0.61s of blocking wait per request against a black-holed
+# OLLAMA_HOST) the cache above was built to eliminate. A `threading.
+# Lock` around the whole check-probe-write span turns this into a real
+# single-flight cache: a thread that loses the race to acquire the
+# lock reads back the FRESH entry the winner just wrote, instead of
+# racing its own redundant probe. `httpx.get`'s own `timeout=0.3`
+# bounds how long any thread can be blocked waiting for the lock.
+_ollama_probe_lock = threading.Lock()
 
 
 def _probe_ollama(host: str) -> tuple[bool, set[str]]:
-    now = time.monotonic()
-    cached = _ollama_probe_cache.get(host)
-    if cached is not None and now - cached[0] < _OLLAMA_PROBE_CACHE_SECONDS:
-        return cached[1], cached[2]
-    reachable = False
-    pulled: set[str] = set()
-    try:
-        response = httpx.get(f"{host}/api/tags", timeout=0.3)
-        # Reachability means the connection itself succeeded, independent
-        # of the response status -- matching the original ollama_reachable
-        # semantics exactly (a 4xx/5xx from Ollama still means something
-        # answered, just not usefully; only pulled stays empty in that case).
-        reachable = True
-        response.raise_for_status()
-        pulled = {m["name"] for m in response.json().get("models", [])}
-    except httpx.HTTPError:
-        pass
-    except Exception:
-        # A real bug found by a fresh-eyes sweep: `except httpx.HTTPError`
-        # alone doesn't cover whatever's actually listening at OLLAMA_HOST
-        # answering with a 200 whose body isn't the JSON shape Ollama's
-        # own `/api/tags` returns -- a real, ordinary condition (a
-        # corporate captive portal, a stale/misconfigured reverse proxy,
-        # simple port reuse by an unrelated service), not a contrived
-        # attack. `response.json()` raises `json.JSONDecodeError` on a
-        # non-JSON body; a differently-shaped-but-valid JSON body (a top-
-        # level list/string instead of a dict, or a dict entry missing
-        # "name") raises `AttributeError`/`KeyError` instead -- neither a
-        # subclass of `httpx.HTTPError`. Confirmed live: this crashed
-        # `GET /models` and `GET /doctor` with a raw, plain-text 500 (no
-        # matching except clause here, and no generic exception handler
-        # registered in sarva.server.app besides ConfigError's own),
-        # unlike `POST /chat`, which only degrades cleanly to
-        # `state=failed` by the accident of `JSONDecodeError` happening to
-        # be a `ValueError` subclass that handler's own broad except
-        # already covers for an unrelated reason. This probe's entire
-        # contract, per its own docstring, is "best-effort" -- treating
-        # every other malformed-response shape the identical way
-        # `httpx.HTTPError` already is (reachable stays whatever it was
-        # set to above, pulled stays empty) is the correct generalization,
-        # not enumerating each new exception type reactively as it's
-        # found one at a time.
-        pass
-    _ollama_probe_cache[host] = (now, reachable, pulled)
-    return reachable, pulled
+    with _ollama_probe_lock:
+        now = time.monotonic()
+        cached = _ollama_probe_cache.get(host)
+        if cached is not None and now - cached[0] < _OLLAMA_PROBE_CACHE_SECONDS:
+            return cached[1], cached[2]
+        reachable = False
+        pulled: set[str] = set()
+        try:
+            response = httpx.get(f"{host}/api/tags", timeout=0.3)
+            # Reachability means the connection itself succeeded, independent
+            # of the response status -- matching the original ollama_reachable
+            # semantics exactly (a 4xx/5xx from Ollama still means something
+            # answered, just not usefully; only pulled stays empty in that case).
+            reachable = True
+            response.raise_for_status()
+            pulled = {m["name"] for m in response.json().get("models", [])}
+        except httpx.HTTPError:
+            pass
+        except Exception:
+            # A real bug found by a fresh-eyes sweep: `except httpx.HTTPError`
+            # alone doesn't cover whatever's actually listening at OLLAMA_HOST
+            # answering with a 200 whose body isn't the JSON shape Ollama's
+            # own `/api/tags` returns -- a real, ordinary condition (a
+            # corporate captive portal, a stale/misconfigured reverse proxy,
+            # simple port reuse by an unrelated service), not a contrived
+            # attack. `response.json()` raises `json.JSONDecodeError` on a
+            # non-JSON body; a differently-shaped-but-valid JSON body (a top-
+            # level list/string instead of a dict, or a dict entry missing
+            # "name") raises `AttributeError`/`KeyError` instead -- neither a
+            # subclass of `httpx.HTTPError`. Confirmed live: this crashed
+            # `GET /models` and `GET /doctor` with a raw, plain-text 500 (no
+            # matching except clause here, and no generic exception handler
+            # registered in sarva.server.app besides ConfigError's own),
+            # unlike `POST /chat`, which only degrades cleanly to
+            # `state=failed` by the accident of `JSONDecodeError` happening to
+            # be a `ValueError` subclass that handler's own broad except
+            # already covers for an unrelated reason. This probe's entire
+            # contract, per its own docstring, is "best-effort" -- treating
+            # every other malformed-response shape the identical way
+            # `httpx.HTTPError` already is (reachable stays whatever it was
+            # set to above, pulled stays empty) is the correct generalization,
+            # not enumerating each new exception type reactively as it's
+            # found one at a time.
+            pass
+        _ollama_probe_cache[host] = (now, reachable, pulled)
+        return reachable, pulled
 
 
 def ollama_reachable(host: str = OLLAMA_HOST) -> bool:

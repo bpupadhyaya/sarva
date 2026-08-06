@@ -232,6 +232,34 @@ handling, generalized correctly here instead of repeating it a fourth
 time. 2 new tests (one for the invalid-JSON case, one for the
 valid-but-wrong-shape case), 731 -> 733 Python tests.
 
+**A seventh bug in the same probe, found by yet another fresh-eyes
+sweep, one layer beyond the round-45 fix that first introduced the
+cache: the cache's own read-check and write-back are two separate,
+unsynchronized steps with a real, blocking `httpx.get()` in
+between.** `build_router()`/`build_providers()` are called from every
+`/chat`, `/ws/chat`, `/models`, and `/doctor` handler via `asyncio.
+to_thread` — genuine concurrent requests (the desktop app's own two
+independent `useEffect` hooks fire `/doctor` and `/models`
+simultaneously on page load, not a contrived scenario) land in
+separate real OS threads, and nothing serialized their access to the
+shared cache dict. Confirmed live: 6 concurrent `build_router()` calls
+against a cold cache made 6 real network calls, not the 1 the cache
+exists to guarantee — silently reintroducing the exact redundant-
+network-call regression (up to 0.61s of blocking wait per request
+against a black-holed `OLLAMA_HOST`) the round-45 fix was built to
+eliminate, the identical unguarded check-then-act race class already
+found and fixed for `AgentLoop`'s own subagent budget grants (`spend_
+lock`), just never applied here. Fixed with a `threading.Lock` around
+the whole check-probe-write span, turning the cache into a genuine
+single-flight: a thread that loses the race to acquire the lock reads
+back the FRESH entry the winner just wrote, instead of racing its own
+redundant probe — `httpx.get`'s own `timeout=0.3` bounds how long any
+thread can be blocked waiting. Verified live: the same 6-concurrent-
+callers repro now measures exactly 1 real network call. Verified by
+reverting and watching the new test fail with the literal old number
+reproducing itself: 6 calls instead of 1. 1 new test, 815 → 816
+Python tests.
+
 ### Ollama vision — the named follow-up, closed and verified against a real local vision model
 
 The gap named directly above ("real vision-capable Ollama models do

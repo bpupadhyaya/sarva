@@ -139,6 +139,54 @@ def test_ollama_probe_is_cached_across_build_router_and_build_providers(monkeypa
     assert calls["n"] == 1
 
 
+async def test_ollama_probe_cache_is_a_real_single_flight_under_concurrent_callers(monkeypatch):
+    # A real bug found by a fresh-eyes sweep, one layer beyond the fix
+    # above: the cache's own read-check and write-back are two separate
+    # steps with a real, blocking httpx.get() in between -- an
+    # unguarded check-then-act race. build_router()/build_providers()
+    # are called from every /chat, /ws/chat, /models, and /doctor
+    # handler via asyncio.to_thread, so genuine concurrent requests
+    # (the desktop app's own two independent useEffect hooks fire
+    # /doctor and /models simultaneously on page load, not contrived)
+    # land in separate real OS threads. Confirmed live before this fix:
+    # 6 concurrent build_router() calls against a cold cache made 6
+    # real network calls, not the 1 the cache exists to guarantee.
+    import asyncio
+    import threading
+    import time
+
+    import httpx
+    import sarva.runtime as runtime_module
+
+    _clear_frontier_keys(monkeypatch)
+    monkeypatch.delenv("SARVA_FOUNDRY_CHECKPOINTS", raising=False)
+    runtime_module._ollama_probe_cache.clear()
+
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+
+    class _FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"models": []}
+
+    def slow_get(*args, **kwargs):
+        with calls_lock:
+            calls["n"] += 1
+        time.sleep(0.1)  # simulate real network latency, forcing genuine overlap
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "get", slow_get)
+
+    await asyncio.gather(*[asyncio.to_thread(runtime.build_router) for _ in range(6)])
+
+    assert calls["n"] == 1, f"expected exactly 1 real network call, got {calls['n']}"
+
+
 def test_ollama_probe_reachability_and_pulled_models_semantics_survive_caching(monkeypatch):
     # The cache must preserve the two functions' independent pre-existing
     # semantics: ollama_reachable() is True whenever the connection itself

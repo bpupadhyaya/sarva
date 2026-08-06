@@ -17321,3 +17321,73 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The Ollama-probe cache had an unsynchronized check-then-act race, silently reintroducing the exact redundant-network-call regression it was built to fix
+
+Round 128. Breaking the five-round streak in `foundry/sarva_foundry/`,
+this round's sweep found a real bug back in `core/sarva/runtime.py` --
+the seventh distinct real bug found in this same Ollama-probe function
+across this project's history, one layer beyond the round-45 fix that
+first introduced the short-TTL cache to collapse redundant network
+calls.
+
+**The bug**: `_probe_ollama`'s cache read-check
+(`_ollama_probe_cache.get(host)`) and its write-back at the end of the
+function are two separate, unsynchronized steps with a real, blocking
+`httpx.get()` in between -- a classic unguarded check-then-act race,
+the identical class already found and fixed for `AgentLoop`'s own
+subagent budget grants (`spend_lock`), just never applied here.
+`build_router()`/`build_providers()` are called from every `/chat`,
+`/ws/chat`, `/models`, and `/doctor` handler via `asyncio.to_thread`,
+so genuine concurrent requests -- the desktop app's own two
+independent `useEffect` hooks fire `/doctor` and `/models`
+simultaneously on page load, not a contrived scenario -- land in
+separate real OS threads with nothing serializing their access to the
+shared cache dict.
+
+**Confirmed live**: 6 concurrent `build_router()` calls against a
+cold cache made 6 real network calls, not the 1 the cache exists to
+guarantee -- silently reintroducing the exact redundant-network-call
+regression (up to 0.61s of blocking wait per request against a
+black-holed `OLLAMA_HOST`) the round-45 fix was built to eliminate.
+
+**Fixed** with a `threading.Lock` around the whole check-probe-write
+span, turning the cache into a genuine single-flight: a thread that
+loses the race to acquire the lock reads back the FRESH entry the
+winner just wrote, instead of racing its own redundant probe --
+`httpx.get`'s own `timeout=0.3` bounds how long any thread can be
+blocked waiting for the lock.
+
+**Verified live**: the same 6-concurrent-callers repro now measures
+exactly 1 real network call.
+
+**Verified by reverting** and watching the new test fail with the
+literal old number reproducing itself: 6 calls instead of 1.
+
+**1 new test, 815 -> 816 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+"seventh bug" paragraph directly after the sixth, in the same ongoing
+per-bug narrative this probe function has accumulated across five
+prior rounds.
+
+**Eighty-three of the last eighty-four rounds (46-67, 70-128) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** `_probe_ollama` is now the single most-repeatedly-fixed
+function in this entire project's history -- seven separate real bugs
+across seven separate rounds, spanning redundant network calls, event-
+loop-freezing blocking I/O, incomplete exception handling, and now a
+genuine concurrency race. Worth naming explicitly alongside `contains_
+match`/`answer_reward`/`RunShellTool`'s timeout as proof that a
+function touched by "expensive work repeated on every request" and
+"real concurrency" lenses at the same time is disproportionately
+likely to keep yielding real bugs no matter how many times it's
+already been fixed.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
