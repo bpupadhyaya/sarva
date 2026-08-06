@@ -18350,3 +18350,59 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `MockProvider(script=[])` crashed with a raw `IndexError` -- only `script=None` was ever special-cased for echo mode
+
+Round 145. Deliberately swinging back to `core/sarva/` after several
+rounds concentrated in `foundry/sarva_foundry`, this round's sweep
+found `core/sarva/providers/mock.py`'s `MockProvider.__init__` only
+special-cases `script=None` for echo mode -- `script=[]` is a
+distinct, non-`None` value that a test author building the list
+programmatically (filtering candidate turns, or a helper that can
+legitimately produce zero turns for an edge case) can easily land on.
+`_next_turn`'s `len(self._script) - 1` evaluates to `-1` for an empty
+list, so `self._script[min(self._turn, -1)]` becomes
+`self._script[-1]` -- indexing an empty list, raising a raw,
+undocumented `IndexError: list index out of range` straight out of
+`generate()`.
+
+Not contrived: `MockProvider`/`ScriptedTurn` are public, exported
+classes the module's own docstring invites callers to use directly
+("Pass `script` to drive specific scenarios for tests"). No existing
+test anywhere in the suite ever constructed `MockProvider(script=[])`,
+confirming the gap was simply never exercised -- the same
+"unvalidated parameter used as a list index with no emptiness check"
+shape rounds 141-144 already found repeatedly in `foundry/
+sarva_foundry`, here on the `core/sarva` side for the first time, in a
+file that had never received this project's usual fresh-eyes
+bug-fixing pass before.
+
+**Confirmed live**: `MockProvider(script=[]).generate(request)` raised
+`IndexError: list index out of range` from inside `_next_turn`.
+
+**Fixed** by rejecting an empty (but non-`None`) `script` list at
+construction time with a clean `ValueError`, rather than deferring the
+failure to the first `generate()` call with a confusing raw
+`IndexError`.
+
+**Verified by reverting** and confirming the old code never validates
+at construction (`DID NOT RAISE ValueError`), consistent with the
+live repro showing the deferred `IndexError` at `generate()` time.
+
+**1 new test, 834 -> 835 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update: this is the
+first fix ever made to `MockProvider`, so there's no existing
+per-module chapter to extend.
+
+**One hundred of the last one hundred one rounds (46-67, 70-145) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

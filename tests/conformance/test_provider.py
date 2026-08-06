@@ -51,6 +51,19 @@ async def test_delta_message_equivalence():
     assert deltas.strip() == done.message.text().strip()
 
 
+def test_empty_script_list_rejected_instead_of_crashing_later_with_a_raw_indexerror():
+    # A real bug found by a fresh-eyes sweep: only `script=None` was
+    # special-cased for echo mode -- `script=[]` is a distinct, non-None
+    # value a test author building the list programmatically can easily
+    # land on. `_next_turn`'s `len(self._script) - 1` evaluates to -1
+    # for an empty list, so indexing with `min(0, -1)` became
+    # `self._script[-1]` -- an empty-list IndexError with no indication
+    # of the real cause, raised from inside generate() rather than at
+    # construction time.
+    with pytest.raises(ValueError, match="script"):
+        MockProvider(script=[])
+
+
 @pytest.mark.asyncio
 async def test_tool_round_trip():
     call = ToolCallBlock(id="tc1", name="get_weather", arguments={"city": "Paris"})

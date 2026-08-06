@@ -45,6 +45,19 @@ class MockProvider:
     name = "mock"
 
     def __init__(self, script: list[ScriptedTurn] | None = None):
+        # A real bug found by a fresh-eyes sweep: only `script=None` was
+        # special-cased for echo mode -- `script=[]` is a distinct,
+        # non-None value that a test author building the list
+        # programmatically (filtering candidate turns, or a helper that
+        # can legitimately produce zero turns for an edge case) can
+        # easily land on. `_next_turn`'s `len(self._script) - 1`
+        # evaluates to -1 for an empty list, so `self._script[min(0,
+        # -1)]` becomes `self._script[-1]` -- indexing an empty list,
+        # raising a raw, undocumented IndexError with no indication of
+        # the real cause. Rejected here, at construction time, rather
+        # than deferred to the first generate() call.
+        if script is not None and not script:
+            raise ValueError("script must be a non-empty list or None, got an empty list")
         self._script = list(script) if script is not None else None
         self._turn = 0
 
