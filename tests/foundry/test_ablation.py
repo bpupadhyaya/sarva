@@ -244,3 +244,26 @@ def test_run_ablation_rejects_a_non_positive_batch_size_instead_of_crashing_mid_
         run_ablation(arms, token_ids, seq_len=16, batch_size=0, steps=5, seeds=[0])
     with pytest.raises(ValueError, match="batch_size"):
         run_ablation(arms, token_ids, seq_len=16, batch_size=-2, steps=5, seeds=[0])
+
+
+def test_run_ablation_rejects_an_empty_seeds_list_instead_of_crashing_later_at_ranked():
+    # A real bug found by a later fresh-eyes sweep, the third sibling
+    # parameter in this exact function to get this treatment: seeds was
+    # likewise a plain, unvalidated list -- a caller computing it
+    # programmatically (e.g. `list(range(n_seeds))` for a config-driven
+    # seed count that resolves to 0 in a quick smoke-test path) can land
+    # on an empty list with nothing to catch it. run_ablation itself
+    # used to complete without error (the per-seed loop just never ran),
+    # silently producing an ArmResult with an empty final_losses -- the
+    # crash only surfaced later, whenever a caller called ranked()/
+    # is_difference_trustworthy(), with a raw statistics.StatisticsError
+    # deep inside mean_final_loss giving no clue that an empty seeds
+    # list was the actual cause.
+    _, token_ids = _tokenized_corpus()
+    config = TransformerConfig(
+        vocab_size=300, dim=16, n_layers=1, n_heads=2, n_kv_heads=1, max_seq_len=16
+    )
+    arms = [AblationArm(name="a", model_config=config)]
+
+    with pytest.raises(ValueError, match="seeds"):
+        run_ablation(arms, token_ids, seq_len=16, batch_size=2, steps=5, seeds=[])

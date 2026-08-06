@@ -18528,3 +18528,61 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `run_ablation`'s `seeds` -- the third sibling parameter in this exact function -- was likewise unvalidated, deferring a raw `StatisticsError` to whichever caller ranked the results
+
+Round 148. Two rounds after fixing `run_ablation`'s `batch_size`
+(itself the sibling of `record_every`, fixed one round before that),
+this round's sweep found the same shape a third time in the same
+function: `seeds` was likewise a plain, unvalidated `list[int]`.
+
+`run_ablation(..., seeds=[])` completes without error -- the per-seed
+loop simply never runs -- silently producing an `ArmResult` whose
+`final_losses` is `[]` for every arm. The crash only surfaces later,
+whenever any caller does what this harness exists for: rank the arms
+(`AblationResult.ranked()`) or compare two of them
+(`is_difference_trustworthy()`), with a raw, undocumented
+`statistics.StatisticsError: mean requires at least one data point`
+deep inside a lambda sort key, giving no clue that an empty `seeds`
+list was the actual cause. Notably asymmetric with its own sibling
+property: `stdev_final_loss` explicitly guards `len(self.final_losses)
+<= 1` and returns `0.0`, but `mean_final_loss` two lines above it has
+no guard at all for `len == 0`.
+
+Not contrived: a caller computing `seeds` programmatically (e.g.
+`list(range(n_seeds))` for a config-driven seed count that resolves to
+`0` in a quick smoke-test path -- the same "steps < 10" scenario
+`record_every`'s own fix named) hits this with zero adversarial
+intent.
+
+**Confirmed live**: `run_ablation([arm], ..., seeds=[])` completed
+silently, then `result.ranked()` raised `statistics.StatisticsError:
+mean requires at least one data point`.
+
+**Fixed** by rejecting an empty `seeds` list up front with a clean
+`ValueError`, alongside the existing `record_every`/`batch_size`
+checks in the same function.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 837 -> 838 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for this module.
+
+**One hundred three of the last one hundred four rounds (46-67, 70-148)
+have found and shipped real fixes; rounds 68-69 remain the only two
+clean sweeps.** `run_ablation` has now had three of its eight
+parameters (`record_every`, `batch_size`, `seeds`) individually found
+missing validation across three separate rounds -- its remaining
+numeric/list parameters (`arms`, `token_ids`, `seq_len`, `steps`,
+`lr`) have not yet been individually audited for the same gap.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

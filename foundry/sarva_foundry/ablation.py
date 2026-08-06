@@ -192,6 +192,21 @@ def run_ablation(
     # arm/seed. Confirmed live before this fix.
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
+    # A real bug found by a later fresh-eyes sweep, the third sibling
+    # parameter in this exact function to get this treatment: seeds is
+    # likewise a plain, unvalidated list -- a caller computing it
+    # programmatically (e.g. `list(range(n_seeds))` for a config-driven
+    # seed count that resolves to 0 in a quick smoke-test path) can land
+    # on an empty list with nothing to catch it. run_ablation itself
+    # completes without error (the per-seed loop below just never runs),
+    # silently producing an ArmResult with an empty final_losses -- the
+    # crash only surfaces later, whenever a caller does what this
+    # harness exists for (ranked()/is_difference_trustworthy()), with a
+    # raw statistics.StatisticsError deep inside mean_final_loss giving
+    # no clue that an empty seeds list was the actual cause. Confirmed
+    # live before this fix.
+    if not seeds:
+        raise ValueError("seeds must be a non-empty list")
     dataset = TextChunkDataset(token_ids, seq_len=seq_len)
 
     results: list[ArmResult] = []
