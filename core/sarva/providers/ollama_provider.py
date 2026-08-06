@@ -172,6 +172,18 @@ class OllamaProvider:
                 }
                 for t in request.tools
             ]
+        # A real bug found by a fresh-eyes sweep, applying the "one
+        # sibling has the feature, others silently diverge" lens that
+        # already caught round 149's DPO-schedule bug: GenerateConfig.
+        # stop_sequences is a shared, provider-agnostic field every
+        # adapter is supposed to honor, but only GoogleProvider ever
+        # actually translated it -- Anthropic, OpenAI, and Ollama each
+        # silently dropped it. Ollama's real /api/chat endpoint
+        # genuinely documents an `options.stop` field (a list of
+        # strings). Confirmed live: a request with stop_sequences=[
+        # "STOP_HERE"] sent no `stop` anywhere in the payload/options.
+        if request.config.stop_sequences:
+            payload["options"] = {"stop": request.config.stop_sequences}
 
         text_acc = ""
         content: list[object] = []

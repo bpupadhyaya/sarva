@@ -948,6 +948,47 @@ to `"4\n2"`, not `"42"`. Verified by reverting and watching the new
 test fail with the literal old bug's own fused value reproducing
 itself (`'42' == '4\n2'` — false). 1 new test, 710 → 711 Python tests.
 
+### `GenerateConfig.stop_sequences` was silently dropped by three of the four real adapters — found by comparing all four side by side, not just reading one in isolation
+
+`GenerateConfig` is the shared, provider-agnostic request contract
+this chapter's own opening section names — "max tokens, an `effort`
+knob, `thinking`, stop sequences" — every adapter is supposed to
+honor. A much later fresh-eyes sweep, applying a "structural sibling
+comparison" lens (checking whether several parallel implementations of
+the same contract all apply a cross-cutting field consistently) rather
+than reading any one adapter alone, found that only `GoogleProvider`
+ever actually translated `stop_sequences` into its own SDK's
+`GenerateContentConfig(stop_sequences=...)` — `AnthropicProvider`,
+`OpenAIProvider`, and `OllamaProvider` each built their outbound
+request/payload with no equivalent line at all, silently dropping a
+caller's `stop_sequences` with no exception and no warning.
+
+Not a hypothetical field: all three real SDKs genuinely support it —
+confirmed by direct introspection, not assumed. Anthropic's
+`messages.stream()` accepts `stop_sequences` (a list of strings,
+identical shape to Sarva's own field); OpenAI's `chat.completions.
+create()` accepts `stop` (str or list[str]); Ollama's real `/api/chat`
+endpoint documents an `options.stop` field. A caller who builds
+`GenerateRequest(..., config=GenerateConfig(stop_sequences=["</answer>"]))`
+— to bound a structured-generation format, stop before a delimiter, or
+avoid a model rambling past an expected boundary — got that setting
+silently honored only when routed to Google, and silently ignored on
+three of the project's four real, non-mock adapters. Confirmed live at
+each: a request with `stop_sequences=["STOP_HERE"]` sent no
+`stop_sequences` kwarg to Anthropic, no `stop` kwarg to OpenAI, and no
+`stop` anywhere in Ollama's payload/options.
+
+Fixed by adding the identical one-line translation to each of the
+three adapters, in each case pointed at that SDK's own real,
+documented field name (`stop_sequences`/`stop`/`options.stop`) rather
+than assuming a uniform shape across backends — the same
+per-adapter-appropriate-translation discipline the tool-result-image
+fix above already established, not a copy-pasted guess. Verified live
+each adapter's outbound request now carries the translated field.
+Verified by reverting and watching all three new tests fail with the
+literal old gap reproducing itself: the field simply absent from the
+captured request. 3 new tests, 840 → 843 Python tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

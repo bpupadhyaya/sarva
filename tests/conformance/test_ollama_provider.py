@@ -401,3 +401,40 @@ async def test_generate_tool_use_is_not_overridden_by_a_stop_done_reason():
     done = [e for e in events if isinstance(e, DoneEvent)][0]
 
     assert done.stop_reason == StopReason.TOOL_USE
+
+
+@pytest.mark.asyncio
+async def test_generate_translates_stop_sequences_to_the_real_options_stop_field():
+    # A real bug found by a fresh-eyes sweep, applying the "one sibling
+    # has the feature, others silently diverge" lens that already caught
+    # round 149's DPO-schedule bug: GenerateConfig.stop_sequences is a
+    # shared, provider-agnostic field every adapter is supposed to honor
+    # (docs/providers.md names it as part of the contract), but only
+    # GoogleProvider ever actually translated it -- this adapter (and
+    # Anthropic's, and OpenAI's) silently dropped it, even though the
+    # real Ollama /api/chat endpoint genuinely documents an
+    # `options.stop` field (a list of strings). Confirmed live before
+    # this fix: a request with stop_sequences=["STOP_HERE"] sent no
+    # `stop` anywhere in the payload/options.
+    import json
+
+    from sarva.providers.base import GenerateConfig
+
+    body = b'{"message": {"content": "hello"}, "done": true, "done_reason": "stop"}\n'
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, content=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OllamaProvider(client=client)
+    request = GenerateRequest(
+        model="qwen3:8b",
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+        config=GenerateConfig(stop_sequences=["STOP_HERE"]),
+    )
+
+    [e async for e in provider.generate(request)]
+
+    assert captured["payload"]["options"]["stop"] == ["STOP_HERE"]

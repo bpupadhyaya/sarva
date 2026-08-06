@@ -136,6 +136,49 @@ async def test_text_only_stream_produces_end_turn():
     assert done.message.content[0].text == "Hello, world"
 
 
+class _FakeClientCapturingKwargs:
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.calls: list[dict] = []
+
+        async def create(**kwargs):
+            self.calls.append(kwargs)
+            return _FakeStream(self._chunks)
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+    async def close(self):
+        pass
+
+
+async def test_generate_translates_stop_sequences_to_the_real_sdk_kwarg():
+    # A real bug found by a fresh-eyes sweep, applying the "one sibling
+    # has the feature, others silently diverge" lens that already caught
+    # round 149's DPO-schedule bug: GenerateConfig.stop_sequences is a
+    # shared, provider-agnostic field every adapter is supposed to honor
+    # (docs/providers.md names it as part of the contract), but only
+    # GoogleProvider ever actually translated it -- this adapter (and
+    # Anthropic's, and Ollama's) silently dropped it, even though the
+    # real OpenAI SDK genuinely supports a `stop` kwarg (str or
+    # list[str]) on chat.completions.create(). Confirmed live before
+    # this fix: a request with stop_sequences=["STOP_HERE"] sent no
+    # `stop` kwarg at all.
+    from sarva.providers.base import GenerateConfig
+
+    chunks = [_chunk(content="hi"), _chunk(finish_reason="stop", usage=_usage(1, 1))]
+    client = _FakeClientCapturingKwargs(chunks)
+    provider = OpenAIProvider(client=client)
+    request = GenerateRequest(
+        model="gpt-x",
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+        config=GenerateConfig(stop_sequences=["STOP_HERE"]),
+    )
+
+    [e async for e in provider.generate(request)]
+
+    assert client.calls[0]["stop"] == ["STOP_HERE"]
+
+
 async def test_a_legacy_function_call_finish_reason_is_not_reported_as_a_silent_success():
     # A real bug found by a fresh-eyes sweep, the third instance of a bug
     # class already fixed in both sibling adapters (Google's FinishReason

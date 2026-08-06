@@ -238,6 +238,20 @@ class AnthropicProvider:
             kwargs["thinking"] = {"type": "adaptive"}
         if request.config.effort:
             kwargs["output_config"] = {"effort": request.config.effort}
+        # A real bug found by a fresh-eyes sweep, applying the "one
+        # sibling has the feature, others silently diverge" lens that
+        # already caught round 149's DPO-schedule bug: GenerateConfig.
+        # stop_sequences is a shared, provider-agnostic field every
+        # adapter is supposed to honor (docs/providers.md names it as
+        # part of the contract), but only GoogleProvider ever actually
+        # translated it -- Anthropic, OpenAI, and Ollama each silently
+        # dropped it, with no exception or warning, and the real
+        # underlying Anthropic SDK genuinely supports `stop_sequences`
+        # as a real.messages.stream() kwarg. Confirmed live: a request
+        # with stop_sequences=["STOP_HERE"] sent no stop_sequences kwarg
+        # at all.
+        if request.config.stop_sequences:
+            kwargs["stop_sequences"] = request.config.stop_sequences
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:

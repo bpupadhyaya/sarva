@@ -18702,3 +18702,64 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `GenerateConfig.stop_sequences` was silently dropped by three of the four real provider adapters -- found by comparing all four side by side
+
+Round 151. Applying the "structural sibling comparison" lens that
+found round 149's DPO-schedule bug -- checking whether several
+parallel implementations of the same contract all apply a
+cross-cutting concern consistently, rather than reading any one in
+isolation -- this round's sweep found that `GenerateConfig.stop_
+sequences`, a field the provider chapter's own opening section already
+names as part of the shared contract every adapter honors ("max
+tokens, an `effort` knob, `thinking`, stop sequences"), was only ever
+translated by `GoogleProvider`. `AnthropicProvider`, `OpenAIProvider`,
+and `OllamaProvider` each built their outbound request with no
+equivalent line at all, silently dropping a caller's `stop_sequences`
+with no exception and no warning.
+
+Not a hypothetical field: all three real SDKs genuinely support it,
+confirmed by direct introspection. Anthropic's `messages.stream()`
+accepts `stop_sequences`; OpenAI's `chat.completions.create()` accepts
+`stop`; Ollama's real `/api/chat` endpoint documents `options.stop`. A
+caller who builds `GenerateRequest(..., config=GenerateConfig(stop_
+sequences=[...]))` -- to bound a structured-generation format, stop
+before a delimiter, or avoid a model rambling past an expected
+boundary -- got that setting silently honored only when routed to
+Google.
+
+**Confirmed live at all three**: a request with `stop_
+sequences=["STOP_HERE"]` sent no `stop_sequences` kwarg to Anthropic,
+no `stop` kwarg to OpenAI, and no `stop` anywhere in Ollama's
+payload/options.
+
+**Fixed** by adding the identical one-line translation to each of the
+three adapters, in each case pointed at that SDK's own real, documented
+field name (`stop_sequences`/`stop`/`options.stop`) rather than
+assuming a uniform shape across backends.
+
+**Verified by reverting** and watching all three new tests fail with
+the literal old gap reproducing itself: the field simply absent from
+the captured request/payload (`KeyError` on the missing key in each
+case).
+
+**3 new tests, 840 -> 843 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the Ollama tool-result-fusion chapter.
+
+**One hundred six of the last one hundred seven rounds (46-67, 70-151)
+have found and shipped real fixes; rounds 68-69 remain the only two
+clean sweeps.** This is the second bug found via the sibling-comparison
+lens (after round 149's DPO schedule), both times catching a
+cross-cutting concern that one implementation quietly forgot while its
+siblings got it right -- worth keeping in the standing rotation of
+lenses alongside "unvalidated numeric parameter."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

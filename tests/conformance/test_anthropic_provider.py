@@ -30,7 +30,13 @@ from sarva.multimodal.content import (
     ToolResultBlock,
 )
 from sarva.providers.anthropic_provider import AnthropicProvider, _to_anthropic_message
-from sarva.providers.base import DoneEvent, GenerateRequest, StopReason, StreamErrorEvent
+from sarva.providers.base import (
+    DoneEvent,
+    GenerateConfig,
+    GenerateRequest,
+    StopReason,
+    StreamErrorEvent,
+)
 
 
 async def test_text_block_translation():
@@ -319,3 +325,44 @@ async def test_an_unrecognized_stop_reason_fails_safe_as_refusal_not_end_turn():
     done = events[-1]
     assert isinstance(done, DoneEvent)
     assert done.stop_reason == StopReason.REFUSAL
+
+
+class _FakeMessagesCapturingKwargs:
+    def __init__(self, final):
+        self._final = final
+        self.calls: list[dict] = []
+
+    def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        return _SucceedingStreamContext(self._final)
+
+
+class _FakeClientCapturingKwargs:
+    def __init__(self, final):
+        self.messages = _FakeMessagesCapturingKwargs(final)
+
+
+async def test_generate_translates_stop_sequences_to_the_real_sdk_kwarg():
+    # A real bug found by a fresh-eyes sweep, applying the "one sibling
+    # has the feature, others silently diverge" lens that already caught
+    # round 149's DPO-schedule bug: GenerateConfig.stop_sequences is a
+    # shared, provider-agnostic field every adapter is supposed to honor
+    # (docs/providers.md names it as part of the contract), but only
+    # GoogleProvider ever actually translated it -- this adapter (and
+    # OpenAI's, and Ollama's) silently dropped it, with no exception or
+    # warning, even though the real Anthropic SDK genuinely supports
+    # `stop_sequences` as a real messages.stream() kwarg. Confirmed live
+    # before this fix: a request with stop_sequences=["STOP_HERE"] sent
+    # no stop_sequences kwarg at all.
+    final = _FakeFinalMessage(stop_reason="end_turn")
+    client = _FakeClientCapturingKwargs(final)
+    provider = AnthropicProvider(client=client)
+    request = GenerateRequest(
+        model="claude-x",
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+        config=GenerateConfig(stop_sequences=["STOP_HERE"]),
+    )
+
+    [e async for e in provider.generate(request)]
+
+    assert client.messages.calls[0]["stop_sequences"] == ["STOP_HERE"]
