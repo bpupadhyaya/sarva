@@ -207,6 +207,26 @@ def run_ablation(
     # live before this fix.
     if not seeds:
         raise ValueError("seeds must be a non-empty list")
+    # A real bug found by a much later fresh-eyes sweep, the fourth
+    # sibling parameter in this exact function to get this treatment:
+    # steps -- the actual training-duration parameter, and the one most
+    # likely to be computed programmatically (e.g. `total_tokens //
+    # (batch_size * seq_len)` for a smoke-test token budget) -- was left
+    # unvalidated by all three prior rounds of this same fix. `for step
+    # in range(steps)` below is simply empty for steps <= 0, so `loss`
+    # never advances past its `float("nan")` initializer, and that NaN
+    # is appended straight into `final_losses` with no exception
+    # anywhere -- a completely normal-looking AblationResult instead of
+    # the same clean ValueError its three sibling parameters already
+    # get for the identical class of mistake. Confirmed live: `mean_
+    # final_loss`/`stdev_final_loss` silently came back NaN, `.ranked()`
+    # "sorted" arms by a NaN key with no error, and
+    # `is_difference_trustworthy()` returned False -- indistinguishable
+    # from an honest "no real difference detected" verdict, directly
+    # undermining this module's own stated purpose as a *trustworthy*
+    # comparison harness.
+    if steps <= 0:
+        raise ValueError(f"steps must be positive, got {steps}")
     dataset = TextChunkDataset(token_ids, seq_len=seq_len)
 
     results: list[ArmResult] = []

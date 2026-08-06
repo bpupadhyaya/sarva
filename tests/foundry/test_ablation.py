@@ -267,3 +267,27 @@ def test_run_ablation_rejects_an_empty_seeds_list_instead_of_crashing_later_at_r
 
     with pytest.raises(ValueError, match="seeds"):
         run_ablation(arms, token_ids, seq_len=16, batch_size=2, steps=5, seeds=[])
+
+
+def test_run_ablation_rejects_a_non_positive_steps_instead_of_silently_returning_nan():
+    # A real bug found by a much later fresh-eyes sweep, the fourth
+    # sibling parameter in this exact function to get this treatment:
+    # steps -- the actual training-duration parameter, and the one most
+    # likely to be computed programmatically (e.g. `total_tokens //
+    # (batch_size * seq_len)` for a smoke-test token budget) -- was left
+    # unvalidated by all three prior rounds of this same fix. `for step
+    # in range(steps)` used to be empty for steps <= 0, so `loss` never
+    # advanced past its `float("nan")` initializer, and that NaN was
+    # appended straight into `final_losses` with no exception anywhere
+    # -- a completely normal-looking AblationResult instead of a clean
+    # error, silently undermining the harness's own purpose.
+    _, token_ids = _tokenized_corpus()
+    config = TransformerConfig(
+        vocab_size=300, dim=16, n_layers=1, n_heads=2, n_kv_heads=1, max_seq_len=16
+    )
+    arms = [AblationArm(name="a", model_config=config)]
+
+    with pytest.raises(ValueError, match="steps"):
+        run_ablation(arms, token_ids, seq_len=16, batch_size=2, steps=0, seeds=[0])
+    with pytest.raises(ValueError, match="steps"):
+        run_ablation(arms, token_ids, seq_len=16, batch_size=2, steps=-5, seeds=[0])

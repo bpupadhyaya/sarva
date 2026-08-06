@@ -20157,3 +20157,66 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `run_ablation`'s `steps` parameter was the one sibling numeric argument three prior rounds of this exact function's fixes never got to
+
+Round 172. This round's sweep found `foundry/sarva_foundry/ablation.py`'s
+`run_ablation()` -- already fixed three times over for unvalidated
+sibling numeric/list parameters (`record_every`, `batch_size`, `seeds`,
+each in its own prior round) -- had one more: `steps`, the actual
+training-duration parameter, and the one most likely to be computed
+programmatically (e.g. `total_tokens // (batch_size * seq_len)` for a
+smoke-test token budget), was left unvalidated by all three prior
+rounds of this same fix pattern.
+
+`for step in range(steps):` is simply empty for `steps <= 0`, so `loss`
+never advances past its `float("nan")` initializer, and that NaN is
+appended straight into `final_losses` with no exception anywhere -- a
+completely normal-looking `AblationResult` instead of the same clean
+`ValueError` its three sibling parameters already get for the
+identical class of mistake.
+
+**Confirmed live**: `run_ablation([arm], token_ids, seq_len=8,
+batch_size=2, steps=0, seeds=[0,1,2])` completed with
+`final_losses=[nan, nan, nan]` and `mean_final_loss=nan`, no exception.
+`.ranked()` "sorted" arms by a NaN key with no error, and
+`is_difference_trustworthy()` returned `False` -- indistinguishable
+from an honest "no real difference detected" verdict, directly
+undermining this module's own stated purpose as a *trustworthy*
+architecture-comparison harness ("advance LLMs, not just train them,"
+per the module's own docstring quoting the design doc).
+
+**Fixed** by adding the identical validation pattern right alongside
+the other three: `if steps <= 0: raise ValueError(f"steps must be
+positive, got {steps}")`.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for both
+`steps=0` and `steps=-5`.
+
+**1 new test, 869 -> 870 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update -- confirmed
+`docs/foundry/ablation.md` never documented the three sibling
+`ValueError`s either, matching the established foundry-internals-only
+config-validation precedent.
+
+**One hundred twenty-seven of the last one hundred twenty-eight rounds
+(46-67, 70-172) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** A fourth instance of the "one sibling
+parameter left unvalidated across N prior rounds of the identical fix
+pattern" shape -- the same lesson already drawn for `TransformerConfig`/
+`VisionEncoderConfig` (rounds 161/166/167), now confirmed in a
+completely different module. Worth treating any function with two or
+more already-fixed "sibling parameter" validation rounds as a strong
+prior that a fresh, complete parameter-by-parameter re-read is likely
+to find one more. The already-known `bpe.py`/`provenance.py` leads
+remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
