@@ -33,6 +33,28 @@ class TransformerConfig:
     moe: MoEConfig | None = None  # None (default): dense SwiGLU FFN, unchanged
 
     def __post_init__(self) -> None:
+        # A real bug found by a much later fresh-eyes sweep, applying
+        # the same lens all the sibling-field fixes below already used
+        # to the two fields this class's own author never got to:
+        # vocab_size and dim -- dim being the very value n_heads (below)
+        # divides *into*, not just the divisor n_heads itself. Neither
+        # was ever range/sign-checked. dim=0 passes `dim % n_heads == 0`
+        # trivially and constructs a fully degenerate model with no
+        # error anywhere -- confirmed live, two different token-id
+        # inputs produced bit-identical all-zero logits; against a real
+        # trained checkpoint it instead surfaces as an unreadable raw
+        # RuntimeError deep inside load_state_dict naming size-mismatch
+        # implementation details, the identical failure shape already
+        # named and fixed for n_layers/n_heads/n_kv_heads below.
+        # vocab_size was never referenced in this method at all;
+        # vocab_size=-5 raises a raw RuntimeError ("negative dimension")
+        # building the embedding table. Reachable through the identical
+        # untrusted config.json path already named in every sibling fix
+        # in this method (see foundry_provider.py's own docstring).
+        if self.vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {self.vocab_size}")
+        if self.dim <= 0:
+            raise ValueError(f"dim must be positive, got {self.dim}")
         # A real bug found by a later fresh-eyes sweep, on the very
         # field this __post_init__ divides by on its very first line:
         # n_layers and n_kv_heads (below) were each separately found

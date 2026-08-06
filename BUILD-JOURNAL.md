@@ -19396,3 +19396,73 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `TransformerConfig`/`VisionEncoderConfig` never validated `dim` (and `TransformerConfig` never validated `vocab_size` at all) — the two sibling fields five prior rounds' worth of fixes never got to
+
+Round 161. This round's sweep followed up on round 160's deferred lead
+and confirmed it: `foundry/sarva_foundry/model/transformer.py`'s
+`TransformerConfig.__post_init__` and `foundry/sarva_foundry/model/
+vision.py`'s `VisionEncoderConfig.__post_init__` -- both already
+revisited across five prior rounds (`n_layers`, `n_kv_heads`, `n_heads`,
+`image_size`/`patch_size`) -- still had two genuinely unchecked fields:
+`dim` in both classes, and `vocab_size` in `TransformerConfig` alone
+(never referenced in `__post_init__` at all).
+
+`dim` is the value `n_heads` divides *into* on the very next check
+(`dim % n_heads != 0`), but was never checked for being positive
+itself: `dim=0` passes that divisibility check trivially and
+constructs cleanly with no error anywhere.
+
+**Confirmed live**: `TransformerConfig(dim=0, ...)` and
+`DecoderOnlyTransformer(config)` constructed successfully with zero
+error. The resulting model was silently, completely degenerate -- two
+different token-id inputs produced bit-identical all-zero logits
+(`torch.allclose(out1, out2) == True`). Against a real trained
+checkpoint reloaded through `FoundryProvider`'s untrusted `config.json`
+path (see that module's own docstring: "a checkpoint saved mid-crash, a
+hand-edited/rolled-back config.json, or a training-script bug computing
+this field incorrectly"), it instead surfaced as an unreadable raw
+`RuntimeError` deep inside `load_state_dict` naming size-mismatch
+implementation-detail state-dict keys, caught by `FoundryProvider.
+__init__`'s `except Exception` and re-raised as a confusing wrapped
+`ValueError` -- the identical failure shape already named and fixed for
+`n_layers`/`n_heads`/`n_kv_heads` in this exact method across rounds
+133-140. `vocab_size=-5` raised a raw `RuntimeError` ("negative
+dimension") building the embedding table. `VisionEncoderConfig(dim=0,
+...)` reproduced the identical silent construction with no error.
+
+**Fixed** by adding `if self.vocab_size <= 0: raise ValueError(...)`
+and `if self.dim <= 0: raise ValueError(...)` at the top of
+`TransformerConfig.__post_init__` (before the existing `n_heads`
+check), and `if self.dim <= 0: raise ValueError(...)` to
+`VisionEncoderConfig.__post_init__` right after its own `n_heads`
+check -- matching each class's own established
+clean-`ValueError`-at-construction-time convention exactly.
+
+**Verified by reverting** and watching all three new tests fail with
+the literal old bug's own shape: `DID NOT RAISE ValueError` for both
+`dim=0`/`dim=-32` and `vocab_size=0`/`vocab_size=-5`.
+
+**3 new tests, 854 -> 857 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round,
+matching established precedent for foundry-internals-only
+config-validation fixes in this file family (see rounds 133-140).
+
+**One hundred sixteen of the last one hundred seventeen rounds (46-67,
+70-161) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** Round 140's own journal entry had explicitly
+warned "no further 'this class is done' claim should be treated as
+load-bearing without a fresh field-by-field read of the actual
+`__post_init__` body" -- exactly the lens this round applied, five
+rounds later, to close the two fields every prior round had missed.
+The already-known `bpe.py` duplicate-`special_tokens` off-by-one
+remains unreachable -- no caller in the repo passes duplicates.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

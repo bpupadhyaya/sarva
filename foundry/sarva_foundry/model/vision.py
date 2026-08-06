@@ -85,6 +85,14 @@ class VisionEncoderConfig:
         # a clean ValueError. Confirmed live.
         if self.n_heads <= 0:
             raise ValueError(f"n_heads must be positive, got {self.n_heads}")
+        # A real bug found by a much later fresh-eyes sweep, the
+        # identical gap just closed one file over in TransformerConfig's
+        # own __post_init__: dim is the value n_heads divides *into* on
+        # the very next line, but was never checked for being positive
+        # itself. dim=0 passes `dim % n_heads == 0` trivially and
+        # constructs cleanly with no error anywhere. Confirmed live.
+        if self.dim <= 0:
+            raise ValueError(f"dim must be positive, got {self.dim}")
         if self.dim % self.n_heads != 0:
             raise ValueError(f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
         # A real bug found by a fresh-eyes sweep: the identical shape

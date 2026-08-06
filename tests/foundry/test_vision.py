@@ -104,6 +104,19 @@ def test_vision_encoder_config_rejects_non_positive_n_heads():
         _tiny_vision_config(n_heads=0)
 
 
+def test_vision_encoder_config_rejects_non_positive_dim():
+    # A real bug found by a much later fresh-eyes sweep, the identical
+    # gap just closed one file over in TransformerConfig's own
+    # __post_init__: dim is the value n_heads divides *into* right
+    # below in this same __post_init__, but was never checked for being
+    # positive itself. dim=0 used to pass the divisibility check
+    # trivially and construct cleanly with no error anywhere.
+    import pytest
+
+    with pytest.raises(ValueError, match="dim"):
+        _tiny_vision_config(dim=0)
+
+
 def test_n_patches_matches_the_grid():
     config = _tiny_vision_config(image_size=32, patch_size=8)
     assert config.patches_per_side == 4

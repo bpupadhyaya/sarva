@@ -202,6 +202,39 @@ def test_transformer_config_rejects_non_positive_n_heads():
         _tiny_config(dim=256, n_heads=-8, n_kv_heads=4)
 
 
+def test_transformer_config_rejects_non_positive_dim():
+    # A real bug found by a much later fresh-eyes sweep, applying the
+    # same lens as the n_layers/n_kv_heads/n_heads fixes above to a
+    # field none of those rounds got to: dim is the value n_heads
+    # divides *into*, but was never checked for being positive itself.
+    # dim=0 used to pass `dim % n_heads == 0` trivially and construct a
+    # fully degenerate model with no error anywhere -- confirmed live,
+    # two different token-id inputs produced bit-identical all-zero
+    # logits; against a real trained checkpoint it instead surfaced as
+    # an unreadable raw RuntimeError deep inside load_state_dict naming
+    # size-mismatch implementation details.
+    import pytest
+
+    with pytest.raises(ValueError):
+        _tiny_config(dim=0)
+    with pytest.raises(ValueError):
+        _tiny_config(dim=-32, n_heads=1, n_kv_heads=1)
+
+
+def test_transformer_config_rejects_non_positive_vocab_size():
+    # A real bug found alongside the dim fix above: vocab_size was never
+    # referenced in __post_init__ at all. vocab_size=-5 used to raise a
+    # raw RuntimeError ("negative dimension") building the embedding
+    # table deep inside DecoderOnlyTransformer's construction, instead
+    # of a clean ValueError here.
+    import pytest
+
+    with pytest.raises(ValueError):
+        _tiny_config(vocab_size=0)
+    with pytest.raises(ValueError):
+        _tiny_config(vocab_size=-5)
+
+
 def test_forward_raises_a_clear_error_past_max_seq_len():
     # Found by running examples/03_train_toy_transformer.py's generation
     # loop, which grows the sequence one token at a time past
