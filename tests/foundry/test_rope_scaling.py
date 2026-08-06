@@ -91,6 +91,26 @@ def test_factor_must_be_positive():
         RopeScalingConfig("ntk", factor=-1.0)
 
 
+def test_method_must_be_a_real_known_scaling_technique():
+    # A real bug found by a later fresh-eyes sweep: `method` is typed
+    # `Literal["linear", "ntk"]`, but a plain dataclass never enforces
+    # Literal/type annotations at runtime -- nothing here ever checked
+    # that `self.method` is actually one of those two strings.
+    # precompute_rope only special-cases the two known values; any
+    # other string -- a typo ("Linear", "NTK"), or a real-but-
+    # unimplemented technique name ("yarn", "dynamic") -- used to match
+    # neither branch and silently fall through to completely UNSCALED
+    # RoPE, identical to `scaling=None`, with no exception anywhere.
+    # Reachable through the same untrusted checkpoint config.json path
+    # already established for `factor` above.
+    import pytest
+
+    with pytest.raises(ValueError, match="method"):
+        RopeScalingConfig("yarn", factor=8.0)
+    with pytest.raises(ValueError, match="method"):
+        RopeScalingConfig("Linear", factor=8.0)  # wrong case, not the real "linear"
+
+
 def test_factor_must_be_finite_not_just_positive():
     # A real bug found by actually constructing this with factor=nan and
     # running a real forward pass: `nan <= 0` is False in Python, so the

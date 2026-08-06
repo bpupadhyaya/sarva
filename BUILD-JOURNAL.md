@@ -17811,3 +17811,57 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `RopeScalingConfig.method` was typed `Literal["linear", "ntk"]` but never actually validated -- any other string silently reverted to unscaled RoPE
+
+Round 136. `RopeScalingConfig`'s own `__post_init__` already validates
+`factor` (finite, positive -- multiple prior-round fixes), but `method`
+-- typed `Literal["linear", "ntk"]` -- was never checked at runtime at
+all. Plain dataclasses, unlike Pydantic models, never enforce `Literal`
+annotations; nothing anywhere confirmed `self.method` was actually one
+of the two real strings. `precompute_rope` only special-cases the two
+known values (`scaling.method == "ntk"`, `scaling.method == "linear"`);
+any other string -- a typo (`"Linear"`, `"NTK"`), or a real-but-
+unimplemented technique name (`"yarn"`, `"dynamic"`) -- matched neither
+branch and silently fell through to completely UNSCALED RoPE, identical
+to `scaling=None`, with no exception anywhere.
+
+Reachable through the identical untrusted `config.json` provenance
+already documented and defended for `factor` on this exact class:
+`foundry_provider.load_checkpoint_bundle` deserializes `rope_scaling`
+straight from a checkpoint's `config.json`. A long-context checkpoint
+whose config has a typo'd or unsupported `method` value would load
+cleanly and silently revert to base (short-context) RoPE -- degraded or
+wrong attention behavior at extended sequence lengths, with zero
+diagnostic signal anywhere.
+
+**Confirmed live two ways**: direct construction with `method="yarn"`
+raised nothing, and its RoPE tables were bit-identical to unscaled
+output; a real trained checkpoint's `config.json` with `"rope_scaling":
+{"method": "yarn", ...}`, loaded through the actual untrusted-config.json
+path, loaded cleanly and silently reverted to base RoPE.
+
+**Fixed** by adding `if self.method not in ("linear", "ntk"): raise
+ValueError(...)` to the same `__post_init__` that already validates
+`factor`.
+
+**Verified by reverting** and watching the new test fail with the
+literal old shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 824 -> 825 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update: `RopeScalingConfig`'s
+own prior `factor`-validation fixes never got a dedicated docs chapter
+either, matching established precedent for foundry-internals-only
+config-validation fixes.
+
+**Ninety-one of the last ninety-two rounds (46-67, 70-136) have found
+and shipped real fixes; rounds 68-69 remain the only two clean sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

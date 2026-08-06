@@ -94,6 +94,30 @@ class RopeScalingConfig:
         # non-positive rejection.
         if not math.isfinite(self.factor) or self.factor <= 0:
             raise ValueError(f"factor must be a finite positive number, got {self.factor}")
+        # A real bug found by a later fresh-eyes sweep: `method` is typed
+        # `Literal["linear", "ntk"]`, but a plain dataclass (unlike a
+        # Pydantic model) never enforces Literal/type annotations at
+        # runtime -- nothing here ever checked that `self.method` is
+        # actually one of those two strings. `precompute_rope` below only
+        # special-cases the two known values (`scaling.method == "ntk"`,
+        # `scaling.method == "linear"`); any other string -- a typo
+        # ("Linear", "NTK"), a real-but-unimplemented technique name
+        # ("yarn", "dynamic") -- matches neither branch and silently
+        # falls through to completely UNSCALED RoPE, identical to
+        # `scaling=None`, with no exception anywhere. Confirmed live two
+        # ways: direct construction with method="yarn" raised nothing,
+        # and its RoPE tables were bit-identical to unscaled; a real
+        # checkpoint's config.json with `"rope_scaling": {"method":
+        # "yarn", ...}`, loaded through the actual untrusted-config.json
+        # path (`foundry_provider.load_checkpoint_bundle`), loaded
+        # cleanly and silently reverted to base RoPE -- a long-context
+        # checkpoint would then behave as if never scaled, with zero
+        # diagnostic signal. The identical config.json-provenance threat
+        # model already documented and defended for `factor` above;
+        # `method` was simply the sibling field that got no analogous
+        # check.
+        if self.method not in ("linear", "ntk"):
+            raise ValueError(f"method must be 'linear' or 'ntk', got {self.method!r}")
 
 
 def precompute_rope(
