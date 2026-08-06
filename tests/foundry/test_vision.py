@@ -91,6 +91,19 @@ def test_vision_encoder_config_rejects_non_positive_n_kv_heads():
         _tiny_vision_config(n_heads=4, n_kv_heads=-4)
 
 
+def test_vision_encoder_config_rejects_non_positive_n_heads():
+    # A real bug found by a later fresh-eyes sweep, one field over from
+    # the identical TransformerConfig.n_heads gap in transformer.py:
+    # n_heads is used as a divisor right below in this same
+    # __post_init__, but was never validated for being positive.
+    # n_heads=0 used to raise a raw ZeroDivisionError instead of a
+    # clean ValueError.
+    import pytest
+
+    with pytest.raises(ValueError, match="n_heads"):
+        _tiny_vision_config(n_heads=0)
+
+
 def test_n_patches_matches_the_grid():
     config = _tiny_vision_config(image_size=32, patch_size=8)
     assert config.patches_per_side == 4

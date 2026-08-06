@@ -184,6 +184,24 @@ def test_transformer_config_rejects_non_positive_n_kv_heads():
         _tiny_config(n_heads=8, n_kv_heads=-4)
 
 
+def test_transformer_config_rejects_non_positive_n_heads():
+    # A real bug found by a later fresh-eyes sweep, on the very field
+    # this __post_init__ divides by on its very first line: n_layers
+    # and n_kv_heads were each separately found missing a positivity
+    # check and fixed in earlier rounds, but n_heads itself was never
+    # validated. n_heads=0 used to raise a raw ZeroDivisionError instead
+    # of a clean ValueError; a negative n_heads whose magnitude divides
+    # dim evenly used to pass silently, producing a negative head_dim
+    # that only surfaced as a confusing raw RuntimeError deep inside
+    # DecoderOnlyTransformer's construction.
+    import pytest
+
+    with pytest.raises(ValueError):
+        _tiny_config(n_heads=0)
+    with pytest.raises(ValueError):
+        _tiny_config(dim=256, n_heads=-8, n_kv_heads=4)
+
+
 def test_forward_raises_a_clear_error_past_max_seq_len():
     # Found by running examples/03_train_toy_transformer.py's generation
     # loop, which grows the sequence one token at a time past

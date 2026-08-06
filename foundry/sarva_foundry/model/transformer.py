@@ -33,6 +33,21 @@ class TransformerConfig:
     moe: MoEConfig | None = None  # None (default): dense SwiGLU FFN, unchanged
 
     def __post_init__(self) -> None:
+        # A real bug found by a later fresh-eyes sweep, on the very
+        # field this __post_init__ divides by on its very first line:
+        # n_layers and n_kv_heads (below) were each separately found
+        # missing a positivity check and fixed in earlier rounds, but
+        # n_heads itself -- the one field the FIRST check in this
+        # method already uses as a divisor -- was never validated.
+        # n_heads=0 raised the modulo check's own raw ZeroDivisionError
+        # instead of a clean ValueError; a negative n_heads whose
+        # magnitude divides dim evenly (Python's `%` follows the
+        # divisor's sign) passed silently, producing a negative
+        # head_dim that only surfaced as a confusing raw RuntimeError
+        # deep inside DecoderOnlyTransformer's construction. Confirmed
+        # live both ways.
+        if self.n_heads <= 0:
+            raise ValueError(f"n_heads must be positive, got {self.n_heads}")
         if self.dim % self.n_heads != 0:
             raise ValueError(f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
         if self.hidden_dim is None:

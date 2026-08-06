@@ -18063,3 +18063,59 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `n_heads` -- the field both `TransformerConfig` and `VisionEncoderConfig` divide by on the very first line of `__post_init__` -- was never validated for being positive, in either class
+
+Round 140. `n_layers` and `n_kv_heads` were each separately found
+missing a positivity check and fixed in earlier rounds (133-135, 139)
+across `TransformerConfig` and `VisionEncoderConfig` -- but `n_heads`
+itself, the one field the FIRST check in both classes' `__post_init__`
+already uses as a divisor (`dim % n_heads`), was never validated in
+either class.
+
+**Confirmed live, both classes, two failure shapes**:
+
+- `n_heads=0` raised the modulo check's own raw, undocumented
+  `ZeroDivisionError: integer modulo by zero` instead of a clean
+  `ValueError`.
+- `n_heads=-8` (with `dim=256`) -- a negative value whose magnitude
+  divides `dim` evenly (Python's `%` follows the divisor's sign, so
+  `256 % -8 == 0`) -- passed construction silently, producing a
+  negative `head_dim=-32`. The corruption stayed invisible until
+  `DecoderOnlyTransformer`/`VisionEncoder` was actually built, crashing
+  deep inside PyTorch with a raw `RuntimeError: Trying to create tensor
+  with negative dimension`.
+
+Reachable through the identical untrusted `config.json` path already
+established for every sibling field on these two classes.
+
+**Fixed** by adding `<= 0` positivity checks for `n_heads` at the very
+top of both `__post_init__` methods, ahead of the existing `dim %
+n_heads` divisibility check.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old shape: a raw `ZeroDivisionError` propagating uncaught.
+
+**2 new tests, 828 -> 830 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for foundry-internals-only config-validation
+fixes in this file family.
+
+**Ninety-five of the last ninety-six rounds (46-67, 70-140) have found
+and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** `TransformerConfig` and `VisionEncoderConfig` have now each
+had every field individually confirmed validated across five separate
+rounds (133-136, 139-140) -- both classes' earlier "believed fully
+validated" claims (rounds 134, 135, 139) turned out premature three
+times over combined. No further "this class is done" claim should be
+treated as load-bearing without a fresh field-by-field read of the
+actual `__post_init__` body.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

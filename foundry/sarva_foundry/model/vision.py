@@ -77,6 +77,14 @@ class VisionEncoderConfig:
                 f"image_size ({self.image_size}) must be divisible by "
                 f"patch_size ({self.patch_size})"
             )
+        # A real bug found by a later fresh-eyes sweep, one field over
+        # from the identical TransformerConfig.n_heads gap in
+        # transformer.py: n_heads is used as a divisor on the very next
+        # line, but was never validated for being positive. n_heads=0
+        # raised the modulo check's own raw ZeroDivisionError instead of
+        # a clean ValueError. Confirmed live.
+        if self.n_heads <= 0:
+            raise ValueError(f"n_heads must be positive, got {self.n_heads}")
         if self.dim % self.n_heads != 0:
             raise ValueError(f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
         # A real bug found by a fresh-eyes sweep: the identical shape
