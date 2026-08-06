@@ -18763,3 +18763,61 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The very next round found the identical sibling-comparison gap, one field over -- Ollama alone never translated `max_tokens` either
+
+Round 152. The same sibling-comparison lens that found round 151's
+`stop_sequences` gap, applied one field over: `Anthropic`/`OpenAI`/
+`Google` all unconditionally send `GenerateConfig.max_tokens` on every
+call (as `max_tokens`/`max_completion_tokens`/`max_output_tokens`
+respectively), but `OllamaProvider` never translated it into Ollama's
+real, documented `options.num_predict` field at all -- `max_tokens`
+was simply never referenced anywhere in the file.
+
+Unlike `effort`/`thinking`, which OpenAI's and Google's adapters
+explicitly and deliberately leave unmapped with a comment justifying
+why, there was no such deliberate-omission comment here. This same
+adapter's own comments already discuss `num_predict` twice, writing
+the truncation-*detection* side of the feature (off `done_reason ==
+"length"`) without ever writing the truncation-*request* side.
+
+Ollama's own server-side default for `num_predict` is `-1` -- generate
+until the model stops on its own or the context window is exhausted --
+so a caller relying on `max_tokens` to bound response length/cost got
+silently no enforcement when routed to Ollama: this project's "free &
+private" local-model tier, and the one most likely to run unattended
+with no API-cost pressure to notice runaway generation, the identical
+framing that justified the token-usage fix a few rounds earlier in
+this same file.
+
+**Confirmed live**: `GenerateConfig(max_tokens=16)` produced no
+`options` key in the outbound payload at all.
+
+**Fixed** by always building an `options` dict carrying `num_predict`,
+merging in `stop` when `stop_sequences` is set rather than the two
+fields fighting over the same key.
+
+**Verified by reverting** and watching the new test fail with the
+literal old gap reproducing itself: `KeyError: 'options'`.
+
+**1 new test, 843 -> 844 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after round 151's `stop_sequences` chapter.
+
+**One hundred seven of the last one hundred eight rounds (46-67,
+70-152) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** Two rounds in a row have now found the
+sibling-comparison gap in the exact same adapter (Ollama) for two
+adjacent `GenerateConfig` fields -- worth a direct check of Ollama's
+remaining fields (`effort`, `thinking`) against its three siblings
+before assuming this adapter's `GenerateConfig` translation is now
+complete.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

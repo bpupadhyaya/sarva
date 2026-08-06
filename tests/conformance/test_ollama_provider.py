@@ -438,3 +438,40 @@ async def test_generate_translates_stop_sequences_to_the_real_options_stop_field
     [e async for e in provider.generate(request)]
 
     assert captured["payload"]["options"]["stop"] == ["STOP_HERE"]
+
+
+@pytest.mark.asyncio
+async def test_generate_translates_max_tokens_to_the_real_options_num_predict_field():
+    # A real bug found by a later fresh-eyes sweep, the sibling field to
+    # stop_sequences on this same GenerateConfig: Anthropic/OpenAI/
+    # Google all unconditionally send max_tokens (under their own
+    # SDK-specific names), but this adapter never translated it into
+    # Ollama's real, documented `options.num_predict` field at all.
+    # Ollama's own server-side default for num_predict is -1 (generate
+    # until the model stops on its own or the context window is
+    # exhausted), so a caller relying on max_tokens to bound response
+    # length got silently no enforcement when routed to Ollama.
+    # Confirmed live before this fix: max_tokens=16 produced no
+    # `options` key in the payload at all.
+    import json
+
+    from sarva.providers.base import GenerateConfig
+
+    body = b'{"message": {"content": "hello"}, "done": true, "done_reason": "stop"}\n'
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, content=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OllamaProvider(client=client)
+    request = GenerateRequest(
+        model="qwen3:8b",
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+        config=GenerateConfig(max_tokens=16),
+    )
+
+    [e async for e in provider.generate(request)]
+
+    assert captured["payload"]["options"]["num_predict"] == 16

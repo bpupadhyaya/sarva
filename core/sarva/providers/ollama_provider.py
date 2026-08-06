@@ -182,8 +182,27 @@ class OllamaProvider:
         # genuinely documents an `options.stop` field (a list of
         # strings). Confirmed live: a request with stop_sequences=[
         # "STOP_HERE"] sent no `stop` anywhere in the payload/options.
+        #
+        # A later fresh-eyes sweep found the identical gap for
+        # max_tokens, the sibling field to stop_sequences on this same
+        # GenerateConfig: Anthropic/OpenAI/Google all unconditionally
+        # send it (as max_tokens/max_completion_tokens/max_output_tokens
+        # respectively, every single call), but this adapter never
+        # translated it into Ollama's real, documented
+        # `options.num_predict` field at all. Ollama's own server-side
+        # default for num_predict is -1 (generate until the model stops
+        # on its own or the context window is exhausted), so a caller
+        # relying on max_tokens to bound response length/cost -- the
+        # ordinary, documented way to do so -- got silently no
+        # enforcement when routed to Ollama, this project's "free &
+        # private" local-model tier and the one most likely to run
+        # unattended with no API-cost pressure to notice runaway
+        # generation. Confirmed live: max_tokens=16 produced no `options`
+        # key in the payload at all.
+        options: dict[str, Any] = {"num_predict": request.config.max_tokens}
         if request.config.stop_sequences:
-            payload["options"] = {"stop": request.config.stop_sequences}
+            options["stop"] = request.config.stop_sequences
+        payload["options"] = options
 
         text_acc = ""
         content: list[object] = []

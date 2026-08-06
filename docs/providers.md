@@ -989,6 +989,38 @@ Verified by reverting and watching all three new tests fail with the
 literal old gap reproducing itself: the field simply absent from the
 captured request. 3 new tests, 840 → 843 Python tests.
 
+### The very next round found the identical gap, one field over — Ollama alone never translated `max_tokens` either
+
+The same sibling-comparison lens, applied one field over on the very
+next round: `Anthropic`/`OpenAI`/`Google` all unconditionally send
+`GenerateConfig.max_tokens` on every call (as `max_tokens`/
+`max_completion_tokens`/`max_output_tokens` respectively), but
+`OllamaProvider` never translated it into Ollama's real, documented
+`options.num_predict` field at all — `max_tokens` was simply never
+referenced anywhere in the file. Unlike `effort`/`thinking`, which
+OpenAI's and Google's adapters explicitly and deliberately leave
+unmapped with a comment justifying why, there was no such
+deliberate-omission comment here for `max_tokens` — and this same
+adapter's own comments already discuss `num_predict` twice (writing
+the truncation-*detection* side of the feature, off `done_reason ==
+"length"`) without ever writing the truncation-*request* side.
+
+Ollama's own server-side default for `num_predict` is `-1` — generate
+until the model stops on its own or the context window is exhausted —
+so a caller relying on `max_tokens` to bound response length/cost, the
+ordinary documented way to do so, got silently no enforcement when
+routed to Ollama: this project's "free & private" local-model tier,
+and the one most likely to run unattended with no API-cost pressure to
+notice runaway generation, the identical framing that justified the
+token-usage fix a few rounds earlier in this same file. Confirmed live:
+`GenerateConfig(max_tokens=16)` produced no `options` key in the
+payload at all. Fixed by always building an `options` dict carrying
+`num_predict`, merging in `stop` when `stop_sequences` is set rather
+than the two fields fighting over the same key. Verified live the
+payload now always carries `num_predict`. Verified by reverting and
+watching the new test fail with the literal old gap reproducing
+itself: `KeyError: 'options'`. 1 new test, 843 → 844 Python tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which
