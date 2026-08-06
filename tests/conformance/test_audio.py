@@ -467,3 +467,33 @@ def test_transcribe_still_accepts_ordinary_short_audio_under_the_cap():
     text = transcribe(raw)
 
     assert isinstance(text, str)
+
+
+@pytest.mark.skipif(not stt_extra_installed(), reason="sarva[audio] (faster-whisper) not installed")
+def test_transcribe_accepts_a_genuinely_valid_zero_frame_wav_not_a_decode_error():
+    # A real bug found by a fresh-eyes sweep, the identical "empty is a
+    # real, known value that truthiness silently treats as absent/
+    # failed" shape already found and fixed once in this same audio
+    # subsystem, one file over (AudioToTextDegrader's `duration_s or
+    # ...`): `_decode_audio_isolated`'s `not result.stdout` used to
+    # treat a genuinely valid, zero-frame WAV -- e.g. a voice-message
+    # client where the user tapped-and-immediately-released record, a
+    # plausible real artifact, not contrived -- as a decode FAILURE,
+    # even though the worker exits 0 and writes 0 bytes to stdout
+    # exactly per its own documented contract (zero samples is still a
+    # success). Confirmed live before this fix: a real, valid
+    # zero-frame WAV raised "could not decode audio" instead of
+    # transcribing (correctly) to an empty string.
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"")  # zero frames -- still a genuinely valid WAV
+    raw = buf.getvalue()
+
+    text = transcribe(raw)  # must not raise
+
+    assert text == ""

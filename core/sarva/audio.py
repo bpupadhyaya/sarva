@@ -354,7 +354,25 @@ def _decode_audio_isolated(audio_bytes: bytes):
     except subprocess.TimeoutExpired as e:
         raise RuntimeError("audio decode timed out") from e
 
-    if result.returncode != 0 or not result.stdout:
+    # A real bug found by a fresh-eyes sweep, the identical "empty is a
+    # real, known value that truthiness silently treats as absent/
+    # failed" shape already found and fixed once in this same audio
+    # subsystem, one file over (AudioToTextDegrader's `duration_s or
+    # ...`): `not result.stdout` treats a genuinely valid, zero-frame
+    # WAV -- e.g. a voice-message client where the user tapped-and-
+    # immediately-released record, a plausible real artifact, not
+    # contrived -- as a decode FAILURE, even though the worker exits 0
+    # and writes 0 bytes to stdout exactly per its own documented
+    # contract ("writes the resulting float32 samples raw to stdout on
+    # success" -- zero samples is still a success). Confirmed live: a
+    # real, valid zero-frame WAV decoded successfully by the worker
+    # (returncode=0, empty stderr) still raised "could not decode
+    # audio" in the parent, misleadingly reported past a completely
+    # successful decode. The worker's own returncode is already the
+    # correct, sufficient success/failure signal -- stdout emptiness on
+    # a returncode==0 success is meaningful data (zero samples), not a
+    # second failure indicator to OR in.
+    if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         if detail.startswith("AUDIO_TOO_LONG:"):
             duration_s = float(detail.removeprefix("AUDIO_TOO_LONG:"))

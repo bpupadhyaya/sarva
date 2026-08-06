@@ -19106,3 +19106,67 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `_decode_audio_isolated`'s own success check had the identical "empty is silently treated as failed" truthiness bug already fixed once elsewhere in this same audio subsystem
+
+Round 157. This round's sweep found `core/sarva/audio.py`'s
+`_decode_audio_isolated`: `if result.returncode != 0 or not result.
+stdout:` treats a genuinely valid, zero-frame WAV -- a plausible real
+artifact, not contrived (a voice-message client where the user tapped-
+and-immediately-released record) -- as a decode FAILURE, even though
+the worker (`_audio_decode_worker.py`) exits `0` and writes `0` bytes
+to stdout exactly per its own documented contract ("writes the
+resulting float32 samples raw to stdout on success" -- zero samples is
+still a success).
+
+The identical shape as `AudioToTextDegrader`'s own already-fixed
+`duration_s or ...` bug -- a legitimately-zero real value that Python
+truthiness silently confuses with "absent" or "failed" -- just
+reintroduced independently, one file over, on different data (stdout
+bytes instead of a duration float). Nobody carried the lesson from the
+first fix to this later-added subprocess-isolation code path.
+
+**Confirmed live**: a real, valid zero-frame WAV (a genuinely
+constructed 44-byte WAV header, zero frames) decoded successfully by
+the worker (`returncode=0`, empty stderr) still raised `"could not
+decode audio"` in the parent, misreporting a completely successful
+decode as a failure. `transcribe()` and, by extension, `sarva
+transcribe` reproduced the identical wrong error.
+
+**Fixed** by dropping `or not result.stdout` entirely: the worker's own
+`returncode` is already the correct, sufficient success/failure signal
+per its own documented contract -- stdout emptiness on a `returncode
+== 0` success is meaningful data (zero samples), never a second
+failure indicator to `or` in.
+
+**Verified live**: the same zero-frame WAV now decodes successfully
+(and `transcribe()` returns an empty string); a genuinely undecodable
+input (garbage bytes) still correctly raises `RuntimeError`.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `RuntimeError: could not decode audio`
+for audio that decoded perfectly fine.
+
+**1 new test, 850 -> 851 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+paragraph directly after the memory-exhaustion fix, in the same
+audio-decode-isolation per-bug narrative.
+
+**One hundred twelve of the last one hundred thirteen rounds (46-67,
+70-157) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** The same "truthiness treats a legitimate zero
+as absent/failed" lens has now found two real bugs in this project's
+audio subsystem alone (`AudioToTextDegrader`'s duration, now this
+worker's stdout) -- worth a direct grep for other `not <bytes-or-
+sequence>`/`<value> or <fallback>` checks anywhere a legitimately-empty
+real value (empty bytes, an empty list, a zero count) could be
+silently confused with "missing."
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

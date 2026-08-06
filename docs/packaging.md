@@ -1272,6 +1272,36 @@ watching the new test fail with the literal old bug's own shape: a
 real, populated stdout instead of an empty one. 1 new test, 775 → 776
 Python tests.
 
+**A much later fresh-eyes sweep found `_decode_audio_isolated`'s own
+success check had the identical "empty is silently treated as failed"
+truthiness bug already fixed once elsewhere in this same audio
+subsystem.** `if result.returncode != 0 or not result.stdout:` treats
+a genuinely valid, zero-frame WAV — a plausible real artifact, not
+contrived (a voice-message client where the user tapped-and-
+immediately-released record) — as a decode FAILURE, even though the
+worker exits `0` and writes `0` bytes to stdout exactly per its own
+documented contract (zero samples is still a success, per this
+module's own docstring above). The identical shape as
+`AudioToTextDegrader`'s own already-fixed `duration_s or ...` bug — a
+legitimately-zero real value that Python truthiness silently confuses
+with "absent" or "failed" — just reintroduced independently, one file
+over, on different data (stdout bytes instead of a duration float).
+Confirmed live: a real, valid zero-frame WAV (a genuinely constructed
+44-byte WAV header, zero frames) decoded successfully by the worker
+(`returncode=0`, empty stderr) still raised `"could not decode audio"`
+in the parent, misreporting a completely successful decode as a
+failure. Fixed by dropping `or not result.stdout` entirely: the
+worker's own `returncode` is already the correct, sufficient
+success/failure signal per its own documented contract — stdout
+emptiness on a `returncode == 0` success is meaningful data (zero
+samples), never a second failure indicator to `or` in. Verified live
+the same zero-frame WAV now transcribes successfully to an empty
+string; a genuinely undecodable input (garbage bytes) still correctly
+raises. Verified by reverting and watching the new test fail with the
+literal old bug's own shape: `RuntimeError: could not decode audio`
+for audio that decoded perfectly fine. 1 new test, 850 → 851 Python
+tests.
+
 **`synthesize()` itself could crash with a raw subprocess error, found
 by actually running it against the real `espeak-ng` binary with a bad
 `--voice`.** `espeak-ng` genuinely exits 1 for an unrecognized voice
