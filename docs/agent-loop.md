@@ -1230,6 +1230,46 @@ than a permanent leak — documented here rather than treated as a
 finding, since fixing it would mean changing `/ws/chat`'s own
 generator-consumption shape for a gap that already recovers on its own.
 
+### A much later fresh-eyes sweep found the flat `_TOOL_TIMEOUT_SECONDS` itself, not just its cancellation side effects, was wrong for `delegate_task`
+
+Every prior sweep of this exact `_TOOL_TIMEOUT_SECONDS`/`spawn_subagent`
+interaction — including the cancelled-subagent reservation leak fixed
+directly above — only ever questioned what happens *once* the flat
+90-second timeout fires. None asked whether 90 seconds is the right
+number for `delegate_task` in the first place, even though
+`spawn_subagent`'s own budget math (see "Two CONCURRENT `delegate_task`
+calls" above) legitimately grants a subagent up to half of whatever
+wall-clock budget this run has left — routinely far more than 90s under
+the default `Budget.max_wall_seconds=3600.0` — and `DelegateTool`'s own
+tool spec explicitly promises the model "its own model-call budget
+(bounded by what's left of this run's own budget)."
+
+`run_one` wraps *every* tool call, `delegate_task` included, in one flat
+`asyncio.wait_for(..., timeout=_TOOL_TIMEOUT_SECONDS)` — a backstop
+correctly sized for a genuinely hung ordinary tool, but with no
+awareness that a subagent can be legitimately entitled to 20-40x more
+time than that. An entirely ordinary, non-hung delegation — a real
+cloud-API round trip, a slower local Ollama model, a subagent that
+itself calls a slow tool like `run_shell`/`web_fetch` — got killed at
+90s and reported to the model as a timeout error, nowhere near the
+budget it was actually granted. Confirmed live: a scripted subagent
+turn taking a mere 1.5 real seconds, under a fully generous default
+`Budget`, still came back `is_error=True` with `"tool call timed out
+after 90s"` once the wrapper's timeout was proportionally scaled down
+for a fast test.
+
+Fixed by giving `DelegateTool` calls a floor of what's actually left of
+this run's own wall-clock budget — `self._budget.max_wall_seconds -
+spend.wall_seconds`, the true ceiling `spawn_subagent`'s own clamp
+already enforces — instead of blindly using the constant meant for a
+stuck ordinary tool: `timeout = max(_TOOL_TIMEOUT_SECONDS,
+remaining_wall)`. Every non-`DelegateTool` call keeps the exact same
+flat 90s backstop it always had. Verified live: the identical scripted
+subagent now returns its real answer instead of a timeout error.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape — `is_error=True` for a subagent that was making
+completely ordinary progress. 1 new test, 860 → 861 Python tests.
+
 ### `spawn_subagent`'s real shape was already frozen in spec-03 — a same-session correction, not a second milestone
 
 The paragraphs above describe the feature as first built, against the

@@ -1008,10 +1008,32 @@ class AgentLoop:
                         is_error=True,
                     )
                 else:
+                    # A real bug found by a fresh-eyes sweep: `_TOOL_TIMEOUT_
+                    # SECONDS` (a flat backstop sized for a genuinely hung
+                    # ordinary tool) wrapped `delegate_task` too, even though
+                    # `spawn_subagent`'s own budget math above legitimately
+                    # grants a subagent up to half of whatever wall-clock
+                    # budget this run has left -- routinely far more than 90s
+                    # under the default `Budget.max_wall_seconds=3600.0`.
+                    # Nothing about that grant ever reached this generic
+                    # wrapper, so an entirely ordinary, non-hung delegation
+                    # (a real cloud round trip, a slower local model, a
+                    # subagent that itself calls a slow tool) got killed and
+                    # reported as an error while nowhere near its own
+                    # legitimately-granted budget. Confirmed live: a scripted
+                    # subagent turn taking 1.5s under a fully generous
+                    # default `Budget` still came back `is_error=True` with
+                    # the flat timeout unmodified. Fixed by giving
+                    # `DelegateTool` calls a floor of what's actually left of
+                    # this run's own wall-clock budget -- the true ceiling
+                    # `spawn_subagent`'s own clamp already enforces -- instead
+                    # of the constant meant for a stuck ordinary tool.
+                    timeout = _TOOL_TIMEOUT_SECONDS
+                    if isinstance(tool, DelegateTool):
+                        remaining_wall = self._budget.max_wall_seconds - spend.wall_seconds
+                        timeout = max(_TOOL_TIMEOUT_SECONDS, remaining_wall)
                     try:
-                        raw = await asyncio.wait_for(
-                            tool.run(call.arguments, ctx), timeout=_TOOL_TIMEOUT_SECONDS
-                        )
+                        raw = await asyncio.wait_for(tool.run(call.arguments, ctx), timeout=timeout)
                         result = raw.model_copy(update={"tool_call_id": call.id})
                     except TimeoutError:
                         # A hung tool call is scored the same way a raised
@@ -1022,11 +1044,7 @@ class AgentLoop:
                         # real bug this closes.
                         result = ToolResultBlock(
                             tool_call_id=call.id,
-                            content=[
-                                TextBlock(
-                                    text=f"tool call timed out after {_TOOL_TIMEOUT_SECONDS}s"
-                                )
-                            ],
+                            content=[TextBlock(text=f"tool call timed out after {timeout}s")],
                             is_error=True,
                         )
                     except Exception as e:  # a tool error never crashes the loop

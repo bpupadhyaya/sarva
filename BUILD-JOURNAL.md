@@ -19601,3 +19601,75 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The flat `_TOOL_TIMEOUT_SECONDS` itself, not just its cancellation side effects, was wrong for `delegate_task`
+
+Round 164. This round's sweep questioned something every prior sweep of
+`run_one`'s `_TOOL_TIMEOUT_SECONDS`/`spawn_subagent` interaction --
+including the cancelled-subagent reservation leak fixed in an earlier
+round -- only ever took as given: whether the flat 90-second backstop
+is even the right number for `delegate_task` in the first place.
+`spawn_subagent`'s own budget math legitimately grants a subagent up to
+half of whatever wall-clock budget this run has left -- routinely far
+more than 90s under the default `Budget.max_wall_seconds=3600.0` -- and
+`DelegateTool`'s own tool spec explicitly promises the model "its own
+model-call budget (bounded by what's left of this run's own budget)."
+
+`run_one` wraps *every* tool call, `delegate_task` included, in one
+flat `asyncio.wait_for(..., timeout=_TOOL_TIMEOUT_SECONDS)` -- correctly
+sized for a genuinely hung ordinary tool, but with no awareness that a
+subagent can be legitimately entitled to 20-40x more time than that. An
+entirely ordinary, non-hung delegation -- a real cloud-API round trip, a
+slower local model, a subagent that itself calls a slow tool -- got
+killed at 90s and reported to the model as a timeout error, nowhere
+near the budget it was actually granted.
+
+**Confirmed live**: a scripted subagent turn taking a mere 1.5 real
+seconds, under a fully generous default `Budget`, still came back
+`is_error=True` with a timeout error once the wrapper's timeout was
+proportionally scaled down for a fast test.
+
+**Fixed** by giving `DelegateTool` calls a floor of what's actually
+left of this run's own wall-clock budget -- `self._budget.
+max_wall_seconds - spend.wall_seconds`, the true ceiling
+`spawn_subagent`'s own clamp already enforces -- instead of blindly
+using the constant meant for a stuck ordinary tool: `timeout =
+max(_TOOL_TIMEOUT_SECONDS, remaining_wall)`. Every non-`DelegateTool`
+call keeps the exact same flat 90s backstop it always had.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `is_error=True` for a subagent that was
+making completely ordinary progress.
+
+**1 new test, 860 -> 861 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+subsection directly after the cancelled-subagent reservation-leak fix,
+in the same `spawn_subagent` concurrency-surface per-bug narrative.
+
+**One hundred nineteen of the last one hundred twenty rounds (46-67,
+70-164) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** This closes a gap that survived several prior
+sweeps of the exact same mechanism, each one only ever asking "what
+happens once the timeout fires," never "is the timeout itself the
+right number for this specific tool." The already-known `bpe.py`
+duplicate-`special_tokens` off-by-one remains unreachable -- no caller
+in the repo passes duplicates.
+
+**Two lower-confidence candidates surfaced by this round's sweep,
+deferred**: `sdks/typescript/src/types.ts`'s `SaveConfigRequest`
+missing `google_api_key` -- confirmed via a real `tsc` compile failure,
+a genuine drift from the three-sibling fix that added it elsewhere, but
+type-only with no runtime crash; and `foundry/sarva_foundry/data/
+provenance.py`'s `load_text_files_from_manifest` silently returning
+`[]` for an empty manifest instead of raising like its two siblings --
+real inconsistency, but arguably correct behavior for a manifest that
+explicitly names zero files, not clearly a bug.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

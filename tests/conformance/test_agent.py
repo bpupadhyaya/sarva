@@ -1773,6 +1773,85 @@ async def test_a_cancelled_subagent_releases_its_budget_reservation(run_root, mo
     assert run_done.spend.model_calls <= 3
 
 
+class _SlowButOrdinarySubagentProvider:
+    """The subagent's own real turn takes longer than a proportionally
+    tiny _TOOL_TIMEOUT_SECONDS, but is nowhere near the generous default
+    Budget.max_wall_seconds -- ordinary progress, not a hang."""
+
+    name = "mock"
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    async def generate(self, request):
+        self.n += 1
+        if self.n == 1:
+            call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "do something"})
+            yield ToolCallEvent(call=call)
+            yield DoneEvent(
+                stop_reason=StopReason.TOOL_USE,
+                message=Message(role="assistant", content=[call]),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+            return
+        if self.n == 2:
+            await asyncio.sleep(0.3)
+            answer = TextBlock(text="the subagent's real answer")
+            yield DoneEvent(
+                stop_reason=StopReason.END_TURN,
+                message=Message(role="assistant", content=[answer]),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+            return
+        yield DoneEvent(
+            stop_reason=StopReason.END_TURN,
+            message=Message(role="assistant", content=[TextBlock(text="parent's final answer")]),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_is_not_killed_by_the_generic_timeout_when_its_budget_allows_more(
+    run_root, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep: `_TOOL_TIMEOUT_SECONDS` (a
+    # flat backstop sized for a genuinely hung ordinary tool) wrapped
+    # `delegate_task` too, even though `spawn_subagent`'s own budget math
+    # legitimately grants a subagent up to half of whatever wall-clock
+    # budget this run has left -- routinely far more than the flat
+    # timeout under an ordinary default Budget. An entirely ordinary,
+    # non-hung delegation got killed and reported as an error while
+    # nowhere near its own legitimately-granted budget. Confirmed live: a
+    # scripted subagent turn taking 0.3s, proportionally scaled against a
+    # tiny 0.1s _TOOL_TIMEOUT_SECONDS, still came back is_error=True with
+    # the flat timeout unmodified.
+    import sarva.agent.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "_TOOL_TIMEOUT_SECONDS", 0.1)
+
+    provider = _SlowButOrdinarySubagentProvider()
+    budget = Budget(
+        max_model_calls=20, max_total_tokens=2000, max_wall_seconds=3600.0, max_cost_usd=100.0
+    )
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[DelegateTool()],
+        budget=budget,
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("please delegate this")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0].result.is_error is False
+    assert finished[0].result.content[0].text == "the subagent's real answer"
+
+
 @pytest.mark.asyncio
 async def test_delegate_task_rejects_an_empty_task_string(run_root):
     call = ToolCallBlock(id="d1", name="delegate_task", arguments={"task": "   "})
