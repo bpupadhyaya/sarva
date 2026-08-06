@@ -827,8 +827,32 @@ def sessions_list() -> None:
 @sessions_app.command("clear")
 def sessions_clear(name: str = typer.Argument(..., help="Session name to delete.")) -> None:
     """Delete a saved session."""
+    asyncio.run(_sessions_clear(name))
+
+
+async def _sessions_clear(name: str) -> None:
+    # A real bug found by a fresh-eyes sweep: `clear()` deleted the
+    # session file immediately, with no use of `SessionStore.locked()`
+    # -- the real, cross-process lock every OTHER session writer
+    # (`_chat`/`_run` above) already wraps its whole load-through-save
+    # span in, specifically to serialize concurrent writers against the
+    # same session file. Confirmed live: a still-running turn on
+    # session "foo" (holding the lock across its own load -> ... ->
+    # save span) racing a concurrent `sarva sessions clear foo` from a
+    # second terminal let the clear delete the file instantly, unlocked
+    # -- but once the running turn's own already-in-flight save later
+    # fired, it silently recreated "foo.json" with the full prior
+    # history plus the new turn's messages. The user is told the
+    # session was cleared, then it silently reappears with no error or
+    # signal anywhere -- the same "silent lost/undone write" bug class
+    # already fixed for save()/load() races, just never checked for
+    # clear(). Fixed by making clear() wait for the same lock every
+    # other writer already respects, mirroring _chat/_run's own
+    # pattern exactly.
+    store = SessionStore()
     try:
-        SessionStore().clear(name)
+        async with store.locked(name):
+            store.clear(name)
     except ValueError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e

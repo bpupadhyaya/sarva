@@ -10,6 +10,7 @@ provider only), the same "always works with no API keys" guarantee
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import shutil
@@ -27,6 +28,7 @@ from PIL import Image
 from sarva.audio import stt_extra_installed, tts_engine_available
 from sarva.cli import _parse_mcp_env, _parse_mcp_headers, app
 from sarva.memory.session import SessionStore
+from sarva.multimodal.content import Message, TextBlock
 from sarva.providers.base import ToolSpec
 from typer.testing import CliRunner
 
@@ -1006,6 +1008,41 @@ def test_sessions_list_and_clear_reflect_a_real_saved_session(monkeypatch, tmp_p
 
     final_list = runner.invoke(app, ["sessions", "list"])
     assert "keepsake" not in final_list.stdout
+
+
+async def test_sessions_clear_waits_for_a_concurrent_in_flight_turns_lock_instead_of_racing_it(
+    monkeypatch, tmp_path
+):
+    # A real bug found by a fresh-eyes sweep: sessions_clear() deleted
+    # the session file immediately, with no use of SessionStore.locked()
+    # -- the real cross-process lock every OTHER session writer (_chat/
+    # _run) already wraps its whole load-through-save span in. Confirmed
+    # live: a still-running turn holding the lock across its own
+    # load -> sleep -> save span, racing a concurrent `sarva sessions
+    # clear` from a second terminal, let the clear delete the file
+    # instantly, unlocked -- but once the running turn's own already-
+    # in-flight save later fired, it silently recreated the session file
+    # with the full prior history plus the new turn's messages. The user
+    # is told the session was cleared, then it silently reappears with
+    # no error or signal anywhere.
+    _isolate_sessions(monkeypatch, tmp_path)
+    store = SessionStore(tmp_path / "sessions")
+    store.save("foo", [Message(role="user", content=[TextBlock(text="hello")])])
+
+    async def running_turn() -> None:
+        async with store.locked("foo"):
+            history = store.load("foo")
+            await asyncio.sleep(0.2)
+            history = history + [Message(role="assistant", content=[TextBlock(text="a reply")])]
+            store.save("foo", history)
+
+    async def user_clears() -> None:
+        await asyncio.sleep(0.05)
+        await cli_module._sessions_clear("foo")
+
+    await asyncio.gather(running_turn(), user_clears())
+
+    assert not (tmp_path / "sessions" / "foo.json").exists()
 
 
 def test_sessions_list_with_one_corrupted_file_still_lists_the_good_ones(monkeypatch, tmp_path):

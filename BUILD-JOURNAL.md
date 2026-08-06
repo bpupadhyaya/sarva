@@ -20088,3 +20088,72 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `sessions clear` was the one session writer that never joined `SessionStore`'s own cross-process lock
+
+Round 171. This round's sweep found `sarva sessions clear NAME`'s own
+implementation (`SessionStore.clear()`) had never been brought into
+the `locked()` discipline every other session writer (`sarva chat`/
+`run`, `/chat`, `/ws/chat`) already uses: it deleted the session file
+immediately and synchronously, with no lock acquisition at all --
+`SessionStore.locked()`'s own docstring explicitly frames this
+cross-process lock as protecting "the whole load-through-save span of
+the turn" against exactly this kind of concurrent-writer race, but
+`clear()` and its only caller never participated in it.
+
+The real, concrete scenario: a long-running, tool-using turn on session
+`"foo"` holds the lock across its own load-through-save span; from a
+second terminal, the same user runs `sarva sessions clear foo` to
+abandon it. The clear doesn't wait for or take the lock at all -- it
+deletes `foo.json` immediately and prints `"cleared session 'foo'"`.
+When the still-running turn eventually finishes, its already-in-flight
+`save()` call (inside the lock it acquired at the *start* of the turn,
+oblivious to the clear that happened mid-turn) recreates `foo.json`
+with the full prior history plus the new turn's messages. The user is
+told the session was cleared; moments later it silently reappears --
+the exact "silent lost/undone write" bug class this project has
+repeatedly fixed for `save()`/`load()` races, just never checked for
+`clear()`.
+
+**Confirmed live**: two asyncio tasks racing a locked load-sleep-save
+"running turn" against an unlocked `clear()` mid-turn reproduced the
+resurrection every time -- the clear reported success and the file was
+briefly gone, but the file existed again, with the running turn's full
+history, once both tasks finished.
+
+**Fixed** by making `sessions clear` wait for the same lock every
+other writer already respects, mirroring `_chat`/`_run`'s own `async
+with store.locked(name): ...` pattern exactly, rather than calling
+`SessionStore.clear()` directly and unlocked.
+
+**Verified by reverting** and confirming the regression test can't
+even exercise the fixed code path without it -- an `AttributeError`
+for the now-missing async wrapper, the same class of "the fix's own
+absence is the failure signature" this exact `locked()` rollout used
+when it first shipped -- plus an independent standalone repro against
+the real `SessionStore` class confirming the underlying race and
+resurrection directly.
+
+**1 new test, 868 -> 869 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new
+subsection directly after the `locked()` Windows-marker fix, in the
+same session-locking per-bug narrative.
+
+**One hundred twenty-six of the last one hundred twenty-seven rounds
+(46-67, 70-171) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** A mechanism can be built correctly and
+still leave one caller unaudited -- the same lesson already drawn from
+the config-validation "field-by-field, not all-at-once" gaps (rounds
+161/166/167) and the inbound/outbound block-type gap (round 170),
+applied here to a locking discipline instead of a validation or
+translation one. The already-known `bpe.py`/`provenance.py` leads
+remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -332,6 +332,42 @@ chapter for the full mechanism and the `sarva.config` fix this mirrors
 — fixed identically here with `os.open(..., O_CREAT)`, writing the
 marker byte only once.
 
+### `sessions clear` was the one session writer that never joined the lock at all
+
+A much later fresh-eyes sweep found `sessions clear`'s own
+implementation (`SessionStore.clear()`, wired directly from `sarva
+sessions clear NAME`) had never been brought into the `locked()`
+discipline every other session writer (`sarva chat`/`run`, `/chat`,
+`/ws/chat`) already uses: it deleted the session file immediately and
+synchronously, with no lock acquisition at all.
+
+The real, concrete scenario: a long-running, tool-using turn on session
+`"foo"` holds the lock across its own load-through-save span (a
+`delegate_task`/shell/web-fetch round genuinely takes real wall-clock
+time); from a second terminal, the same user runs `sarva sessions clear
+foo` to abandon it. The clear doesn't wait for or take the lock at all
+-- it deletes `foo.json` immediately and prints `"cleared session
+'foo'"`. When the still-running turn eventually finishes, its
+already-in-flight `save()` call (itself inside the lock it acquired at
+the *start* of the turn, oblivious to the clear that happened mid-turn)
+recreates `foo.json` with the full prior history plus the new turn's
+messages. The user is told the session was cleared; moments later it
+silently reappears -- the exact "silent lost/undone write" bug class
+this whole chapter exists to close, just never checked for the one
+writer that deletes rather than merges.
+
+Confirmed live: two asyncio tasks racing a locked load-sleep-save
+"running turn" against an unlocked `clear()` mid-turn reproduced the
+resurrection every time -- the clear reported success and the file was
+briefly gone, but the file existed again, with the running turn's full
+history, once both tasks finished.
+
+Fixed by making `sessions clear` wait for the same lock every other
+writer already respects, mirroring `_chat`/`_run`'s own `async with
+store.locked(name): ...` pattern exactly, rather than calling
+`SessionStore.clear()` directly and unlocked. 1 new test, 868 → 869
+Python tests.
+
 ## Semantic memory: TF-IDF + cosine similarity
 
 `sarva.memory.vector.VectorMemoryStore` answers a different question:
