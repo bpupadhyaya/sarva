@@ -19673,3 +19673,87 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `SaveConfigRequest`'s own fourth field never propagated to a fourth sibling — the standalone TypeScript SDK's own copy of this exact type
+
+Round 165. An earlier round's `GOOGLE_API_KEY` fix closed the gap in
+three write paths -- the server's `SaveConfigRequest` pydantic model,
+`POST /config`'s route handler, and the CLI's `config set`/`config
+unset` flags -- all in one pass. This round's sweep, following up on a
+lower-confidence lead flagged by round 164's own sweep, found a
+*fourth* sibling that fix never reached: `sdks/typescript/src/
+types.ts`'s own `SaveConfigRequest` interface, the standalone
+TypeScript SDK's typed mirror of the same wire shape, still declared
+only three fields.
+
+Because this SDK is a genuinely thin, type-checked client (its own
+module docstring: "every shape here is verified against the real
+source it mirrors rather than guessed"), the missing field isn't
+cosmetic -- TypeScript's structural typing actively *rejects* a
+`{ google_api_key: "..." }` request object the real server fully
+accepts, at compile time, before a caller's code can even run. A
+TypeScript consumer following the documented SDK API had no typed way
+to save a Google/Gemini key at all, short of an unsafe cast that
+defeats the SDK's whole purpose.
+
+**Confirmed live**: `tsc --strict` against a real
+`SaveConfigRequest`-typed object literal containing `google_api_key`
+failed with `error TS2353: Object literal may only specify known
+properties, and 'google_api_key' does not exist in type
+'SaveConfigRequest'`.
+
+**A second, quieter gap this surfaced: the SDK's own `npm test` never
+actually type-checked test files at all.** `tsc -p tsconfig.json` (the
+`build` script) only ever covered `src/`, and `vitest run` (the `test`
+script) transforms TypeScript via esbuild, which strips types without
+checking them -- so a runtime test using an explicitly
+`SaveConfigRequest`-typed object literal containing `google_api_key`
+would have passed at runtime even on the broken type, silently
+providing zero real coverage for exactly this kind of bug. Fixed
+alongside the type itself: a new `tsconfig.test.json` (extending the
+base config, `noEmit: true`, including both `src` and `test`) plus
+`test = "tsc --noEmit -p tsconfig.test.json && vitest run"`, so `npm
+test` -- the same command CI's existing "Test" step already runs -- now
+genuinely type-checks every test file before running any of them.
+
+**Fixed** by adding `google_api_key?: string | null;` to the TS
+`SaveConfigRequest` interface, matching the other three fields exactly.
+
+**Verified by reverting** the type change (with the new type-checking
+`test` script in place) and watching the new test fail to even
+compile -- `tsc` rejecting the literal `google_api_key` property --
+instead of silently passing at runtime the way it would have under the
+old, type-blind `test` script.
+
+**1 new test, 19 -> 20 TypeScript SDK tests, `npm run build` and `npm
+test` both clean.** No Python files changed this round; the full
+Python suite (861 tests) and `ruff check`/`format --check` were
+re-verified unaffected. `docs/packaging.md` gained a new subsection
+directly after the `config show`/`get_env()` fix, in the same
+`config`-subcommands per-bug narrative.
+
+**One hundred twenty of the last one hundred twenty-one rounds
+(46-67, 70-165) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** This is the second time in two rounds a
+fix landing in the Python side of the codebase didn't propagate to
+every sibling that mirrors the same rule/shape -- round 163 found
+`config_show()`'s own un-audited reimplementation of `get_env()`'s
+precedence rule; this round found the TypeScript SDK's own un-audited
+copy of `SaveConfigRequest`. Worth treating "a shape/rule fixed on the
+Python side -- check every non-Python mirror too (TS SDK, desktop app
+types, docs)" as its own standing check going forward, not just
+Python-to-Python siblings. The already-known `bpe.py` duplicate-
+`special_tokens` off-by-one remains unreachable -- no caller in the
+repo passes duplicates. The `provenance.py` empty-manifest
+inconsistency (round 164's second deferred candidate) was investigated
+and confirmed to have no real caller anywhere in the repo besides its
+own module -- not a reachable bug, closing that lead.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

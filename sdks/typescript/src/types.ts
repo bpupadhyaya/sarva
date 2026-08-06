@@ -71,6 +71,20 @@ export interface SaveConfigRequest {
   anthropic_api_key?: string | null;
   openai_api_key?: string | null;
   gemini_api_key?: string | null;
+  // A real bug found by a fresh-eyes sweep: the server's own
+  // SaveConfigRequest (core/sarva/server/schemas.py) has said "four
+  // provider-key names" since it gained google_api_key in an earlier
+  // fix -- google_api_key (the exact env-var name Google's own SDK
+  // docs have historically used, distinct from gemini_api_key) is
+  // already a first-class name on the server, CLI, and route handler,
+  // but this SDK's own mirror of the same request shape was never
+  // updated to match. Confirmed live: `tsc --strict` rejected a real
+  // `{ google_api_key: "..." }` request object with "does not exist in
+  // type 'SaveConfigRequest'" -- a documented server capability a
+  // TypeScript consumer had no typed way to reach at all, short of an
+  // unsafe cast that defeats the SDK's purpose as a type-safe mirror
+  // of the real API.
+  google_api_key?: string | null;
 }
 
 // ---------- Content blocks (partial -- see module docstring) ----------

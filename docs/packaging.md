@@ -204,6 +204,51 @@ choose which source to display once a value is known to be set.
 Verified by reverting and watching the new test fail with the literal
 old bug's own shape: `"set (saved config file)"` where `"not set"` was
 expected. 1 new test, 859 → 860 Python tests.
+
+### `SaveConfigRequest`'s own fourth field never propagated to a fourth sibling — the standalone TypeScript SDK's own copy of this exact type
+
+The `GOOGLE_API_KEY` fix above closed the gap in three write paths —
+the server's `SaveConfigRequest` pydantic model, `POST /config`'s route
+handler, and the CLI's `config set`/`config unset` flags — all in one
+pass. A much later fresh-eyes sweep found a *fourth* sibling that fix
+never reached: `sdks/typescript/src/types.ts`'s own `SaveConfigRequest`
+interface, the standalone TS SDK's typed mirror of the same wire shape,
+still declared only three fields. Because this SDK is a genuinely thin,
+type-checked client (see that module's own docstring: "every shape here
+is verified against the real source it mirrors rather than guessed"),
+the missing field isn't cosmetic — TypeScript's structural typing
+actively *rejects* a `{ google_api_key: "..." }` request object the
+real server fully accepts, at compile time, before a caller's code can
+even run. A TypeScript consumer following the documented SDK API has no
+typed way to save a Google/Gemini key at all, short of an unsafe cast
+that defeats the SDK's whole purpose.
+
+Confirmed live: `tsc --strict` against a real `SaveConfigRequest`-typed
+object literal containing `google_api_key` failed with `error TS2353:
+Object literal may only specify known properties, and 'google_api_key'
+does not exist in type 'SaveConfigRequest'`.
+
+**A second, quieter gap this surfaced: the SDK's own `npm test` never
+actually type-checked test files at all.** `tsc -p tsconfig.json` (the
+`build` script) only ever covered `src/`, and `vitest run` (the `test`
+script) transforms TypeScript via esbuild, which strips types without
+checking them — so a runtime test using an explicitly `SaveConfigRequest`-typed
+object literal containing `google_api_key` would have passed at runtime
+even on the broken type, silently providing zero real coverage for
+exactly the kind of bug this is. Fixed alongside the type itself: a new
+`tsconfig.test.json` (extending the base config, `noEmit: true`,
+including both `src` and `test`) plus `test = "tsc --noEmit -p
+tsconfig.test.json && vitest run"`, so `npm test` — the same command
+CI's existing "Test" step already runs — now genuinely type-checks
+every test file before running any of them.
+
+Fixed by adding `google_api_key?: string | null;` to the TS
+`SaveConfigRequest` interface, matching the other three fields exactly.
+Verified by reverting the type change (with the new type-checking
+`test` script in place) and watching the new test fail to even compile
+— `tsc` rejecting the literal `google_api_key` property — instead of
+silently passing at runtime the way it would have under the old,
+type-blind `test` script. 1 new test, 19 → 20 TypeScript SDK tests.
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
 - **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text

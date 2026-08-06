@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SarvaApiError, SarvaChatStream, SarvaClient } from "../src/client.js";
-import { textFromContent } from "../src/types.js";
+import { SaveConfigRequest, textFromContent } from "../src/types.js";
 
 function fakeFetch(status: number, body: unknown): typeof fetch {
   // A real Response (not a partial { json: ... } stand-in): requestJson()
@@ -76,6 +76,32 @@ describe("SarvaClient REST methods", () => {
     expect(error).toBeInstanceOf(SarvaApiError);
     expect((error as SarvaApiError).status).toBe(500);
     expect((error as SarvaApiError).body).toBe("Internal Server Error");
+  });
+
+  it("saveConfig() accepts google_api_key -- typed, not just tolerated at runtime", async () => {
+    // A real bug found by a fresh-eyes sweep: this SDK's own
+    // SaveConfigRequest was missing google_api_key entirely, even
+    // though the real server (core/sarva/server/schemas.py) has
+    // accepted it since an earlier round -- confirmed live via `tsc
+    // --strict`, which rejected a real `{ google_api_key: "..." }`
+    // request object with "does not exist in type 'SaveConfigRequest'"
+    // before this fix. This test's own decisive property is that it
+    // must TYPE-CHECK at all: an explicit `SaveConfigRequest`-typed
+    // object literal containing google_api_key would have failed
+    // `tsc` on the old type, never reaching this assertion.
+    const fetchImpl = fakeFetch(200, [{ name: "GOOGLE_API_KEY", ok: true, detail: "set" }]);
+    const client = new SarvaClient({ baseUrl: "http://example.com", fetchImpl });
+    const req: SaveConfigRequest = { google_api_key: "AIzaSy-real-test" };
+
+    await client.saveConfig(req);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://example.com/config",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ google_api_key: "AIzaSy-real-test" }),
+      }),
+    );
   });
 
   it("models() hits GET /models and returns the parsed list", async () => {
