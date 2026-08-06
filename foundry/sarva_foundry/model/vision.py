@@ -63,6 +63,22 @@ class VisionEncoderConfig:
             )
         if self.dim % self.n_heads != 0:
             raise ValueError(f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
+        # A real bug found by a fresh-eyes sweep: the identical shape
+        # round 133 already fixed for TransformerConfig.n_layers, one
+        # sibling config class over in this same package -- range() of a
+        # non-positive number is silently empty in Python, so
+        # VisionEncoder.__init__'s `[VisionEncoderBlock(config) for _ in
+        # range(config.n_layers)]` never raised for n_layers <= 0. It
+        # silently built an encoder with ZERO transformer blocks instead:
+        # forward() still ran, patch-embedding pixels then immediately
+        # normalizing them with no attention or MLP pass at all, and
+        # returned a plausibly-shaped tensor with no exception anywhere.
+        # This class already validates two OTHER fields in this exact
+        # __post_init__ (image_size, dim) -- n_layers was simply the one
+        # they missed. Confirmed live: VisionEncoderConfig(..., n_layers=0)
+        # constructed cleanly and produced a working 0-block encoder.
+        if self.n_layers <= 0:
+            raise ValueError(f"n_layers must be positive, got {self.n_layers}")
 
     @property
     def patches_per_side(self) -> int:

@@ -17686,3 +17686,65 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `VisionEncoderConfig` had the identical unvalidated `n_layers` gap round 133 just fixed one file over, in `TransformerConfig`
+
+Round 134. One round after fixing `TransformerConfig.n_layers` in
+`transformer.py`, this round's sweep found the identical shape in its
+sibling config class, `VisionEncoderConfig` (`foundry/sarva_foundry/
+model/vision.py`): `range()` of a non-positive number is silently empty
+in Python, so `VisionEncoder.__init__`'s `[VisionEncoderBlock(config)
+for _ in range(config.n_layers)]` never raised for `n_layers <= 0` --
+it silently built an encoder with ZERO transformer blocks instead.
+`forward()` still ran: patch-embedding pixels via `PatchEmbed`, then
+immediately normalizing them with no attention or MLP pass at all,
+returning a plausibly-shaped `(batch, n_patches, dim)` tensor with no
+exception anywhere. `VisionEncoderConfig`'s own `__post_init__` already
+validates two OTHER fields (`image_size % patch_size`, `dim % n_heads`)
+-- `n_layers` was simply the one it missed, same as `TransformerConfig`
+one round before.
+
+Not contrived: `VisionEncoderConfig` is a public, directly-constructed
+dataclass (see `examples/09_multimodal_vision_transformer.py`, which
+builds it by hand from explicit int fields) -- exactly the kind of
+object a training/recipe script would build from a computed
+model-scale formula, where a scaling formula rounding down to zero for
+a small/tiny preset, or an off-by-one in config generation, would
+silently produce a "vision encoder" that does no vision encoding at
+all. No crash, no NaN, just wrong, silently-degraded multimodal
+behavior -- every tensor shape stays correct throughout, making it
+very hard to root-cause later.
+
+**Confirmed live**: `VisionEncoderConfig(..., n_layers=0)` and
+`n_layers=-5` both constructed cleanly and produced a working 0-block
+encoder whose `forward()` completed successfully.
+
+**Fixed** with the same `<= 0` check `TransformerConfig` now uses for
+its own `n_layers`.
+
+**Verified by reverting** and watching the new test fail with the
+literal old shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 821 -> 822 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for foundry-internals-only config-validation
+fixes in this file family.
+
+**Eighty-nine of the last ninety rounds (46-67, 70-134) have found and
+shipped real fixes; rounds 68-69 remain the only two clean sweeps.**
+Two rounds in a row have now found the identical `n_layers <= 0` gap
+in sibling config classes in the same `foundry/sarva_foundry/model/`
+package (`TransformerConfig`, then `VisionEncoderConfig`) -- worth a
+direct audit of every remaining `n_layers`/block-count field across
+this package (e.g. any future MoE-layer-count or encoder-stack field)
+for the same never-validated shape, rather than waiting for a third
+round to find it independently.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -34,6 +34,24 @@ def test_vision_encoder_config_rejects_non_divisible_image_size():
         _tiny_vision_config(image_size=17, patch_size=4)
 
 
+def test_vision_encoder_config_rejects_non_positive_n_layers():
+    # A real bug found by a fresh-eyes sweep: the identical shape round
+    # 133 already fixed for TransformerConfig.n_layers, one sibling
+    # config class over -- range() of a non-positive number is silently
+    # empty in Python, so VisionEncoder.__init__'s `[VisionEncoderBlock(
+    # config) for _ in range(config.n_layers)]` never raised for
+    # n_layers <= 0. It silently built an encoder with ZERO transformer
+    # blocks instead: forward() still ran, patch-embedding pixels then
+    # immediately normalizing them with no attention or MLP pass at all,
+    # returning a plausibly-shaped tensor with no exception anywhere.
+    import pytest
+
+    with pytest.raises(ValueError, match="n_layers"):
+        _tiny_vision_config(n_layers=0)
+    with pytest.raises(ValueError, match="n_layers"):
+        _tiny_vision_config(n_layers=-2)
+
+
 def test_n_patches_matches_the_grid():
     config = _tiny_vision_config(image_size=32, patch_size=8)
     assert config.patches_per_side == 4
