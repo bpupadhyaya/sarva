@@ -20521,3 +20521,66 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `WarmupCosineSchedule.peak_lr`/`min_lr` were never validated — the same severity class as `TrainerConfig.grad_clip`'s own fix, reached through a different path
+
+Round 177. Following directly from round 176's `TrainerConfig.grad_clip`
+fix, this round's sweep (still done directly, Agent tool subagent
+budget exhausted) checked the adjacent `WarmupCosineSchedule` class for
+the same class of bug. Unlike `TrainerConfig`'s own initial `lr`
+(validated by `torch.optim.AdamW`'s constructor), a schedule's LR is
+applied later via a plain `group["lr"] = lr` dict mutation on an
+already-constructed optimizer -- ordinary Python attribute assignment
+with no validation of its own. `WarmupCosineSchedule.__post_init__`
+already validated `warmup_steps`/`total_steps`/the `min_lr <= peak_lr`
+ordering, but never checked `peak_lr`/`min_lr` for being finite or
+positive in the first place.
+
+**Confirmed live**: `WarmupCosineSchedule(peak_lr=-0.01, min_lr=-0.02,
+...)` constructed with no error, and a real `Trainer.train_step`
+applying it set the optimizer's LR to `-0.01` and the loss *increased*
+across two real training steps (14.12 -> 17.97) instead of decreasing
+-- genuine, confirmed live gradient ascent via a negative learning
+rate, silently bypassing `AdamW`'s own constructor-time check entirely
+by reaching the optimizer through the schedule instead of through
+construction. `peak_lr=nan`/`min_lr=nan` reproduce the identical
+NaN-poisoning shape already fixed twice this session (`norm_eps`,
+`RopeScalingConfig.factor`, `TrainerConfig.grad_clip`).
+
+**Fixed** by requiring `peak_lr` to be finite and strictly positive (a
+"peak" learning rate of zero can never train anything) and `min_lr` to
+be finite and non-negative (`min_lr=0.0` is deliberately still
+allowed -- a schedule decaying all the way to zero is a real, common
+choice).
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for a
+non-positive/non-finite `peak_lr` and a negative/non-finite `min_lr`.
+
+**2 new tests, 877 -> 879 Python tests, all passing, `ruff
+check`/`format --check` clean, no other test in the whole suite
+broke.** `docs/foundry/training.md` gained a new paragraph directly
+after the existing learning-rate-schedule narrative, in the same
+chapter round 176's `grad_clip` fix also documents.
+
+**One hundred thirty-two of the last one hundred thirty-three rounds
+(46-67, 70-177) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** The general lesson this round confirms:
+"a value that reaches a stateful object (an optimizer) through
+mutation rather than through construction bypasses whatever validation
+that object's own constructor provides" is its own reusable lens,
+distinct from but adjacent to the earlier "config class feeding a
+third-party library's own unguarded math" lens that found `grad_clip`.
+Rounds 173-177 were all completed via direct tool use (Grep/Read/Bash/
+Edit) rather than a dispatched background agent, with identical
+workflow discipline throughout. The already-known `bpe.py`/
+`provenance.py` leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

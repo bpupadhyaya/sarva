@@ -76,3 +76,33 @@ def test_rejects_total_steps_not_exceeding_warmup_steps():
 def test_rejects_min_lr_above_peak_lr():
     with pytest.raises(ValueError, match="min_lr"):
         _schedule(peak_lr=0.1, min_lr=1.0)
+
+
+def test_rejects_a_non_finite_or_non_positive_peak_lr():
+    # A real bug found by a fresh-eyes sweep, the same severity class as
+    # TrainerConfig.grad_clip's own fix: unlike Trainer's own initial
+    # lr (validated by torch.optim.AdamW's constructor), a schedule's
+    # LR is applied later via a plain `group["lr"] = lr` dict mutation
+    # on an already-constructed optimizer, which has no validation of
+    # its own -- nothing here ever checked peak_lr/min_lr either.
+    # Confirmed live: a negative peak_lr constructed with no error, and
+    # a real Trainer.train_step applying it made the loss INCREASE
+    # across two real steps instead of decreasing -- genuine gradient
+    # ascent via a negative learning rate.
+    with pytest.raises(ValueError, match="peak_lr"):
+        _schedule(peak_lr=0.0)
+    with pytest.raises(ValueError, match="peak_lr"):
+        _schedule(peak_lr=-0.01, min_lr=-0.02)
+    with pytest.raises(ValueError, match="peak_lr"):
+        _schedule(peak_lr=float("nan"))
+
+
+def test_rejects_a_non_finite_or_negative_min_lr():
+    # Same bug, the min_lr side -- min_lr=0.0 is deliberately still
+    # allowed (a schedule decaying all the way to zero is a real, common
+    # choice), only a negative or non-finite value is rejected.
+    with pytest.raises(ValueError, match="min_lr"):
+        _schedule(min_lr=-0.01)
+    with pytest.raises(ValueError, match="min_lr"):
+        _schedule(min_lr=float("nan"))
+    _schedule(min_lr=0.0)  # still allowed

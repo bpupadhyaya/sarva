@@ -28,6 +28,31 @@ class WarmupCosineSchedule:
     total_steps: int
 
     def __post_init__(self) -> None:
+        # A real bug found by a fresh-eyes sweep, the same severity class
+        # as TrainerConfig.grad_clip's own fix (see trainer.py): neither
+        # peak_lr nor min_lr was ever checked for being finite or
+        # non-negative. Unlike TrainerConfig.lr (which torch.optim.
+        # AdamW's own constructor validates), a schedule's LR is applied
+        # later via `group["lr"] = lr` on an already-constructed
+        # optimizer -- a plain dict mutation with no validation of its
+        # own -- so nothing anywhere ever checked this value. Confirmed
+        # live: WarmupCosineSchedule(peak_lr=-0.01, min_lr=-0.02, ...)
+        # constructed with no error, and a real Trainer.train_step
+        # applying it set the optimizer's LR to -0.01 and the loss
+        # INCREASED across two real training steps (14.12 -> 17.97)
+        # instead of decreasing -- genuine, confirmed live gradient
+        # ascent via a negative learning rate, silently bypassing
+        # AdamW's own constructor-time check entirely. Reachable the
+        # same way every other config field in this package is -- a
+        # caller deriving peak_lr/min_lr programmatically or a
+        # sign-flip typo, not an adversarial input. min_lr=0.0 is
+        # deliberately still allowed (a schedule decaying all the way to
+        # zero is a real, common choice); peak_lr=0.0 is not, since a
+        # "peak" learning rate of zero can never train anything.
+        if not math.isfinite(self.peak_lr) or self.peak_lr <= 0:
+            raise ValueError(f"peak_lr must be a finite positive number, got {self.peak_lr}")
+        if not math.isfinite(self.min_lr) or self.min_lr < 0:
+            raise ValueError(f"min_lr must be a finite non-negative number, got {self.min_lr}")
         if self.warmup_steps < 0:
             raise ValueError(f"warmup_steps must be >= 0, got {self.warmup_steps}")
         if self.total_steps <= self.warmup_steps:

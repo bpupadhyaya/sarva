@@ -192,6 +192,30 @@ this directly — resuming mid-schedule must continue the LR curve from
 exactly where it left off, not restart warmup or jump to some other
 point on it.
 
+**`peak_lr`/`min_lr` were never validated -- the same severity class as
+`TrainerConfig.grad_clip`'s own fix, reached through a different path.**
+A much later fresh-eyes sweep found that unlike `TrainerConfig`'s own
+initial `lr` (validated by `torch.optim.AdamW`'s constructor), a
+schedule's LR is applied later via a plain `group["lr"] = lr` dict
+mutation on an already-constructed optimizer -- ordinary Python
+attribute assignment with no validation of its own. Nothing anywhere
+ever checked `peak_lr`/`min_lr` either. Confirmed live:
+`WarmupCosineSchedule(peak_lr=-0.01, min_lr=-0.02, ...)` constructed
+with no error, and a real `Trainer.train_step` applying it set the
+optimizer's LR to `-0.01` and the loss *increased* across two real
+training steps (14.12 → 17.97) instead of decreasing -- genuine,
+confirmed live gradient ascent via a negative learning rate, silently
+bypassing AdamW's own constructor-time check entirely by reaching the
+optimizer through the schedule instead of through construction. Fixed
+by requiring `peak_lr` to be finite and strictly positive (a "peak"
+learning rate of zero can never train anything) and `min_lr` to be
+finite and non-negative (`min_lr=0.0` is deliberately still allowed --
+a schedule decaying all the way to zero is a real, common choice).
+Verified by reverting and watching both new tests fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for a
+non-positive/non-finite `peak_lr` and a negative/non-finite `min_lr`.
+2 new tests, 877 → 879 Python tests.
+
 ## Try it
 
 ```bash
