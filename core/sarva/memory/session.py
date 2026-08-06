@@ -46,7 +46,28 @@ _MESSAGES_ADAPTER: TypeAdapter[list[Message]] = TypeAdapter(list[Message])
 
 DEFAULT_SESSIONS_DIR = Path.home() / ".sarva" / "sessions"
 
-_VALID_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+# A real bug found by a fresh-eyes sweep: `$` in Python's `re` does NOT
+# mean "end of string" -- per the stdlib's own documentation it matches
+# "at the end of the string, or just before the newline at the end of
+# the string," so this pattern accepted any otherwise-valid name with
+# exactly one trailing "\n" appended (e.g. "default\n"). _sanitize()
+# below returns the ORIGINAL string, not just the matched portion, so
+# the documented "use only letters, digits, '-', and '_'" allowlist was
+# silently bypassed for that one shape. Not cosmetic: _sanitize() feeds
+# straight into _path()'s filename, so a session name of "default\n"
+# produced a real, distinct on-disk file (`default\n.json`, not
+# `default.json`) -- silently forking the session's history under a
+# name a caller round-tripping through `load("default")` can never see
+# again. Reachable through the real public surface with no adversarial
+# intent: ChatRequest.session (server/schemas.py) has no length or
+# content validator beyond this function, and a trailing "\n" is an
+# extremely common artifact of reading a session id from a file/pipe
+# without stripping it. Confirmed live: `_sanitize("session\n")`
+# returned "session\n" unchanged instead of raising. `\Z` (true
+# end-of-string, no newline exception) closes this without changing
+# any other accepted/rejected name -- confirmed live, every other
+# already-tested valid/invalid name is unaffected.
+_VALID_NAME = re.compile(r"^[A-Za-z0-9_-]+\Z")
 # Comfortably under every common filesystem's ~255-byte filename limit even
 # after this module's longest suffix (".lock") is appended -- every
 # character in _VALID_NAME's charset is a single ASCII byte, so this is

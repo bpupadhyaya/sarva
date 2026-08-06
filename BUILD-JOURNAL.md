@@ -18895,3 +18895,69 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A single trailing newline silently bypassed `SessionStore`'s whole session-name allowlist, silently forking a session's history under an invisible filename
+
+Round 154. Following up round 153's own "check the third memory-tier
+sibling" lead, this round's sweep found `core/sarva/memory/session.py`
+does NOT have the ASCII-only normalization gap already fixed twice in
+its siblings (`vector.py`, `longterm.py`) -- it deliberately *rejects*
+non-`[A-Za-z0-9_-]` names outright, by design, to avoid two distinct
+names colliding onto one file. That lead was a dead end. But the same
+investigation surfaced a different, real bug in the same function:
+`_VALID_NAME`'s pattern was built with `$`, and Python's `re` documents
+`$` as matching "at the end of the string, or just before the newline
+at the end of the string" -- not a true end-of-string anchor. A session
+name with exactly one trailing `"\n"` appended (e.g. `"default\n"`)
+matched the pattern, and `_sanitize()` returned the string unchanged --
+silently bypassing the documented "use only letters, digits, '-', and
+'_'" allowlist for that one shape.
+
+Not cosmetic: `_sanitize()` feeds straight into `_path()`'s filename,
+so `"default\n"` produced a real, distinct on-disk file
+(`default\n.json`, not `default.json`) -- silently forking the
+session's history under a name a caller round-tripping through
+`load("default")` could never see again. Reachable through the real
+public surface with no adversarial intent: `ChatRequest.session`
+(`server/schemas.py`) has no content validator beyond this function,
+and a trailing `"\n"` is an extremely common artifact of reading a
+session id from a file or pipe without stripping it.
+
+**Confirmed live**: `_sanitize("session\n")` returned `"session\n"`
+unchanged instead of raising; saving under that name then calling
+`load("default")` returned an empty history -- the session's real
+content silently stuck under the newline-suffixed file, invisible
+under the clean name.
+
+**Fixed** by switching to `\Z`, the true end-of-string anchor with no
+newline exception. Confirmed live every other already-tested
+valid/invalid name is unaffected; only the single-trailing-newline
+shape changes from accepted to rejected.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 847 -> 848 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new
+subsection directly after the session-name-length fix, in the same
+session-persistence chapter.
+
+**One hundred nine of the last one hundred ten rounds (46-67, 70-154)
+have found and shipped real fixes; rounds 68-69 remain the only two
+clean sweeps.** This bug was actually spotted by round 153's own
+sweep agent during its investigation but deferred as seemingly
+"milder" than the topic-slugification bug it led with -- this round
+verified it live and found it more consequential than that initial
+assessment: silent, hard-to-diagnose session-history loss, not just a
+stray file. Worth remembering: a candidate a sweep agent deprioritizes
+as "milder" still deserves independent verification before being
+discarded, not just taken at face value either way.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

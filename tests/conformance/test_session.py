@@ -176,6 +176,26 @@ def test_session_name_with_invalid_characters_is_rejected(store):
         store.save("my session!", [])
 
 
+def test_session_name_with_a_trailing_newline_is_rejected_not_silently_accepted(store):
+    # A real bug found by a fresh-eyes sweep: `$` in Python's `re` does
+    # NOT mean "end of string" -- it also matches just before a single
+    # trailing newline, so the old pattern (built with `$`, not `\Z`)
+    # accepted "default\n" as a valid name and _sanitize() returned it
+    # unchanged, silently bypassing the documented allowlist for that
+    # one shape. Not cosmetic: this fed straight into the on-disk
+    # filename, producing a real, distinct file ("default\n.json", not
+    # "default.json") that silently forked the session's history under
+    # a name a caller round-tripping through load("default") could
+    # never see again -- confirmed live before this fix, including the
+    # concrete data-loss scenario (save under "default\n", then
+    # load("default") sees an empty history). Reachable through the
+    # real server surface with no adversarial intent: a trailing "\n"
+    # is an extremely common artifact of reading a session id from a
+    # file/pipe without stripping it.
+    with pytest.raises(ValueError, match="invalid session name"):
+        store.save("default\n", [])
+
+
 def test_session_name_past_the_filesystem_length_limit_is_rejected(store):
     # A real bug found by a fresh-eyes sweep: _sanitize()'s character
     # check said nothing about length, so a session name past the

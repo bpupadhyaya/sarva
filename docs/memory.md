@@ -95,6 +95,34 @@ reverting and watching the new tests fail with the literal old bug's
 own exception reproducing itself: `OSError: [Errno 63] File name too
 long`. 2 new tests, 733 → 735 Python tests.
 
+**`$` in `_VALID_NAME` doesn't mean "end of string" — a much later
+fresh-eyes sweep found a single trailing newline silently bypassed the
+whole allowlist.** Python's `re` documents `$` as matching "at the end
+of the string, or just before the newline at the end of the string" —
+not a genuine end-of-string anchor. `_VALID_NAME` was built with `$`,
+so a session name with exactly one trailing `"\n"` appended (e.g.
+`"default\n"`) matched the pattern, and `_sanitize()` returned the
+string unchanged — silently bypassing the documented "use only
+letters, digits, '-', and '_'" allowlist for that one shape. Not
+cosmetic: `_sanitize()` feeds straight into `_path()`'s filename, so
+`"default\n"` produced a real, distinct on-disk file
+(`` `default\n.json` ``, not `default.json`) — silently forking the
+session's history under a name a caller round-tripping through
+`load("default")` could never see again. Reachable through the real
+public surface with no adversarial intent: `ChatRequest.session` has
+no content validator beyond this function, and a trailing `"\n"` is an
+extremely common artifact of reading a session id from a file or pipe
+without stripping it. Confirmed live: `_sanitize("session\n")` returned
+`"session\n"` unchanged instead of raising, and saving under that name
+then reading back `load("default")` returned an empty history — the
+session's real content silently stuck under the newline-suffixed file.
+Fixed by switching to `\Z`, the true end-of-string anchor with no
+newline exception — confirmed live every other already-tested
+valid/invalid name is unaffected; only the single-trailing-newline
+shape changes from accepted to rejected. Verified by reverting and
+watching the new test fail with the literal old bug's own shape: `DID
+NOT RAISE ValueError`. 1 new test, 847 → 848 Python tests.
+
 **`save()` itself used to be able to destroy a previously-good session
 on an interrupted write — a real bug found by actually simulating one,
 not a theoretical concern.** The permissions fix above wrote the new
