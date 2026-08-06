@@ -888,20 +888,40 @@ def config_show() -> None:
     value) -- never prints the actual key, only whether one is set."""
     import os
 
-    from sarva.config import KNOWN_KEYS, load_config
+    from sarva.config import KNOWN_KEYS, ConfigError, get_env, load_config
 
+    # A real bug found by a fresh-eyes sweep, the same "truthiness treats
+    # a legitimate empty-but-explicitly-set value as absent" shape round
+    # 158 already found and fixed inside sarva.config.get_env() itself --
+    # this command never called get_env() at all, so it silently drifted
+    # from that fix as its own independent reimplementation of the exact
+    # precedence rule its own docstring states ("a real environment
+    # variable always wins"). `if os.environ.get(name):` is False for an
+    # env var explicitly set to "" (ANTHROPIC_API_KEY= sarva ...,
+    # clearing an inherited/previously-saved key for one invocation), so
+    # it fell through to the saved-file branch and printed "set (saved
+    # config file)" -- flatly contradicting `sarva doctor`, which already
+    # goes through get_env() and correctly reports "not set" for the
+    # identical real state. Confirmed live: with ANTHROPIC_API_KEY
+    # explicitly cleared and a stale saved key on disk, `config show`
+    # and `doctor` disagreed about the same underlying fact. Fixed by
+    # deciding set/not-set from get_env() (matching doctor's own
+    # decision exactly), and using `os.environ.get(name) is not None`
+    # only to choose which source to display -- the correct None-vs-""
+    # check, not truthiness.
     try:
-        saved = load_config()
+        load_config()
     except ConfigError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
     for name in KNOWN_KEYS:
-        if os.environ.get(name):
-            console.print(f"{name:20s} [green]set[/green] (environment variable)")
-        elif saved.get(name):
-            console.print(f"{name:20s} [green]set[/green] (saved config file)")
-        else:
+        effective = get_env(name)
+        if not effective:
             console.print(f"{name:20s} [dim]not set[/dim]")
+        elif os.environ.get(name) is not None:
+            console.print(f"{name:20s} [green]set[/green] (environment variable)")
+        else:
+            console.print(f"{name:20s} [green]set[/green] (saved config file)")
 
 
 @config_app.command("unset")

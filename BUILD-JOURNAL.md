@@ -19533,3 +19533,71 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `config show` silently drifted from `get_env()`'s own already-fixed precedence rule — the exact truthiness bug round 158 fixed inside `get_env()`, reintroduced one layer up
+
+Round 163. This round's sweep found `core/sarva/cli.py`'s
+`config_show()`: its own docstring states the precedence rule
+explicitly ("a real environment variable always wins over a saved
+config-file value") -- the same rule `sarva.config.get_env()`
+implements, and round 158 already fixed a truthiness bug in
+(`if env_value:` collapsing "not set" and "explicitly set to empty"
+into the same branch). But `config_show` never called `get_env()` at
+all -- it independently reimplemented the same rule with
+`if os.environ.get(name): ... elif saved.get(name): ...`, its own
+separate, never-audited copy that silently drifted from the fix
+landing one layer down.
+
+`os.environ.get(name)` is `""` (not `None`, and not absent) for an env
+var explicitly cleared with the ordinary shell idiom
+`ANTHROPIC_API_KEY= sarva ...`; `if os.environ.get(name):` was `False`
+for `""`, so `config_show` fell through to the saved-file branch and
+printed `"set (saved config file)"` -- while `sarva doctor`, which
+already goes through `get_env()`, correctly printed `"not set"` for the
+exact same real state. Two commands describing the same underlying
+fact flatly contradicted each other.
+
+**Confirmed live**: with `ANTHROPIC_API_KEY` explicitly cleared and a
+stale key saved to `~/.sarva/config.json` from an earlier `config set`,
+`config show` reported `ANTHROPIC_API_KEY    set (saved config file)`
+while `doctor` reported `ANTHROPIC_API_KEY not set -- Claude models
+unavailable` for the identical state.
+
+**Fixed** by routing `config_show` through `get_env()` for the
+set/not-set decision -- making it agree with `doctor` by construction,
+since both now go through the same function -- and using
+`os.environ.get(name) is not None` (the correct `None`-vs-`""` check,
+not truthiness) only to choose which source to display once a value is
+known to be set.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `"set (saved config file)"` where
+`"not set"` was expected.
+
+**1 new test, 859 -> 860 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the `GOOGLE_API_KEY` propagation-gap fix, in
+the same `config`-subcommands per-bug narrative.
+
+**One hundred eighteen of the last one hundred nineteen rounds
+(46-67, 70-163) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** This is the fifth real bug found from the
+"truthiness treats a legitimate empty/zero value as absent/failed"
+lens, and the second time a fix landing in one function
+(`get_env()`, round 158) didn't automatically propagate to a sibling
+reimplementation of the same documented rule elsewhere in the codebase
+-- worth remembering as its own check going forward: when a precedence
+or validation rule gets fixed in one place, grep for other independent
+implementations of the same stated rule, not just call sites of the
+fixed function itself. The already-known `bpe.py` duplicate-
+`special_tokens` off-by-one remains unreachable -- no caller in the
+repo passes duplicates.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

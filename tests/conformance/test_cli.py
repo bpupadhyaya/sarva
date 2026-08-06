@@ -1131,6 +1131,32 @@ def test_config_show_prefers_a_real_env_var_over_the_saved_file(monkeypatch, tmp
     assert "saved config file" not in result.stdout
 
 
+def test_config_show_agrees_with_doctor_when_env_var_is_explicitly_cleared(monkeypatch, tmp_path):
+    # A real bug found by a fresh-eyes sweep, the same truthiness shape
+    # round 158 already found and fixed inside sarva.config.get_env()
+    # itself: config_show() never called get_env() at all, so it
+    # silently drifted from that fix as its own independent
+    # reimplementation of the exact precedence rule its own docstring
+    # states. `if os.environ.get(name):` used to be False for an env var
+    # explicitly set to "" (ANTHROPIC_API_KEY= sarva ..., the ordinary
+    # shell idiom for clearing an inherited/previously-saved key for one
+    # invocation), so it fell through to the saved-file branch and
+    # printed "set (saved config file)" -- flatly contradicting `sarva
+    # doctor`, which already goes through get_env() and correctly
+    # reports "not set" for the identical real state.
+    _isolate_config(monkeypatch, tmp_path)
+    runner.invoke(app, ["config", "set", "--anthropic-api-key", "sk-from-file"])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+
+    show_result = runner.invoke(app, ["config", "show"])
+    lines = [line for line in show_result.stdout.splitlines() if "ANTHROPIC_API_KEY" in line]
+    assert len(lines) == 1
+    assert "not set" in lines[0]
+
+    doctor_result = runner.invoke(app, ["doctor"])
+    assert "ANTHROPIC_API_KEY not set" in doctor_result.stdout
+
+
 def test_config_set_with_no_keys_fails_cleanly(monkeypatch, tmp_path):
     _isolate_config(monkeypatch, tmp_path)
 

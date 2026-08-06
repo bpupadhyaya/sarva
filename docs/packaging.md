@@ -167,6 +167,43 @@ watching both new tests fail with the literal old bug's own shape: an
 empty saved config after a real `POST /config`, and a rejected,
 unrecognized `--google-api-key` CLI flag. 2 new tests, 792 → 794
 Python tests.
+
+### `config show` silently drifted from `get_env()`'s own already-fixed precedence rule — the exact truthiness bug round 158 fixed inside `get_env()`, reintroduced one layer up
+
+`config_show()`'s own docstring states the precedence explicitly ("a
+real environment variable always wins over a saved config-file
+value") — the same rule `sarva.config.get_env()` implements and round
+158 fixed a truthiness bug in (`if env_value:` collapsing "not set"
+and "explicitly set to empty" into the same branch). But `config_show`
+never called `get_env()` at all — it independently reimplemented the
+same rule with `if os.environ.get(name): ... elif saved.get(name):
+...`, its own separate, never-audited copy that silently drifted from
+the fix landing one layer down.
+
+`os.environ.get(name)` is `""` (not `None`, and not absent) for an env
+var explicitly cleared with the ordinary shell idiom `ANTHROPIC_API_KEY=
+sarva ...`; `if os.environ.get(name):` is `False` for `""`, so
+`config_show` fell through to the saved-file branch and printed `"set
+(saved config file)"` — while `sarva doctor`, which already goes
+through `get_env()` (`runtime.py`'s `has_anthropic = bool(get_env(
+"ANTHROPIC_API_KEY"))`), correctly prints `"not set"` for the exact
+same real state. Two commands describing the same underlying fact
+flatly contradicted each other.
+
+Confirmed live: with `ANTHROPIC_API_KEY` explicitly cleared and a
+stale key saved to `~/.sarva/config.json` from an earlier `config set`,
+`config show` reported `ANTHROPIC_API_KEY    set (saved config file)`
+while `doctor` reported `ANTHROPIC_API_KEY not set -- Claude models
+unavailable` for the identical state.
+
+Fixed by routing `config_show` through `get_env()` for the set/not-set
+decision (making it agree with `doctor` by construction, since both
+now go through the same function), and using `os.environ.get(name) is
+not None` — the correct `None`-vs-`""` check, not truthiness — only to
+choose which source to display once a value is known to be set.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape: `"set (saved config file)"` where `"not set"` was
+expected. 1 new test, 859 → 860 Python tests.
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
 - **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text
