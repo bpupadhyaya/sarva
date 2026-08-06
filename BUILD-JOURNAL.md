@@ -17451,3 +17451,66 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `FoundryProvider`'s checkpoint-bundle cache had the identical unsynchronized check-then-act race round 128 fixed for the Ollama probe, one module over
+
+Round 130. Applying the exact lens that caught round 128's `_probe_
+ollama` bug, this round's sweep found the identical shape one module
+over in `core/sarva/providers/foundry_provider.py`'s `load_checkpoint_
+bundle`: the cache's read-check (`_bundle_cache.get(cache_key)`) and
+its write-back at the end are two separate, unsynchronized steps with
+a real, expensive `torch.load()` in between -- a classic unguarded
+check-then-act race, with no `threading.Lock` anywhere in the module.
+
+`build_providers()` constructs a `FoundryProvider` for every discovered
+checkpoint synchronously, and is itself called from every `/chat`,
+`/ws/chat`, and diagnostics-driving handler via `asyncio.to_thread` --
+so genuine concurrent requests against a running `sarva serve` process
+land in separate real OS threads with nothing serializing access to
+the shared `_bundle_cache` dict. Not a contrived scenario: this is the
+same "no server restart needed" deployment story the cache itself was
+built for (round 44) and later hardened for leak-freedom (round 64) --
+both of those rounds only ever tested it sequentially, never under
+real concurrency.
+
+**Confirmed live**: 8 concurrent threads calling `load_checkpoint_
+bundle()` against the same cold, unchanged bundle -- synchronized to
+hit the read-check at the same instant via a `threading.Barrier` --
+made 8 real `torch.load()` calls, not the 1 the cache exists to
+guarantee.
+
+**Fixed** the same way round 128 fixed the sibling bug: a `threading.
+Lock` around the whole check-load-write span, turning the cache into a
+genuine single-flight.
+
+**Verified live**: the identical 8-concurrent-callers repro now
+measures exactly 1 real `torch.load()` call.
+
+**Verified by reverting** and watching the new test fail with the
+literal old number reproducing itself: 8 calls instead of 1.
+
+**1 new test, 817 -> 818 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update: unlike
+`_probe_ollama`'s own narrated chapter in `docs/providers.md`, this
+cache's round-44/round-64 history was never given a dedicated docs
+chapter (only test comments and BUILD-JOURNAL entries), so there's no
+existing narrative to extend.
+
+**Eighty-five of the last eighty-six rounds (46-67, 70-130) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** Two of this project's caches -- `_probe_ollama` and now
+`load_checkpoint_bundle` -- have each independently needed the exact
+same "wrap the whole check-then-act span in a lock" fix, both found by
+applying the identical fresh-eyes lens one round after the other.
+Worth generalizing: any remaining module-level cache keyed by a tuple
+and populated by expensive I/O is worth auditing directly rather than
+waiting for a future round to rediscover the same shape a third time.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

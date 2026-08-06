@@ -60,6 +60,7 @@ server (deferred, separate scope) would close.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -192,6 +193,21 @@ def save_checkpoint_bundle(directory: Path, trainer: Any, tokenizer: Any, config
 # state, and this adapter never trains through the loaded model.
 _bundle_cache: dict[tuple[str, float], tuple[Any, Any, Any]] = {}
 
+# A real bug found by a fresh-eyes sweep, applying the exact lens that
+# already caught the identical shape one module over in runtime.py's
+# _probe_ollama (round 128): the read-check, the real load I/O, and the
+# write-back below are three separate, unsynchronized steps. Two
+# concurrent requests to a running `sarva serve` process -- an ordinary
+# scenario, not a contrived one, since build_providers() runs on a real
+# OS worker thread via asyncio.to_thread for every /chat, /ws/chat, and
+# diagnostics-driving endpoint -- can both read a cold cache_key as
+# missing before either finishes the real, expensive torch.load(), so
+# both redo the full weight load. Confirmed live: 8 concurrent callers
+# against one cold, unchanged bundle made 8 real loads, not the 1 this
+# cache exists to guarantee. Fixed the same way round 128 fixed the
+# sibling bug: a threading.Lock around the whole check-load-write span.
+_bundle_cache_lock = threading.Lock()
+
 
 def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:
     """Returns `(model, tokenizer, config)`, the model in `.eval()` mode
@@ -208,46 +224,47 @@ def load_checkpoint_bundle(directory: Path) -> tuple[Any, Any, Any]:
     mods = _lazy_imports()
     model_pt_path = directory / "model.pt"
     cache_key = (str(directory.resolve()), model_pt_path.stat().st_mtime)
-    cached = _bundle_cache.get(cache_key)
-    if cached is not None:
-        return cached
+    with _bundle_cache_lock:
+        cached = _bundle_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-    config_data = json.loads((directory / "config.json").read_text(encoding="utf-8"))
-    moe_data = config_data.pop("moe", None)
-    rope_scaling_data = config_data.pop("rope_scaling", None)
-    config_data["moe"] = mods.MoEConfig(**moe_data) if moe_data is not None else None
-    config_data["rope_scaling"] = (
-        mods.RopeScalingConfig(**rope_scaling_data) if rope_scaling_data is not None else None
-    )
-    config = mods.TransformerConfig(**config_data)
-    tokenizer = mods.ByteLevelBPETokenizer.load(directory / "tokenizer.json")
-    model = mods.DecoderOnlyTransformer(config)
-    # weights_only=True: same posture as Trainer.load_checkpoint -- refuse
-    # to unpickle anything beyond documented safe types.
-    state = mods.torch.load(directory / "model.pt", map_location="cpu", weights_only=True)
-    model.load_state_dict(state["model_state"])
-    model.eval()
-    result = (model, tokenizer, config)
-    # A real bug found by giving this cache its own fresh-eyes sweep,
-    # applying the project's own "does yesterday's fix have a bug"
-    # lens to the fix that added this cache in the first place: keyed
-    # by (directory, mtime) so a retrained-and-resaved checkpoint is
-    # picked up fresh, but nothing ever evicted the OLD entry once a
-    # new one landed for the same directory. Confirmed live: 20
-    # retrain/re-save/reload cycles against one checkpoint directory
-    # (the exact "no server restart needed" workflow this cache exists
-    # to support) left 20 full model copies resident in memory
-    # simultaneously -- 20x a single model's real footprint -- even
-    # though only the newest entry is ever reachable again through
-    # ordinary use, an unbounded leak over a long-running `sarva
-    # serve` process's uptime. A directory only ever has one current
-    # mtime at a time, so any entry under a different mtime for the
-    # same resolved path is permanently unreachable the moment a new
-    # one lands -- evicted here rather than left to accumulate.
-    for stale_key in [k for k in _bundle_cache if k[0] == cache_key[0] and k != cache_key]:
-        del _bundle_cache[stale_key]
-    _bundle_cache[cache_key] = result
-    return result
+        config_data = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+        moe_data = config_data.pop("moe", None)
+        rope_scaling_data = config_data.pop("rope_scaling", None)
+        config_data["moe"] = mods.MoEConfig(**moe_data) if moe_data is not None else None
+        config_data["rope_scaling"] = (
+            mods.RopeScalingConfig(**rope_scaling_data) if rope_scaling_data is not None else None
+        )
+        config = mods.TransformerConfig(**config_data)
+        tokenizer = mods.ByteLevelBPETokenizer.load(directory / "tokenizer.json")
+        model = mods.DecoderOnlyTransformer(config)
+        # weights_only=True: same posture as Trainer.load_checkpoint -- refuse
+        # to unpickle anything beyond documented safe types.
+        state = mods.torch.load(directory / "model.pt", map_location="cpu", weights_only=True)
+        model.load_state_dict(state["model_state"])
+        model.eval()
+        result = (model, tokenizer, config)
+        # A real bug found by giving this cache its own fresh-eyes sweep,
+        # applying the project's own "does yesterday's fix have a bug"
+        # lens to the fix that added this cache in the first place: keyed
+        # by (directory, mtime) so a retrained-and-resaved checkpoint is
+        # picked up fresh, but nothing ever evicted the OLD entry once a
+        # new one landed for the same directory. Confirmed live: 20
+        # retrain/re-save/reload cycles against one checkpoint directory
+        # (the exact "no server restart needed" workflow this cache exists
+        # to support) left 20 full model copies resident in memory
+        # simultaneously -- 20x a single model's real footprint -- even
+        # though only the newest entry is ever reachable again through
+        # ordinary use, an unbounded leak over a long-running `sarva
+        # serve` process's uptime. A directory only ever has one current
+        # mtime at a time, so any entry under a different mtime for the
+        # same resolved path is permanently unreachable the moment a new
+        # one lands -- evicted here rather than left to accumulate.
+        for stale_key in [k for k in _bundle_cache if k[0] == cache_key[0] and k != cache_key]:
+            del _bundle_cache[stale_key]
+        _bundle_cache[cache_key] = result
+        return result
 
 
 def discover_checkpoint_bundles(checkpoints_dir: Path) -> dict[str, Path]:

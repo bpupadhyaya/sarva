@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -275,6 +276,59 @@ def test_load_checkpoint_bundle_cache_evicts_the_superseded_entry(tmp_path: Path
         f"expected exactly 1 cache entry for this directory after 5 "
         f"retrain/reload cycles, found {len(entries_for_this_dir)} -- the old ones "
         "were never evicted"
+    )
+
+
+def test_concurrent_loads_of_the_same_cold_bundle_never_redo_the_expensive_load(tmp_path: Path):
+    # A real bug found by a fresh-eyes sweep, applying the exact lens
+    # that already caught the identical shape one module over in
+    # runtime.py's _probe_ollama (round 128): the cache's read-check and
+    # write-back are two separate, unsynchronized steps with the real,
+    # expensive torch.load() in between -- a classic unguarded
+    # check-then-act race. build_providers() runs load_checkpoint_bundle
+    # on a real OS worker thread via asyncio.to_thread for every
+    # /chat, /ws/chat, and diagnostics-driving endpoint, so genuine
+    # concurrent requests against a cold cache -- not a contrived
+    # scenario -- used to all redo the full weight load instead of the
+    # 1 the cache exists to guarantee. Proven here with real OS threads
+    # racing load_checkpoint_bundle() against the SAME bundle, a
+    # threading.Barrier forcing them through the read-check at the same
+    # instant, and a slowed, counting torch.load standing in for real
+    # weight-load I/O.
+    bundle_dir = tmp_path / "toy"
+    _make_bundle(bundle_dir)
+
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+    real_torch_load = torch.load
+
+    def slow_counting_load(*args, **kwargs):
+        with calls_lock:
+            calls["n"] += 1
+        time.sleep(0.05)  # simulate real, slow weight-load I/O
+        return real_torch_load(*args, **kwargs)
+
+    torch.load = slow_counting_load
+    try:
+        n_callers = 8
+        barrier = threading.Barrier(n_callers)
+
+        def load_one():
+            barrier.wait()
+            load_checkpoint_bundle(bundle_dir)
+
+        threads = [threading.Thread(target=load_one) for _ in range(n_callers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        torch.load = real_torch_load
+
+    assert calls["n"] == 1, (
+        f"expected exactly 1 real torch.load call for {n_callers} concurrent callers "
+        f"against one cold, unchanged bundle, got {calls['n']} -- the cache's own "
+        "guarantee of loading each checkpoint once was defeated by a race"
     )
 
 
