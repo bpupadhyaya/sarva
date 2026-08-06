@@ -18586,3 +18586,60 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `Trainer.dpo_step` silently never applied the configured learning-rate schedule -- a deterministic, first-call bug in the documented "SFT -> DPO/RLHF" pipeline
+
+Round 149. Deliberately trying a different lens after eight straight
+rounds of "unvalidated parameter" bugs, this round's sweep found
+`foundry/sarva_foundry/train/trainer.py`'s `Trainer.dpo_step` never
+applies `self.config.schedule` at all, unlike its two structural
+siblings in the same class. Both `train_step` and `grpo_step` set the
+optimizer's LR from `schedule.lr_at(self.step)` right at the top of
+the method; `dpo_step` has no equivalent block anywhere.
+
+`TrainerConfig.schedule` is framed as a `Trainer`-level opt-in with no
+indication of being scoped to specific training modes, and the
+module's own docstring explicitly lists what DPO shares with
+pretraining/SFT ("same optimizer/grad-clip/step-counting machinery")
+-- schedule is conspicuously never mentioned for DPO despite being
+named for SFT a few lines above. Any caller who constructs a `Trainer`
+with a `WarmupCosineSchedule` and trains via `dpo_step` -- exactly the
+documented spec §3.6e "SFT -> DPO/RLHF -> agentic RL" pipeline -- gets
+a silently flat learning rate pinned at whatever `TrainerConfig.lr`
+was initialized to, for the entire run. No exception, no warning; this
+needs no failure condition, no adversarial input, no rare timing
+window -- it fires deterministically on the very first ordinary call.
+
+**Confirmed live**: with a `WarmupCosineSchedule` configured, the
+optimizer's LR stayed frozen at the initial `0.1` across 5 consecutive
+`dpo_step` calls regardless of the advancing step counter and the
+schedule's own `lr_at(step)` values (`0.5, 1.0, 1.0, 0.96, 0.86`);
+`train_step` on an identical config tracked the schedule exactly.
+
+**Fixed** by adding the identical schedule block `train_step`/
+`grpo_step` already have, right at the top of `dpo_step`.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: the optimizer's LR identical at warmup
+step 0 and step 3 (`0.0003 == 0.0003`, both pinned at the default
+`TrainerConfig.lr`) instead of ramping up between them.
+
+**1 new test, 838 -> 839 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/training.md` gained a
+new subsection directly after the DPO chapter.
+
+**One hundred four of the last one hundred five rounds (46-67, 70-149)
+have found and shipped real fixes; rounds 68-69 remain the only two
+clean sweeps.** The first bug found via a lens other than "unvalidated
+parameter" since round 140 -- a useful reminder that deliberately
+rotating lenses when one is running hot still finds real, previously-
+unfixed bugs elsewhere.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

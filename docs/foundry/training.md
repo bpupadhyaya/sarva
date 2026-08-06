@@ -337,6 +337,30 @@ single DPO preference pair shifts the margin dramatically toward the
 chosen response — no reward model, no sampled rollouts, just the one
 preference pair.
 
+### A much later fresh-eyes sweep found `dpo_step` silently never applied the configured LR schedule
+
+`Trainer.dpo_step` "shares the same optimizer, gradient clipping, and
+step counting" as `train_step`, per this chapter's own words above --
+but it never actually applied `self.config.schedule`, unlike both
+`train_step` and `grpo_step`, which each set the optimizer's LR from
+`schedule.lr_at(self.step)` right at the top of the method. `Trainer
+Config.schedule` is framed as a `Trainer`-level opt-in with no
+indication of being scoped to specific training modes, and this
+module's own docstring explicitly lists what DPO shares with
+pretraining/SFT ("same optimizer/grad-clip/step-counting machinery")
+-- schedule was simply never wired up here. Confirmed live: with a
+`WarmupCosineSchedule` configured, the optimizer's LR stayed frozen at
+the initial `TrainerConfig.lr` across every `dpo_step` call regardless
+of the advancing step counter, while `train_step` on an identical
+config tracked `schedule.lr_at(step)` exactly -- a silent,
+undetectable-in-a-loss-curve LR-schedule bypass for every DPO run that
+opts into a schedule, exactly the documented "SFT → DPO/RLHF" pipeline
+this chapter itself describes. Fixed by adding the identical schedule
+block `train_step`/`grpo_step` already have. Verified by reverting and
+watching the new test fail with the literal old bug's own shape: the
+optimizer's LR identical at warmup step 0 and step 3, instead of
+ramping up between them. 1 new test.
+
 ## Agentic RL's environment harness: sandboxed coding tasks with real, verifiable rewards
 
 §3.6e's post-training line ends with agentic RL — "RL on long-horizon

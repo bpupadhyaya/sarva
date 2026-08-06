@@ -123,6 +123,27 @@ class Trainer:
         caller who forgets to freeze it still gets a correct update."""
         self.model.train()
         ref_model.eval()
+        # A real bug found by a fresh-eyes sweep: dpo_step never applied
+        # self.config.schedule at all, unlike its two structural
+        # siblings in this same class (train_step, grpo_step), both of
+        # which set the optimizer's LR from `schedule.lr_at(self.step)`
+        # right at the top of the method. TrainerConfig.schedule is
+        # framed as a Trainer-level opt-in with no indication of being
+        # scoped to specific training modes, and this module's own
+        # docstring explicitly lists what DPO shares with pretraining/
+        # SFT ("same optimizer/grad-clip/step-counting machinery") --
+        # schedule was simply never wired up here. Confirmed live: with
+        # a WarmupCosineSchedule configured, the optimizer's LR stayed
+        # frozen at the initial config.lr across every dpo_step call
+        # regardless of the advancing step counter, while train_step on
+        # an identical config tracked schedule.lr_at(step) exactly --
+        # a silent, undetectable-in-a-loss-curve LR-schedule bypass for
+        # every DPO run that opts into a schedule, exactly the
+        # documented spec §3.6e "SFT -> DPO/RLHF" pipeline.
+        if self.config.schedule is not None:
+            lr = self.config.schedule.lr_at(self.step)
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
 
         chosen_x, chosen_y, chosen_mask = chosen
         rejected_x, rejected_y, rejected_mask = rejected

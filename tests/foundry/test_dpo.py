@@ -129,6 +129,42 @@ def test_dpo_step_never_puts_a_gradient_on_the_reference_model(tokenizer):
     assert any(p.grad is not None for p in model.parameters())
 
 
+def test_dpo_step_applies_the_configured_schedule_like_train_step_does(tokenizer):
+    # A real bug found by a fresh-eyes sweep: dpo_step never applied
+    # self.config.schedule at all, unlike its two structural siblings
+    # in the same Trainer class (train_step, grpo_step), both of which
+    # set the optimizer's LR from schedule.lr_at(self.step) right at the
+    # top of the method. TrainerConfig.schedule is framed as a
+    # Trainer-level opt-in with no indication of being scoped to
+    # specific training modes -- confirmed live before this fix: with a
+    # WarmupCosineSchedule configured, the optimizer's LR stayed frozen
+    # at the initial config.lr across every dpo_step call regardless of
+    # the advancing step counter, while train_step on an identical
+    # config tracked the schedule exactly.
+    from sarva_foundry.train import TrainerConfig, WarmupCosineSchedule
+
+    config = _tiny_config(tokenizer.vocab_size)
+    model = DecoderOnlyTransformer(config)
+    ref_model = copy.deepcopy(model)
+
+    examples = [DPOExample(prompt="what color is the sky? ", chosen="blue", rejected="green")]
+    chosen, rejected = build_dpo_batch(examples, tokenizer)
+
+    schedule = WarmupCosineSchedule(peak_lr=1e-2, min_lr=1e-4, warmup_steps=4, total_steps=20)
+    trainer = Trainer(model, TrainerConfig(schedule=schedule))
+
+    lrs = []
+    for _ in range(6):
+        trainer.dpo_step(ref_model, chosen, rejected)
+        lrs.append(trainer.optimizer.param_groups[0]["lr"])
+
+    # Steps 0-3 are warmup (ramping up), step 4+ is past warmup_steps=4
+    # and should be decaying -- confirms dpo_step is actually pulling a
+    # fresh LR from the schedule every call, not leaving it frozen.
+    assert lrs[0] < lrs[3]
+    assert lrs[4] > lrs[5]
+
+
 def test_dpo_training_increases_the_policys_preference_margin(tokenizer):
     # The end-to-end trainability proof: after real DPO training, the
     # policy must prefer the chosen response over the rejected one by a
