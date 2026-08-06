@@ -99,6 +99,36 @@ def test_a_correct_submission_that_writes_a_lot_to_stderr_still_passes_quickly()
     assert elapsed < 1.0, f"took {elapsed:.3f}s -- should complete in milliseconds"
 
 
+def test_a_correct_submission_whose_final_stdout_write_lacks_a_trailing_newline_still_passes():
+    # A real bug found by a much later fresh-eyes sweep: phase-1
+    # completion is detected by reading stdout line-by-line (`for line
+    # in proc.stdout`) and comparing each line against the driver's own
+    # ACK marker -- but Python's line iteration only yields a "line" at
+    # the next newline in the underlying byte stream. A submission whose
+    # own final stdout write had no trailing newline (`sys.stdout.write
+    # (...)`, `print(..., end="")` -- entirely ordinary, non-adversarial
+    # patterns a sampled policy completion can genuinely produce) left
+    # that fragment buffered, and it silently concatenated with the
+    # driver's immediately-following ACK print into one unrecognizable
+    # line -- the marker comparison never matched, task.test_code was
+    # never even sent, and the call burned its full timeout before
+    # scoring a functionally correct submission as timed_out=True,
+    # reward=0.0. Confirmed live before this fix: an otherwise-identical
+    # submission differing only in the trailing-newline of its debug
+    # print scored reward=0.0/timed_out=True instead of reward=1.0.
+    no_trailing_newline_submission = (
+        "import sys\n"
+        "sys.stdout.write('debug info, no trailing newline')\n"
+        "def add(a, b):\n"
+        "    return a + b"
+    )
+    result = evaluate_submission(_ADD_TASK, no_trailing_newline_submission, timeout=5.0)
+
+    assert result.timed_out is False, "the ACK marker was never recognized"
+    assert result.passed is True
+    assert result.reward == 1.0
+
+
 def test_a_submission_that_exits_before_test_code_runs_does_not_get_rewarded():
     # A real reward-hacking bug: the combined script is submitted_code
     # followed by task.test_code, so a "solution" that calls sys.exit(0)

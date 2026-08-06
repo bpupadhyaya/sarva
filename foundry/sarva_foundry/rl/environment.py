@@ -116,6 +116,18 @@ _PHASE1_ACK_MARKER = "__SARVA_PHASE1_ACK__"
 # Python's buffered `sys.stdin` entirely, used to win the race for
 # phase 2's content every time). All later reads go through the
 # duplicated fd instead of raw fd 0.
+#
+# The ACK print below is prefixed with its own leading "\n" -- see
+# evaluate_submission's own docstring for the real bug this closes: a
+# submission whose final stdout write has no trailing newline (an
+# entirely ordinary pattern -- `sys.stdout.write(...)`, `print(..., end
+# ="")`) leaves that fragment buffered, and evaluate_submission's
+# line-based reader (`for line in proc.stdout`) only yields a "line" at
+# the next "\n" -- so the unterminated fragment silently concatenates
+# with this print into one unrecognizable line, and the marker
+# comparison never matches. The leading "\n" guarantees the marker
+# always lands on its own, unambiguous line no matter what the
+# submission's own last write looked like.
 _DRIVER_SRC = f"""
 import os, sys
 _real_stdin_fd = os.dup(0)
@@ -130,7 +142,7 @@ for _line in _stream:
         break
     _lines.append(_line)
 exec(compile("".join(_lines), "<submission>", "exec"), _ns)
-print({_PHASE1_ACK_MARKER!r}, flush=True)
+print("\\n" + {_PHASE1_ACK_MARKER!r}, flush=True)
 exec(compile(_stream.read(), "<test>", "exec"), _ns)
 """
 
@@ -223,7 +235,37 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
     Documented here explicitly, not left implicit in a general "not a
     full sandbox" disclaimer, so nobody mistakes this fix for a
     provable guarantee against a sufficiently sophisticated policy an
-    RL run might discover."""
+    RL run might discover.
+
+    **A fourth bug, this one not an exploit but a false negative,
+    found by a much later fresh-eyes sweep: a correct submission could
+    silently score `reward=0.0` if its own stdout simply didn't end in
+    a newline.** Phase-1 completion is detected by reading stdout
+    line-by-line (`for line in proc.stdout`) and comparing each line
+    against `_PHASE1_ACK_MARKER` -- but Python's line iteration only
+    yields a "line" at the next `\\n` in the underlying byte stream. If
+    `submitted_code`'s own final stdout write had no trailing newline
+    (`sys.stdout.write(...)`, `print(..., end="")` -- entirely
+    ordinary, non-adversarial patterns a sampled policy completion can
+    genuinely produce), that unterminated fragment stayed buffered and
+    silently concatenated with the driver's immediately-following ACK
+    print into one unrecognizable line
+    (`"debug info__SARVA_PHASE1_ACK__\\n"`), which never matched the
+    bare marker. `ack_seen` then never became `True`, `task.test_code`
+    was never even sent, and the call burned its full timeout before
+    returning `timed_out=True, reward=0.0` for a submission that was
+    functionally correct -- silently poisoning the training signal the
+    opposite direction from the three exploits above (penalizing
+    correct work instead of rewarding broken work), the same class of
+    harm the stderr-pipe deadlock fix already named. Confirmed live:
+    two otherwise-identical submissions, differing only in whether
+    their final `sys.stdout.write` call included a trailing newline,
+    scored `reward=0.0`/`timed_out=True` and `reward=1.0` respectively.
+    Fixed by having the driver prefix its own ACK print with a leading
+    `"\\n"` (see `_DRIVER_SRC`'s own comment): this guarantees the
+    marker always lands on its own, unambiguous line regardless of
+    what the submission's last write looked like, without needing to
+    change the reader side at all."""
     sentinel = f"__SARVA_TASK_COMPLETED_{secrets.token_hex(16)}__"
     popen_kwargs: dict[str, object] = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}

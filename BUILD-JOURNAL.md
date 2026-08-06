@@ -18290,3 +18290,63 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A correct RL coding-task submission could silently score zero reward if its own stdout simply didn't end in a newline
+
+Round 144. `evaluate_submission`'s phase-1 completion detection reads
+the subprocess driver's stdout line-by-line (`for line in proc.stdout`)
+and compares each line against `_PHASE1_ACK_MARKER`. Python's line
+iteration only yields a "line" at the next `\n` in the underlying byte
+stream. If `submitted_code`'s own final stdout write had no trailing
+newline (`sys.stdout.write(...)`, `print(..., end="")` -- entirely
+ordinary, non-adversarial patterns a sampled policy completion can
+genuinely produce), that unterminated fragment stayed buffered and
+silently concatenated with the driver's immediately-following ACK
+print into one unrecognizable line
+(`"debug info__SARVA_PHASE1_ACK__\n"`), which never matched the bare
+marker. `ack_seen` then never became `True`, `task.test_code` was
+never even sent, and the call burned its full timeout before returning
+`timed_out=True, reward=0.0` for a submission that was functionally
+correct.
+
+This is the fourth bug found and fixed in this exact completion-
+signaling mechanism -- but the first that's a false negative rather
+than a reward-hacking exploit: it silently poisons the RL training
+signal in the OPPOSITE direction from the three prior fixes
+(`sys.exit(0)` early-exit, the plaintext-sentinel read, the raw-fd
+race), penalizing correct work instead of rewarding broken work -- the
+same class of harm the stderr-pipe deadlock fix was already found and
+fixed for.
+
+**Confirmed live**: two otherwise-identical submissions, differing
+only in whether their final `sys.stdout.write` call included a
+trailing newline, scored `reward=0.0, timed_out=True` and `reward=1.0`
+respectively.
+
+**Fixed** by having the driver prefix its own ACK print with a leading
+`"\n"`: this guarantees the marker always lands on its own,
+unambiguous line regardless of what the submission's last write looked
+like, without needing to change the reader side at all.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `timed_out=True` with the merged stdout
+line (`"debug info, no trailing newline__SARVA_PHASE1_ACK__\n"`).
+
+**1 new test, 833 -> 834 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update: this module's
+own three prior completion-signaling fixes never got a dedicated docs
+chapter either, living only in the function's own docstring and
+BUILD-JOURNAL.md.
+
+**Ninety-nine of the last one hundred rounds (46-67, 70-144) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
