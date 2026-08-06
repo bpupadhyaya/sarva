@@ -221,3 +221,26 @@ def test_run_ablation_rejects_a_non_positive_record_every_instead_of_crashing_mi
 
     with pytest.raises(ValueError, match="record_every"):
         run_ablation(arms, token_ids, seq_len=16, batch_size=2, steps=5, seeds=[0], record_every=0)
+
+
+def test_run_ablation_rejects_a_non_positive_batch_size_instead_of_crashing_mid_training():
+    # A real bug found by a later fresh-eyes sweep, the sibling
+    # parameter one over from record_every above, in this exact
+    # function: batch_size was likewise a plain, unvalidated int -- a
+    # caller computing it programmatically (e.g. `tokens_per_step //
+    # seq_len`, which is 0 for a small smoke-test corpus) can land on 0
+    # (or a typo'd negative value) with nothing to catch it.
+    # _make_batch's own `range(batch_size)` used to be empty, so
+    # `torch.stack([])` raised a raw, undocumented RuntimeError -- AFTER
+    # Trainer/DecoderOnlyTransformer construction had already happened
+    # for that arm/seed.
+    _, token_ids = _tokenized_corpus()
+    config = TransformerConfig(
+        vocab_size=300, dim=16, n_layers=1, n_heads=2, n_kv_heads=1, max_seq_len=16
+    )
+    arms = [AblationArm(name="a", model_config=config)]
+
+    with pytest.raises(ValueError, match="batch_size"):
+        run_ablation(arms, token_ids, seq_len=16, batch_size=0, steps=5, seeds=[0])
+    with pytest.raises(ValueError, match="batch_size"):
+        run_ablation(arms, token_ids, seq_len=16, batch_size=-2, steps=5, seeds=[0])

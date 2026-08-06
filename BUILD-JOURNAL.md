@@ -18235,3 +18235,58 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `run_ablation`'s `batch_size` -- the sibling parameter one over from `record_every` -- was likewise unvalidated, crashing with a raw `RuntimeError` deep inside `torch.stack`
+
+Round 143. One round after fixing `record_every`'s missing positivity
+check in this exact function, this round's sweep found the sibling
+parameter `batch_size` had the identical gap: a plain, unvalidated
+public `int`. `batch_size=0` (or any non-positive value) makes
+`_make_batch`'s own `range(batch_size)` empty, so `xs`/`ys` stay empty
+lists and `torch.stack([])` raises a raw, undocumented `RuntimeError:
+stack expects a non-empty TensorList` -- AFTER `Trainer`/
+`DecoderOnlyTransformer` construction has already happened for that
+arm/seed.
+
+Not contrived: `batch_size` is a normal hyperparameter a caller of
+this small-scale ablation harness would compute programmatically
+(e.g. `tokens_per_step // seq_len`, which is `0` for a small
+smoke-test corpus) or simply mistype as `0`. No existing test
+exercised `batch_size <= 0`.
+
+**Confirmed live**: `run_ablation([arm], ..., batch_size=0, steps=3,
+seeds=[0])` raised `RuntimeError: stack expects a non-empty
+TensorList`; `batch_size=-2` reproduced identically (a negative value
+also gives an empty `range()`).
+
+**Fixed** by adding the same `<= 0` positivity check `record_every`
+already got in this function, right next to it.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: the raw `RuntimeError` propagating
+uncaught from `torch.stack`.
+
+**1 new test, 832 -> 833 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for this module.
+
+**Ninety-eight of the last ninety-nine rounds (46-67, 70-143) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** Three rounds in a row (141-143) have now found the identical
+"unvalidated numeric parameter feeding a `range()`/divisor" shape,
+twice in the very same function (`run_ablation`'s `record_every` then
+`batch_size`) and once in a sibling module (`near_dedup.py`'s
+`num_hashes`). `run_ablation`'s remaining numeric parameters
+(`seq_len`, `steps`, `lr`) have not yet been individually audited for
+the same gap -- worth a direct check before assuming this function is
+now fully validated, given how many rounds' "believed fully validated"
+claims about other classes have turned out premature.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

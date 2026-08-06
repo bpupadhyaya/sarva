@@ -180,6 +180,18 @@ def run_ablation(
     # earlier sweeps reached. Confirmed live before this fix.
     if record_every <= 0:
         raise ValueError(f"record_every must be positive, got {record_every}")
+    # A real bug found by a later fresh-eyes sweep, the sibling
+    # parameter one over from record_every above, in this exact
+    # function: batch_size is likewise a plain, unvalidated int -- a
+    # caller computing it programmatically (e.g. `tokens_per_step //
+    # seq_len`, which is 0 for a small smoke-test corpus) can land on 0
+    # (or a typo'd negative value) with nothing to catch it. `_make_batch`'s
+    # own `range(batch_size)` is then empty, so `torch.stack([])` raises
+    # a raw, undocumented RuntimeError -- AFTER Trainer/
+    # DecoderOnlyTransformer construction has already happened for that
+    # arm/seed. Confirmed live before this fix.
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
     dataset = TextChunkDataset(token_ids, seq_len=seq_len)
 
     results: list[ArmResult] = []
