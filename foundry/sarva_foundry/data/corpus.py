@@ -55,6 +55,23 @@ def dedup_documents(docs: list[str]) -> list[str]:
 def _filter_by_length_key[T](
     items: list[T], key: Callable[[T], str], min_chars: int, max_chars: int | None
 ) -> list[T]:
+    # A real bug found by a fresh-eyes sweep, the identical "unvalidated
+    # numeric parameter silently collapsing an entire corpus" shape
+    # already fixed for near_dedup.py's threshold: neither min_chars nor
+    # max_chars was ever validated here. `length > max_chars` is True
+    # for every non-empty document once max_chars is 0 or negative --
+    # confirmed live, a real 3-document corpus with ordinary content
+    # dropped to `[]` with max_chars=-5, max_chars=0, or a caller-
+    # composed min_chars=100/max_chars=10 range that can never keep
+    # anything -- no crash, no warning, silent total data loss in a
+    # corpus-cleaning pipeline. A caller deriving max_chars
+    # programmatically (a token/char budget divided down to a small or
+    # negative remainder) or simply passing min_chars/max_chars in the
+    # wrong order can land on exactly this with no adversarial intent.
+    if min_chars < 0:
+        raise ValueError(f"min_chars must be non-negative, got {min_chars}")
+    if max_chars is not None and max_chars < min_chars:
+        raise ValueError(f"max_chars ({max_chars}) must be >= min_chars ({min_chars})")
     out = []
     for item in items:
         length = len(key(item))

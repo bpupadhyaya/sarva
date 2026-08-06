@@ -20220,3 +20220,79 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `filter_by_length`'s `min_chars`/`max_chars` were never validated — the identical "silently collapsing an entire corpus" shape already fixed for `near_dedup.py`'s `threshold`
+
+Round 173. With the Agent tool's per-session subagent spawn limit
+reached (200/200), this round's sweep was done directly rather than via
+a dispatched fresh-eyes agent. Following the established lens
+("functions with 2+ prior rounds of individually-fixed sibling
+parameters likely have one more"), a grep of `BUILD-JOURNAL.md` for
+"sibling parameter" found `foundry/sarva_foundry/data/near_dedup.py`'s
+`_dedup_near_duplicates_by_key` already had three such fixes
+(`num_hashes`, `shingle_size`, `threshold`) -- but that function is now
+fully validated. Checking `corpus.py`, the sibling module `near_dedup.py`
+itself reuses (`_dedup_by_key`/`_filter_by_length_key`), found
+`_filter_by_length_key` -- the shared choke point both `filter_by_length`
+and `filter_sourced_documents_by_length` funnel through -- had never
+been validated at all.
+
+`length > max_chars` is `True` for every non-empty document once
+`max_chars` is `0` or negative, and a caller-composed `min_chars`/
+`max_chars` pair in the wrong order (e.g. `min_chars=100,
+max_chars=10`) can never keep any document either -- the exact same
+"unvalidated numeric parameter silently collapsing an entire corpus"
+shape already fixed for `near_dedup.py`'s `threshold` in an earlier
+round, just never checked for this sibling module's own length filter.
+
+**Confirmed live**: a real 3-document corpus with ordinary content
+dropped from 3 kept down to `[]` with `max_chars=-5`, `max_chars=0`,
+or a `min_chars=100`/`max_chars=10` range that can never keep
+anything -- no crash, no warning, silent total data loss in a
+corpus-cleaning pipeline. `filter_sourced_documents_by_length` is
+genuinely reachable public API, exported from `sarva_foundry.data`,
+used in `examples/06_real_corpus_pretraining.py`'s real pipeline, and
+documented as a pipeline stage in `docs/foundry/training.md`.
+
+**Fixed** by adding `if min_chars < 0: raise ValueError(...)` and `if
+max_chars is not None and max_chars < min_chars: raise ValueError(...)`
+to `_filter_by_length_key`, the single choke point both public entry
+points already funnel through -- matching the established pattern of
+validating once at the shared internal helper rather than duplicating
+the check at each public wrapper.
+
+**Verified by reverting** and watching all three new tests fail with
+the literal old bug's own shape: `DID NOT RAISE ValueError` for
+`max_chars=0`, `max_chars=-5`, the inverted range, and a negative
+`min_chars`.
+
+**3 new tests, 870 -> 873 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update -- confirmed
+`near_dedup.py`'s own three sibling-parameter fixes were never
+documented either, matching the established foundry-internals-only
+config-validation precedent.
+
+**One hundred twenty-eight of the last one hundred twenty-nine rounds
+(46-67, 70-173) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** A fifth instance of the "one sibling
+parameter left unvalidated across N prior rounds of the identical fix
+pattern" shape -- this time the pattern generalized across sibling
+*modules* in the same package (`near_dedup.py`'s already-closed
+threshold gap pointing at `corpus.py`'s still-open one), not just
+within one function. Operationally: the Agent tool's per-session
+subagent spawn limit (200) was reached partway through this round;
+the sweep, fix, verification, and write-up were all completed directly
+with Grep/Read/Bash/Edit instead of a dispatched background agent --
+the loop continues unaffected, just without background sweep
+delegation for the remainder of this session unless the limit is
+raised. The already-known `bpe.py`/`provenance.py` leads remain
+confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

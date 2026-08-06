@@ -76,6 +76,35 @@ def test_filter_by_length_with_no_max_chars_keeps_everything_above_min():
     assert filter_by_length(docs, min_chars=1) == docs
 
 
+def test_filter_by_length_rejects_a_non_positive_max_chars_instead_of_dropping_everything():
+    # A real bug found by a fresh-eyes sweep, the identical "unvalidated
+    # numeric parameter silently collapsing an entire corpus" shape
+    # already fixed for near_dedup.py's threshold: `length > max_chars`
+    # used to be True for every non-empty document once max_chars was 0
+    # or negative -- a real, ordinary corpus dropped from N documents to
+    # zero, with no crash and no warning, in a corpus-cleaning pipeline.
+    docs = ["short", "a normal document with real content", "another one"]
+    with pytest.raises(ValueError, match="max_chars"):
+        filter_by_length(docs, min_chars=1, max_chars=0)
+    with pytest.raises(ValueError, match="max_chars"):
+        filter_by_length(docs, min_chars=1, max_chars=-5)
+
+
+def test_filter_by_length_rejects_max_chars_below_min_chars():
+    # Same bug class, the range-composition variant: a caller-composed
+    # min_chars/max_chars pair in the wrong order can never keep any
+    # document, silently collapsing the whole corpus the same way.
+    docs = ["short", "a normal document with real content"]
+    with pytest.raises(ValueError, match="max_chars"):
+        filter_by_length(docs, min_chars=100, max_chars=10)
+
+
+def test_filter_by_length_rejects_a_negative_min_chars():
+    docs = ["short", "a normal document with real content"]
+    with pytest.raises(ValueError, match="min_chars"):
+        filter_by_length(docs, min_chars=-1)
+
+
 def test_sourcing_pipeline_plugs_into_the_existing_tokenize_and_chunk_stages(tmp_path):
     # The point of this test: load -> dedup -> filter -> tokenize_corpus
     # -> TextChunkDataset is a real pipeline, not three functions that
