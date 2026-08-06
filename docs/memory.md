@@ -867,6 +867,53 @@ and watching the new test fail with the literal old bug's own shape:
 `IndexError: list index out of range` at the same line. 1 new test,
 816 → 817 Python tests.
 
+### `_slugify` had the identical ASCII-only pattern already found and fixed for `vector.py`'s tokenizer — never propagated to this sibling module
+
+A much later fresh-eyes sweep, applying a "structural sibling
+comparison" lens across the three memory-tier modules this chapter
+opens by naming, found that `_slugify`'s own normalization pattern,
+`[^a-z0-9]+`, had the identical ASCII-only shape already found and
+fixed once for `sarva.memory.vector`'s `_tokenize()` (the chapter
+above) — the fix never propagated one module over, to this sibling
+doing the same normalization job for a different purpose (a
+filesystem-safe slug instead of a search token).
+
+A topic written entirely in a non-Latin script — Japanese, Russian,
+Arabic, or any other script with no ASCII alphanumeric characters at
+all, an entirely ordinary thing for a non-English-speaking user or a
+model conversing in another language to ask this tool to remember
+something under — slugified to an empty string and was rejected
+outright with `LongTermMemoryError`, making the `note` tool completely
+unusable for that topic. An accented Latin topic like `"café"` wasn't
+rejected but was silently mangled to `"caf"`, the identical truncation
+already fixed for `vector.py`. Confirmed live before this fix:
+`_slugify("日本語のメモ")` raised `LongTermMemoryError`; `_slugify("café")`
+returned `"caf"`.
+
+Fixed by widening the pattern to `[\W_]+` — Unicode-aware `\W` by
+default for a `str` pattern in Python 3, matching `vector.py`'s own
+fix, with `_` explicitly still collapsed to `-` too so this function's
+own prior treatment of underscores (`\w` alone would keep them as a
+"word" character, a silent behavior change this fix deliberately
+avoided). Widening the character set that survives slugifying also
+reopened a second, related gap in `_MAX_TOPIC_SLUG_LENGTH`'s own
+check, found in the same pass: that cap was measured in Python
+characters, exactly equivalent to bytes back when the slug was
+ASCII-only, but a non-Latin character can take up to 4 bytes in UTF-8
+— the actual unit the filesystem's own filename-length limit this cap
+exists to protect against is measured in — so a slug well under the
+200-*character* cap could still exceed the real 255-*byte* filesystem
+limit, reintroducing the exact raw-`OSError` bug this cap was built to
+prevent (see the earlier fix above), just for Unicode topics instead
+of long ASCII ones. Fixed by measuring `len(slug.encode("utf-8"))`
+instead of `len(slug)`. Verified live both fixes hold: non-Latin and
+accented topics now slugify successfully and correctly; 100 CJK
+characters (300 UTF-8 bytes, comfortably under the old 200-*character*
+cap) is correctly rejected under the new byte-aware cap. Verified by
+reverting and watching all three new tests fail with the literal old
+bug's own shape: `LongTermMemoryError` for a pure-non-Latin topic,
+`"caf"` for an accented one. 3 new tests, 844 → 847 Python tests.
+
 ## Build it yourself
 
 - `sarva chat` runs with an empty tool list (`tools=[]`) — memory tools

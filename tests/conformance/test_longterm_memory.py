@@ -33,6 +33,46 @@ def test_slugify_rejects_a_topic_with_no_alphanumeric_content():
         _slugify("!!!")
 
 
+def test_slugify_preserves_non_latin_topic_names_instead_of_rejecting_them():
+    # A real bug found by a fresh-eyes sweep, the identical "ASCII-only
+    # normalization pattern" shape already found and fixed once for
+    # sarva.memory.vector's own _tokenize() -- this sibling function,
+    # doing the identical normalization job one memory-tier module
+    # over, never got the same fix. `[^a-z0-9]+` only ever preserved
+    # ASCII letters/digits, so a topic written entirely in a non-Latin
+    # script (an entirely ordinary thing for a non-English-speaking
+    # user, or a model conversing in another language, to ask this tool
+    # to remember something under) slugified to an empty string and was
+    # rejected outright -- making the `note` tool completely unusable
+    # for that topic. Confirmed live before this fix:
+    # _slugify("日本語のメモ") raised LongTermMemoryError.
+    assert _slugify("日本語のメモ") != ""
+    assert _slugify("Настройки пользователя") != ""
+
+
+def test_slugify_no_longer_silently_truncates_accented_latin_topics():
+    # The other half of the same bug: an accented Latin topic like
+    # "café" wasn't rejected, but was silently mangled to "caf" --
+    # confirmed live before this fix.
+    assert "caf" in _slugify("café")
+    assert _slugify("café") != "caf"
+
+
+def test_slugify_rejects_a_unicode_topic_that_would_exceed_the_byte_length_cap():
+    # A real bug found alongside the Unicode-slugification fix above:
+    # the length cap used to be measured in Python characters, which
+    # was exactly equivalent to bytes back when the slug was ASCII-only
+    # -- but a non-Latin character can take up to 4 bytes in UTF-8 (the
+    # actual unit the filesystem's own filename-length limit is measured
+    # in), so a slug well under the character cap could still exceed the
+    # real filesystem limit and reintroduce the raw-OSError bug the cap
+    # exists to prevent, just for Unicode topics instead of long ASCII
+    # ones. 100 CJK characters is well under the 200-*character* cap but
+    # (at 3 bytes each in UTF-8) is 300 bytes -- over the real limit.
+    with pytest.raises(LongTermMemoryError, match="invalid topic name"):
+        _slugify("日" * 100)
+
+
 def test_write_creates_a_real_readable_markdown_file(store):
     path = store.write("project status", "the launch is scheduled for next week")
 

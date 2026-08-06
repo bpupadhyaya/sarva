@@ -18821,3 +18821,77 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `LongTermMemoryStore._slugify` had the identical ASCII-only pattern already found and fixed for `vector.py`'s tokenizer -- never propagated to this sibling module, making the `note` tool unusable for non-Latin topics
+
+Round 153. Applying the "structural sibling comparison" lens across
+this project's three memory-tier modules, this round's sweep found
+that `core/sarva/memory/longterm.py`'s `_slugify` had the identical
+ASCII-only shape (`[^a-z0-9]+`) already found and fixed once for
+`sarva.memory.vector`'s `_tokenize()` -- the fix never propagated one
+module over, to this sibling doing the same normalization job for a
+different purpose (a filesystem-safe slug instead of a search token).
+
+A topic written entirely in a non-Latin script (Japanese, Russian,
+Arabic, ...) -- an entirely ordinary thing for a non-English-speaking
+user or a model conversing in another language to ask this tool to
+remember something under -- slugified to an empty string and was
+rejected outright with `LongTermMemoryError`, making the `note` tool
+completely unusable for that topic. An accented Latin topic like
+`"café"` wasn't rejected but was silently mangled to `"caf"`, the
+identical truncation already fixed for `vector.py`.
+
+**Confirmed live**: `_slugify("日本語のメモ")` raised `LongTermMemoryError`;
+`_slugify("café")` returned `"caf"`. Both reproduced through the full
+`LongTermMemoryStore.write()` path too, not just `_slugify` in
+isolation.
+
+**Fixed** by widening the pattern to `[\W_]+` -- Unicode-aware `\W` by
+default in Python 3, matching `vector.py`'s own fix, with `_`
+explicitly still collapsed to `-` so underscores keep their prior
+treatment (`\w` alone would keep them as a "word" character, a silent
+behavior change deliberately avoided).
+
+**A second, related gap found in the same pass**: widening the
+character set that survives slugifying reopened `_MAX_TOPIC_SLUG_
+LENGTH`'s own check -- that cap was measured in Python characters,
+exactly equivalent to bytes when the slug was ASCII-only, but a
+non-Latin character can take up to 4 bytes in UTF-8, the actual unit
+the filesystem's own filename-length limit is measured in. A slug well
+under the 200-character cap could still exceed the real 255-byte
+filesystem limit, reintroducing the exact raw-`OSError` bug this cap
+was originally built to prevent, just for Unicode topics instead of
+long ASCII ones. Fixed by measuring `len(slug.encode("utf-8"))`
+instead of `len(slug)`.
+
+**Verified live**: non-Latin and accented topics now slugify
+successfully and correctly; 100 CJK characters (300 UTF-8 bytes,
+comfortably under the old 200-character cap) is correctly rejected
+under the new byte-aware cap.
+
+**Verified by reverting** and watching all three new tests fail with
+the literal old bug's own shape: `LongTermMemoryError` for a
+pure-non-Latin topic, `"caf"` for an accented one.
+
+**3 new tests, 844 -> 847 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/memory.md` gained a new
+subsection directly after the empty-file `IndexError` fix, in the
+long-term-memory chapter's own ongoing per-bug narrative.
+
+**One hundred eight of the last one hundred nine rounds (46-67,
+70-153) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** Third bug found via the sibling-comparison
+lens (after round 149's DPO schedule and rounds 151-152's Ollama
+`GenerateConfig` gaps) -- worth checking `sarva.memory.session`, the
+third memory-tier module in this same family, for any equivalent
+ASCII-only normalization gap before assuming this class of bug is
+exhausted.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

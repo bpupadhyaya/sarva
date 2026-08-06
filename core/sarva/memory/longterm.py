@@ -33,7 +33,26 @@ from sarva.file_lock import exclusive_lock
 
 DEFAULT_LONGTERM_MEMORY_DIR = Path.home() / ".sarva" / "memory"
 
-_SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
+# A real bug found by a fresh-eyes sweep, the identical "ASCII-only
+# normalization pattern" shape already found and fixed once for
+# sarva.memory.vector's own _tokenize() -- this sibling function, doing
+# the identical normalization job one memory-tier module over, never
+# got the same fix. `[^a-z0-9]+` only ever preserves ASCII letters/
+# digits, so a topic written entirely in a non-Latin script (Japanese,
+# Russian, Arabic, ...) -- an entirely ordinary thing for a
+# non-English-speaking user or a model conversing in another language
+# to ask this tool to remember something under -- slugified to an empty
+# string and was rejected outright with LongTermMemoryError, making the
+# `note` tool completely unusable for that topic; an accented Latin
+# topic like "café" wasn't rejected but was silently mangled to "caf".
+# Confirmed live before this fix: `_slugify("日本語のメモ")` raised
+# LongTermMemoryError; `_slugify("café")` returned "caf". `\w` is
+# Unicode-aware by default for a `str` pattern in Python 3, matching
+# vector.py's own fix -- `_` is explicitly still collapsed to "-" too,
+# preserving this function's own prior behavior for underscores (`\w`
+# alone would treat `_` as a keep-worthy word character, a silent
+# behavior change this fix deliberately avoids).
+_SLUG_PATTERN = re.compile(r"[\W_]+")
 
 
 class LongTermMemoryError(Exception):
@@ -63,9 +82,19 @@ def _slugify(topic: str) -> str:
         raise LongTermMemoryError(
             f"invalid topic name: {topic!r} -- must contain at least one alphanumeric character"
         )
-    if len(slug) > _MAX_TOPIC_SLUG_LENGTH:
+    # A real bug found alongside the Unicode-slugification fix above:
+    # this cap was measured in Python characters, which was exactly
+    # equivalent to bytes back when the slug was ASCII-only -- but a
+    # non-Latin slug's characters can each take up to 4 bytes in UTF-8
+    # (the actual unit the filesystem's own limit this cap exists to
+    # protect against is measured in), so a slug well under 200
+    # *characters* could still exceed 255 *bytes* and reintroduce the
+    # exact raw-OSError bug this cap was built to prevent, just for
+    # Unicode topics instead of long ASCII ones.
+    slug_bytes = len(slug.encode("utf-8"))
+    if slug_bytes > _MAX_TOPIC_SLUG_LENGTH:
         raise LongTermMemoryError(
-            f"invalid topic name: {len(slug)} characters after slugifying, "
+            f"invalid topic name: {slug_bytes} bytes after slugifying, "
             f"must be at most {_MAX_TOPIC_SLUG_LENGTH}"
         )
     return slug
