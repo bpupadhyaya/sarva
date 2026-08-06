@@ -19034,3 +19034,75 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## Ollama's `thinking` field, finally followed up -- but only the inbound half; the outbound half is a real regression risk, not a bug
+
+Round 156. Round 152's own journal entry named the exact next lead:
+whether Ollama's remaining `GenerateConfig` fields (`effort`,
+`thinking`) had the same sibling-comparison gap already found for
+`stop_sequences`/`max_tokens`. Round 153's sweep investigated the
+outbound half and correctly found it's a dead end, not a bug: sending
+Ollama's real `think` request field to a model that doesn't support
+thinking produces a real `HTTP 400` -- confirmed live again this round
+against a real running server (`"qwen2.5:0.5b" does not support
+thinking`) -- the identical risk OpenAI's/Google's own adapters already
+cite for leaving `effort` unmapped, and this adapter has no way to know
+a model's thinking capability at this layer.
+
+This round found the *inbound* half is a real, separate bug the
+outbound investigation never covered: a real hybrid-thinking model
+(confirmed live with `qwen3:0.6b`, freshly pulled and queried against a
+real running Ollama server) emits a real, populated `message.thinking`
+field on every streamed chunk BY DEFAULT, with no `think` request field
+sent at all. `generate()` never read it -- only `content` and
+`tool_calls` were ever parsed -- so the model's entire real reasoning
+trace was silently discarded, never surfaced as a `ThinkingDeltaEvent`
+and never persisted in the transcript's `ThinkingBlock`, unlike the
+identical feature already working for `AnthropicProvider`.
+
+**Confirmed live**: streaming a real "what is 2+2?" turn through
+`qwen3:0.6b` produced 117 real `ThinkingDeltaEvent`s carrying the
+model's actual reasoning text, and the final assembled message had no
+`ThinkingBlock` at all before this fix -- a total, silent loss of real
+data the server sends unprompted, for this project's own registered
+default local model family, not a hypothetical or
+request-config-dependent gap.
+
+**Fixed** narrowly, matching what was actually confirmed reachable: the
+streaming loop now reads `message.thinking` the same way it already
+reads `message.content`, accumulating it into a `ThinkingBlock`
+inserted at the front of the assembled message (confirmed live that
+`thinking` deltas always precede `content`/`tool_calls` deltas for the
+whole turn). Deliberately NOT paired with sending `think` in the
+outbound request, respecting round 153's own confirmed 400-error risk
+-- this fix only ever reads `thinking` content a model volunteers on
+its own, never requests it.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `thinking_deltas == []` instead of the
+real streamed reasoning.
+
+**1 new test, 849 -> 850 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the `max_tokens` fix, closing out the loop
+that round's own "Next" note opened.
+
+**One hundred eleven of the last one hundred twelve rounds (46-67,
+70-156) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** A genuinely careful split: the same
+underlying lead (Ollama's remaining `GenerateConfig` fields) correctly
+produced both a "not a bug, here's why" conclusion (outbound `think`)
+and a "yes, a real bug" conclusion (inbound `thinking`) across two
+separate rounds -- confirming both halves live, rather than either
+assuming the whole lead was a dead end or blindly fixing the outbound
+side too, was what kept this from becoming either a missed bug or a
+new regression.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

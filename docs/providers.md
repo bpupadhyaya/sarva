@@ -1021,6 +1021,58 @@ payload now always carries `num_predict`. Verified by reverting and
 watching the new test fail with the literal old gap reproducing
 itself: `KeyError: 'options'`. 1 new test, 843 → 844 Python tests.
 
+### A much later round finally followed up its own named lead — Ollama's `thinking` field, but only the inbound half, since the outbound half turns out to be a real regression risk
+
+The `max_tokens` fix's own journal entry named the exact next thing
+worth checking: whether Ollama's remaining `GenerateConfig` fields
+(`effort`, `thinking`) had the same sibling-comparison gap. An
+intervening round investigated it and found the outbound half is a
+**dead end, not a bug**: Ollama's real `/api/chat` genuinely documents
+a request-side `think` field, but sending it to a model that doesn't
+support thinking produces a real `HTTP 400` (confirmed live against a
+real running server: `"qwen2.5:0.5b" does not support thinking`) — the
+identical risk OpenAI's and Google's own adapters already cite as their
+reason for leaving `effort` unmapped, and this adapter has no way to
+know a given model's thinking capability at this layer. Sending `think`
+unconditionally would be a real regression for every non-thinking
+Ollama model, so Ollama's omission here is consistent with its
+siblings' own stated reasoning, not a divergence from it.
+
+But a much later fresh-eyes sweep found the *inbound* half is a real,
+separate bug the outbound investigation didn't cover: a real
+hybrid-thinking model — confirmed live against a real running Ollama
+server with `qwen3:0.6b` actually pulled and queried — emits a real,
+populated `message.thinking` field on every streamed chunk **by
+default**, with no `think` request field sent at all. `generate()`
+never read it: only `message.content` and `message.tool_calls` were
+ever parsed, so the model's entire real reasoning trace was silently
+discarded — never surfaced as a `ThinkingDeltaEvent`, never persisted
+in the transcript's `ThinkingBlock` — unlike the identical feature
+already working correctly for `AnthropicProvider`. Confirmed live,
+both streaming (117 real `ThinkingDeltaEvent`s for one ordinary "what
+is 2+2?" turn) and the final assembled message (a `ThinkingBlock`
+completely absent from `DoneEvent.message.content` before this fix).
+This is a total, silent loss of real data the server sends unprompted
+— not a hypothetical or request-config-dependent gap — for this
+project's own registered default local model family (`qwen3`), the
+"free & private" tier this file's own per-bug narrative already calls
+the one most likely to run unattended with no cost pressure prompting
+anyone to notice.
+
+Fixed narrowly, matching what was actually confirmed reachable: the
+streaming loop now reads `message.thinking` the same way it already
+reads `message.content`, accumulating it into a `ThinkingBlock`
+inserted at the front of the assembled message — confirmed live that
+`thinking` deltas always precede `content`/`tool_calls` deltas for the
+whole turn (the model reasons, then answers), so there's exactly one
+thinking span per turn, always first. Deliberately **not** paired with
+sending `think` in the outbound request, respecting the earlier
+round's own confirmed 400-error risk — this fix only ever reads
+`thinking` content a model volunteers on its own, never requests it.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape: `thinking_deltas == []` instead of the real
+streamed reasoning. 1 new test, 849 → 850 Python tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

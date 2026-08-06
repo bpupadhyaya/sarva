@@ -25,7 +25,14 @@ from typing import Any
 
 import httpx
 
-from sarva.multimodal.content import ImageBlock, Message, TextBlock, ToolCallBlock, ToolResultBlock
+from sarva.multimodal.content import (
+    ImageBlock,
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 from sarva.multimodal.fetch import resolve_media_bytes
 from sarva.providers.base import (
     DoneEvent,
@@ -34,6 +41,7 @@ from sarva.providers.base import (
     StopReason,
     StreamErrorEvent,
     TextDeltaEvent,
+    ThinkingDeltaEvent,
     ToolCallEvent,
     Usage,
 )
@@ -205,6 +213,31 @@ class OllamaProvider:
         payload["options"] = options
 
         text_acc = ""
+        # A real bug found by a much later fresh-eyes sweep, the same
+        # "this adapter never translates a real GenerateConfig field"
+        # shape already found and fixed twice on this same file
+        # (stop_sequences, max_tokens) -- but this one is inbound, not
+        # outbound, and deliberately NOT paired with an outbound `think`
+        # request field: confirmed live against a real running Ollama
+        # server that sending `think: true` to a model that doesn't
+        # support it produces a real HTTP 400 ("does not support
+        # thinking"), the identical risk OpenAI's/Google's own adapters
+        # already cite as their reason for leaving `effort` unmapped --
+        # this adapter has no way to know a given model's capabilities
+        # at this layer, so requesting thinking unconditionally would be
+        # a real regression for every non-thinking Ollama model. But a
+        # real hybrid-thinking model (confirmed live: `qwen3:0.6b`)
+        # emits a real, populated `message.thinking` field on every
+        # streamed chunk BY DEFAULT, with no `think` request field sent
+        # at all -- and this adapter never read it, silently discarding
+        # the model's entire real reasoning trace, never surfaced as a
+        # ThinkingDeltaEvent and never persisted in the transcript's
+        # ThinkingBlock, unlike the identical feature already working
+        # correctly for AnthropicProvider. This is a total, silent loss
+        # of real data the server sends unprompted, not a hypothetical
+        # or request-config-dependent gap -- confirmed live streaming a
+        # real "what is 2+2?" turn through the real qwen3:0.6b model.
+        thinking_acc = ""
         content: list[object] = []
         call_index = 0
         done_reason: StopReason = StopReason.END_TURN
@@ -293,6 +326,9 @@ class OllamaProvider:
                         )
                         return
                     msg = chunk.get("message", {})
+                    if msg.get("thinking"):
+                        thinking_acc += msg["thinking"]
+                        yield ThinkingDeltaEvent(text=msg["thinking"])
                     if msg.get("content"):
                         text_acc += msg["content"]
                         yield TextDeltaEvent(text=msg["content"])
@@ -349,6 +385,16 @@ class OllamaProvider:
         except httpx.TimeoutException as e:
             yield StreamErrorEvent(code="network", detail=str(e), retryable=True)
             return
+
+        # Inserted at the front, unconditionally before every other
+        # block: confirmed live against a real streaming Ollama response
+        # that `thinking` deltas always precede `content`/`tool_calls`
+        # deltas for the whole turn (the model reasons, then answers),
+        # so there's exactly one thinking span per turn, always first --
+        # unlike `text_acc`/tool calls below, which can genuinely
+        # interleave and need their own chronological-order tracking.
+        if thinking_acc:
+            content.insert(0, ThinkingBlock(text=thinking_acc))
 
         # Appended, not inserted at the front -- any trailing text (the
         # ordinary case: a plain END_TURN reply, or reasoning text after

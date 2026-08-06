@@ -25,6 +25,7 @@ from sarva.providers.base import (
     StopReason,
     StreamErrorEvent,
     TextDeltaEvent,
+    ThinkingDeltaEvent,
 )
 from sarva.providers.ollama_provider import OllamaProvider, _strip_local_prefix, _to_ollama_message
 
@@ -475,3 +476,40 @@ async def test_generate_translates_max_tokens_to_the_real_options_num_predict_fi
     [e async for e in provider.generate(request)]
 
     assert captured["payload"]["options"]["num_predict"] == 16
+
+
+@pytest.mark.asyncio
+async def test_generate_surfaces_real_thinking_deltas_and_a_thinking_block():
+    # A real bug found by a much later fresh-eyes sweep, the same "this
+    # adapter never translates a real GenerateConfig-adjacent field"
+    # shape already found and fixed twice on this file (stop_sequences,
+    # max_tokens) -- but this one is inbound, not outbound: a real
+    # hybrid-thinking model (confirmed live against a real running
+    # Ollama server: qwen3:0.6b) emits a real, populated
+    # `message.thinking` field on every streamed chunk BY DEFAULT, with
+    # no `think` request field sent at all -- and this adapter never
+    # read it, silently discarding the model's entire real reasoning
+    # trace, never surfaced as a ThinkingDeltaEvent and never persisted
+    # in the transcript's ThinkingBlock, unlike the identical feature
+    # already working correctly for AnthropicProvider. Deliberately NOT
+    # paired with an outbound `think` request field: confirmed live that
+    # sending `think: true` to a model that doesn't support it produces
+    # a real HTTP 400, the identical risk OpenAI's/Google's own adapters
+    # already cite for leaving `effort` unmapped -- this adapter has no
+    # way to know a given model's capabilities at this layer.
+    from sarva.multimodal.content import ThinkingBlock
+
+    body = (
+        b'{"message": {"role": "assistant", "content": "", "thinking": "Let me"}, "done": false}\n'
+        b'{"message": {"role": "assistant", "content": "", "thinking": " think."}, "done": false}\n'
+        b'{"message": {"role": "assistant", "content": "4"}, "done": true, "done_reason": "stop"}\n'
+    )
+    events = [e async for e in _provider(body).generate(_req())]
+
+    thinking_deltas = [e.text for e in events if isinstance(e, ThinkingDeltaEvent)]
+    assert thinking_deltas == ["Let me", " think."]
+
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+    thinking_blocks = [b for b in done.message.content if isinstance(b, ThinkingBlock)]
+    assert len(thinking_blocks) == 1
+    assert thinking_blocks[0].text == "Let me think."
