@@ -590,6 +590,34 @@ modes now get the identical clean treatment: a real
 tests are real: reverted the fix and watched both fail with the raw
 `binascii.Error` before re-applying.
 
+**Sending exactly one of `image_base64`/`image_media_type` silently
+dropped the whole attachment on both endpoints, with no error at
+all.** A much later fresh-eyes sweep found `_extra_content_blocks`'s
+own `if image_base64 and image_media_type:` treated "exactly one of
+the two set" identically to "neither set" — the caller got an
+ordinary, clean-looking text-only response, with nothing anywhere
+signaling an attachment was ever received and ignored. The two fields
+are genuinely independent optional values on both `ChatRequest` and
+the TypeScript SDK's own mirror of it (`sdks/typescript/src/types.ts`)
+— nothing in either type system forces a caller to set them together,
+so a client that reads a file's bytes but forgets to also wire through
+its detected MIME type (an ordinary integration mistake, not an
+adversarial one) hits this on an entirely normal attach-image attempt.
+Confirmed live: `_extra_content_blocks(image_base64="...",
+image_media_type=None)` returned `[]` instead of raising — the same
+"silently drop content the caller believes is present" shape this
+project's own CLI `_load_image` already guards against (it raises
+`BadParameter` when a media type can't be determined), just never
+applied to this shared server-side helper. Fixed by raising the
+identical `ValueError` the malformed-base64 case above already
+produces whenever exactly one of the two fields is set — both call
+sites already catch it via the exact same handling this section
+documents, so the fix needed no new plumbing, only the one missing
+check. Verified by reverting and watching both new tests fail with the
+literal old bug's own shape: `state="done"` (a silently text-only
+success) where `state="failed"` was expected. 2 new tests, 873 → 875
+Python tests.
+
 **Three more ways to crash `/ws/chat` before it even reached the code
 that validates `session`/`image_base64`, found by a fresh sweep of the
 raw-JSON parsing `/ws/chat` alone does.** `/chat` never sees these,

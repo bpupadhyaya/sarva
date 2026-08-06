@@ -119,9 +119,32 @@ def _extra_content_blocks(
 ) -> list[ContentBlock]:
     """Shared by /chat (a validated ChatRequest) and /ws/chat (a raw JSON
     frame with no schema of its own) so the two request paths can't drift
-    apart on what "an attached image" means."""
+    apart on what "an attached image" means.
+
+    A real bug found by a fresh-eyes sweep: `if image_base64 and
+    image_media_type:` silently treated "exactly one of the two set" the
+    same as "neither set" -- the image was dropped with zero signal to
+    the caller, who got an ordinary text-only response with no error and
+    no indication an attachment was ever ignored. `image_base64`/
+    `image_media_type` are genuinely independent optional fields on both
+    `ChatRequest` and the TypeScript SDK's own mirror of it (`sdks/
+    typescript/src/types.ts`) -- nothing in either type system forces a
+    caller to set them together, so a client sending one without
+    remembering the other (e.g. reading a file's bytes but never wiring
+    through its detected MIME type) is an ordinary integration mistake,
+    not an adversarial one. Confirmed live: `_extra_content_blocks(
+    image_base64="...", image_media_type=None)` returned `[]` instead of
+    raising, the same "silently drop content the caller believes is
+    present" shape this project's own CLI `_load_image` already guards
+    against (raises `BadParameter` if a media type can't be determined),
+    just never applied to this shared server-side helper. Both call
+    sites already catch `ValueError` from this exact function for the
+    malformed-base64 case, so raising here reuses existing, already-
+    tested clean-failure plumbing rather than needing any new handling."""
     if image_base64 and image_media_type:
         return [ImageBlock(media_type=image_media_type, data=base64.b64decode(image_base64))]
+    if image_base64 or image_media_type:
+        raise ValueError("image_base64 and image_media_type must both be set together, or neither")
     return []
 
 

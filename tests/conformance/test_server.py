@@ -605,6 +605,32 @@ def test_chat_with_malformed_image_base64_fails_cleanly_not_a_500(monkeypatch):
     assert body["message"] is None
 
 
+def test_chat_with_image_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: `_extra_content_blocks`'s
+    # `if image_base64 and image_media_type:` silently treated "exactly
+    # one of the two set" the same as "neither set" -- the image was
+    # dropped with zero signal, an ordinary text-only response with no
+    # error. Confirmed live before this fix: this exact request returned
+    # state=done with the mock provider's plain text echo, no trace the
+    # image was ever received. A client forgetting to also set
+    # image_media_type (an ordinary integration mistake -- both fields
+    # are genuinely independent on the wire, including in the TypeScript
+    # SDK's own mirror of this type) now gets a clean failed response
+    # instead of a silently ignored attachment.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={"message": "hi", "image_base64": "aGVsbG8="},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert "image_base64" in body["detail"]
+    assert "image_media_type" in body["detail"]
+
+
 def test_chat_with_a_corrupted_config_file_fails_cleanly_not_a_500_traceback(monkeypatch):
     # A real bug found by actually corrupting ~/.sarva/config.json and
     # POSTing to /chat: build_router()/build_providers() both raise
@@ -966,6 +992,28 @@ def test_websocket_with_malformed_image_base64_fails_cleanly_not_a_bare_disconne
                 "image_media_type": "image/png",
             }
         )
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_image_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(
+    monkeypatch,
+):
+    # The WS counterpart to the same real bug just fixed for /chat: a
+    # frame with image_base64 but no image_media_type used to silently
+    # drop the attachment (_extra_content_blocks's `if image_base64 and
+    # image_media_type:`) and complete as an ordinary text-only turn,
+    # with no signal to the caller anything was ignored.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "image_base64": "aGVsbG8="})
         events = []
         while True:
             data = ws.receive_json()

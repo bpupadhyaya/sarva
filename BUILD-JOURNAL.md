@@ -20296,3 +20296,72 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `_extra_content_blocks` silently dropped an attached image if only one of `image_base64`/`image_media_type` was set — no error on either `/chat` or `/ws/chat`
+
+Round 174. With the Agent tool's per-session subagent spawn limit
+still exhausted, this round's sweep was again done directly with
+Grep/Read/Bash rather than a dispatched agent. Investigation started
+from `core/sarva/server/app.py`'s routes (not recently swept), passed
+through `mcp_client.py` and the desktop app's Rust code (both already
+heavily audited, no new gap found), and landed on `_extra_content_blocks`
+-- the shared helper `/chat` and `/ws/chat` both funnel image
+attachments through.
+
+`if image_base64 and image_media_type:` treated "exactly one of the two
+set" identically to "neither set" -- a completely ordinary client
+mistake (reading a file's bytes but forgetting to also wire through its
+detected MIME type) silently dropped the whole attachment, with the
+turn completing as an ordinary, clean-looking text-only response and
+nothing anywhere signaling an attachment was ever received and ignored.
+`image_base64`/`image_media_type` are genuinely independent optional
+fields on both `ChatRequest` and the TypeScript SDK's own mirror of it
+(`sdks/typescript/src/types.ts`) -- nothing in either type system forces
+a caller to set them together.
+
+**Confirmed live**: `_extra_content_blocks(image_base64="...",
+image_media_type=None)` returned `[]` instead of raising -- the same
+"silently drop content the caller believes is present" shape this
+project's own CLI `_load_image` already guards against (raises
+`BadParameter` when a media type can't be determined), just never
+applied to this shared server-side helper. A real `POST /chat` and a
+real `/ws/chat` frame with only `image_base64` set both completed with
+`state="done"` and the mock provider's plain text echo, no trace the
+image was ever received.
+
+**Fixed** by raising the identical `ValueError` the existing
+malformed-base64 case already produces whenever exactly one of the two
+fields is set. Both `/chat` and `/ws/chat` already catch `ValueError`
+from this exact function (for the malformed-base64 case, fixed in an
+earlier round), so the fix needed no new plumbing -- only the one
+missing check, reusing existing, already-tested clean-failure
+handling on both endpoints.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: `state="done"` (a silently text-only
+success) where `state="failed"` was expected.
+
+**2 new tests, 873 -> 875 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+subsection directly after the malformed-base64 fix it directly follows
+up on, in the same `/chat`/`/ws/chat` image-attachment per-bug
+narrative.
+
+**One hundred twenty-nine of the last one hundred thirty rounds
+(46-67, 70-174) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** With the Agent tool's subagent budget
+exhausted for this session, sweeps 173 and 174 were both completed
+directly rather than via a dispatched background agent -- same
+workflow discipline (independent live verification, revert-and-verify,
+docs, journal, commit, push, CI watch), just without background
+delegation. The already-known `bpe.py`/`provenance.py` leads remain
+confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
