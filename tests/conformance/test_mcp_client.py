@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import shutil
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
+import sarva.mcp_client as mcp_client_module
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import ToolContext
 from sarva.mcp_client import connect_stdio_mcp_server, list_mcp_tools
@@ -36,6 +38,38 @@ async def test_list_tools_reflects_the_real_server():
     assert names == {"echo", "structured_only", "fail", "env_var"}
     echo = next(t for t in tools if t.spec.name == "echo")
     assert echo.spec.input_schema["properties"]["text"]["type"] == "string"
+
+
+@pytest.mark.asyncio
+async def test_connect_stdio_mcp_server_times_out_instead_of_hanging_forever(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: ClientSession's own
+    # read_timeout_seconds constructor parameter defaults to None --
+    # unbounded -- and connect_stdio_mcp_server never set it. A real
+    # subprocess that spawns successfully (so no FileNotFoundError) but
+    # never speaks MCP at all -- a slow-starting or misbehaving server,
+    # not an adversarial one -- used to hang session.initialize()
+    # forever with no recovery. Confirmed live before this fix with a
+    # bare ClientSession over a stream that never delivers a response.
+    # A real subprocess that just sleeps, never speaking MCP, stands in
+    # for that same unresponsive-server shape through the real public
+    # connect_stdio_mcp_server entry point.
+    monkeypatch.setattr(mcp_client_module, "_MCP_READ_TIMEOUT", timedelta(seconds=0.5))
+    # The decisive property: this must raise (and quickly -- pytest-
+    # timeout-free, so a regression here would hang the whole test
+    # suite, not just fail one test) rather than hang forever. cli.py's
+    # own real call site already unwraps a single-exception
+    # ExceptionGroup to surface the real McpError's clear "Timed out
+    # while waiting..." message -- checked here directly against
+    # whichever shape the SDK raises, exception group or not.
+    with pytest.raises((Exception, BaseExceptionGroup)) as exc_info:
+        async with connect_stdio_mcp_server(
+            sys.executable, args=["-c", "import time; time.sleep(60)"]
+        ):
+            pass
+    raised = exc_info.value
+    while isinstance(raised, BaseExceptionGroup) and len(raised.exceptions) == 1:
+        raised = raised.exceptions[0]
+    assert "time" in str(raised).lower()
 
 
 @pytest.mark.asyncio

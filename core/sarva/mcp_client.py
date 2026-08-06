@@ -25,6 +25,7 @@ import base64
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import mcp.types as mcp_types
 from mcp import ClientSession, StdioServerParameters
@@ -34,6 +35,32 @@ from mcp.client.streamable_http import create_mcp_http_client, streamable_http_c
 from sarva.agent.tools import ToolContext
 from sarva.multimodal.content import ImageBlock, TextBlock, ToolResultBlock
 from sarva.providers.base import ToolSpec
+
+# A real bug found by a fresh-eyes sweep: `ClientSession`'s own
+# `read_timeout_seconds` constructor parameter defaults to `None` --
+# unbounded -- and neither connection helper below ever set it.
+# Confirmed live: constructing a real `ClientSession` over a stream
+# that never delivers a response and calling `session.initialize()`
+# hung indefinitely, still blocked after a 2-second `asyncio.wait_for`
+# deadline. This isn't just the initial handshake either --
+# `read_timeout_seconds` bounds EVERY request the session ever makes
+# (`initialize()`, `list_tools()`, `call_tool()` alike), so a
+# connected-but-then-unresponsive server (one that spawns/connects
+# successfully, so no FileNotFoundError/httpx.ConnectError to catch,
+# but hangs mid-handshake, or stops responding partway through a
+# session -- a slow-starting npx-launched process still downloading
+# its own package on first run, or a server that crashes into a
+# zombie state without actually exiting, both ordinary real-world
+# failure modes, not adversarial ones) would hang the entire `sarva
+# run`/`/ws/chat` turn forever, with no recovery short of killing the
+# process -- the same "blocking call with no timeout" bug class
+# already fixed for the human-confirmation read (`_CONFIRM_TIMEOUT_
+# SECONDS`) and the generic per-tool-call backstop
+# (`_TOOL_TIMEOUT_SECONDS`) elsewhere in this project, just never
+# applied to the one place a hang can happen BEFORE those two
+# mechanisms are even wired up (MCP connection/tool-discovery happens
+# during `sarva run`'s own setup, ahead of `AgentLoop` starting).
+_MCP_READ_TIMEOUT = timedelta(seconds=30)
 
 
 class McpToolAdapter:
@@ -135,7 +162,7 @@ async def connect_stdio_mcp_server(
     down within this context manager's lifetime."""
     params = StdioServerParameters(command=command, args=args or [], env=env)
     async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(read, write, read_timeout_seconds=_MCP_READ_TIMEOUT) as session:
             await session.initialize()
             yield session
 
@@ -167,6 +194,8 @@ async def connect_http_mcp_server(
             write,
             _get_session_id,
         ):
-            async with ClientSession(read, write) as session:
+            async with ClientSession(
+                read, write, read_timeout_seconds=_MCP_READ_TIMEOUT
+            ) as session:
                 await session.initialize()
                 yield session

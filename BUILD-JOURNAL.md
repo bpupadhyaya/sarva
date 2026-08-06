@@ -20714,3 +20714,78 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## Neither MCP connection helper ever bounded a hung server — no timeout at all, not even a generous one
+
+Round 180. Continuing the direct-tool-use sweep (Agent tool subagent
+budget still exhausted), this round moved away from the training/
+inference cluster rounds 176-179 found and checked `core/sarva/
+mcp_client.py` -- an area not recently swept. `ClientSession`'s own
+`read_timeout_seconds` constructor parameter defaults to `None` --
+unbounded -- and neither `connect_stdio_mcp_server` nor `connect_http_
+mcp_server` ever set it.
+
+**Confirmed live**: constructing a real `ClientSession` over a stream
+that never delivers a response and calling `session.initialize()` hung
+indefinitely, still blocked after a 2-second `asyncio.wait_for`
+deadline placed purely to observe the hang. This isn't just the
+initial handshake either -- `read_timeout_seconds` bounds *every*
+request the session ever makes (`initialize()`, `list_tools()`,
+`call_tool()` alike), so a connected-but-then-unresponsive server (one
+that spawns/connects successfully, so no `FileNotFoundError`/`httpx.
+ConnectError` for the existing broad `except Exception` at the CLI's
+own call site to catch, but hangs mid-handshake, or stops responding
+partway through a session -- a slow-starting `npx`-launched process
+still downloading its own package on first run, or a server that
+crashes into a zombie state without actually exiting, both ordinary
+real-world failure modes, not adversarial ones) would hang the entire
+`sarva run`/`/ws/chat` turn forever, with no recovery short of killing
+the process. The same "blocking call with no timeout" bug class
+already fixed for the human-confirmation read (`_CONFIRM_TIMEOUT_
+SECONDS`) and the generic per-tool-call backstop (`_TOOL_TIMEOUT_
+SECONDS`) elsewhere in this project, just never applied to the one
+place a hang can happen *before* either of those two mechanisms is
+even wired up -- MCP connection and tool-discovery both happen during
+`sarva run`'s own setup, ahead of `AgentLoop` starting.
+
+**Fixed** with a module-level `_MCP_READ_TIMEOUT = timedelta(seconds=
+30)` passed to every `ClientSession(...)` construction in both
+connection helpers -- generous enough for a genuinely slow first-run
+`npx` install, bounded enough that a hung server no longer holds the
+whole run hostage. The SDK's own timeout raises a clean, descriptive
+`McpError` rather than a bare exception, and the CLI's existing
+single-exception `ExceptionGroup` unwrapping (already added for
+`connect_http_mcp_server`'s real network failures) already surfaces it
+cleanly with no further changes needed there.
+
+**Verified by reverting** and confirming the new test can't even
+exercise the fixed code path without it -- an `AttributeError` for the
+now-missing `_MCP_READ_TIMEOUT` constant, the safest possible revert
+check for a fix whose whole point is "this used to hang forever"
+(avoiding an actual 60-second wait during revert-and-verify).
+
+**1 new test, 882 -> 883 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/mcp.md` gained a new subsection
+directly after the existing `structuredContent` fix, in the same MCP
+client per-bug narrative.
+
+**One hundred thirty-five of the last one hundred thirty-six rounds
+(46-67, 70-180) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** Stepping outside the training-module
+cluster (rounds 176-179) to a completely different subsystem found a
+real bug on the first genuinely fresh area checked -- a useful
+reminder that after a productive streak in one file family, deliberately
+moving to unrelated, longer-untouched code (this file's own docstring
+notes "hasn't had" recent attention) is often more productive than
+continuing to mine the same family for diminishing returns. The
+already-known `bpe.py`/`provenance.py` leads remain confirmed
+unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

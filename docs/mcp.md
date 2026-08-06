@@ -267,6 +267,50 @@ the new test fail with the literal old bug's own shape: `result.
 content` completely empty, no trace of the answer anywhere. 1 new
 test, 768 → 769 Python tests.
 
+### A much later fresh-eyes sweep found neither connection helper ever bounded a hung server — no timeout at all, not even a generous one
+
+`ClientSession`'s own `read_timeout_seconds` constructor parameter
+defaults to `None` — unbounded — and neither `connect_stdio_mcp_server`
+nor `connect_http_mcp_server` ever set it. Confirmed live: constructing
+a real `ClientSession` over a stream that never delivers a response and
+calling `session.initialize()` hung indefinitely, still blocked after a
+2-second `asyncio.wait_for` deadline placed around it purely to observe
+the hang rather than reproduce it forever. This isn't just the initial
+handshake either — `read_timeout_seconds` bounds *every* request the
+session ever makes (`initialize()`, `list_tools()`, `call_tool()`
+alike), so a connected-but-then-unresponsive server — one that
+spawns/connects successfully, so no `FileNotFoundError`/`httpx.
+ConnectError` for the existing broad `except Exception` at the CLI's
+own call site to catch, but hangs mid-handshake, or stops responding
+partway through a session (a slow-starting `npx`-launched process still
+downloading its own package on first run, or a server that crashes into
+a zombie state without actually exiting — ordinary real-world failure
+modes, not adversarial ones) — would hang the entire `sarva run`/`/ws/
+chat` turn forever, with no recovery short of killing the process. The
+same "blocking call with no timeout" bug class already fixed for the
+human-confirmation read (`_CONFIRM_TIMEOUT_SECONDS` in `server/app.py`)
+and the generic per-tool-call backstop (`_TOOL_TIMEOUT_SECONDS` in
+`agent/loop.py`) elsewhere in this project, just never applied to the
+one place a hang can happen *before* either of those two mechanisms is
+even wired up — MCP connection and tool-discovery both happen during
+`sarva run`'s own setup, ahead of `AgentLoop` starting.
+
+Fixed with a module-level `_MCP_READ_TIMEOUT = timedelta(seconds=30)`
+passed to every `ClientSession(...)` construction in both connection
+helpers — generous enough for a genuinely slow first-run `npx` install,
+bounded enough that a hung server no longer holds the whole run
+hostage. The SDK's own timeout raises a clean, descriptive `McpError`
+("Timed out while waiting for response to ClientRequest. Waited 30.0
+seconds.") rather than a bare, message-less exception, and the CLI's
+own existing single-exception `ExceptionGroup` unwrapping (added for
+`connect_http_mcp_server`'s real network failures) already surfaces it
+to the user cleanly, with no further changes needed there. Verified by
+reverting and confirming the new test can't even exercise the fixed
+code path without it — an `AttributeError` for the now-missing
+`_MCP_READ_TIMEOUT` constant — the safest possible revert check for a
+fix whose whole point is "this used to hang forever." 1 new test,
+882 → 883 Python tests.
+
 ## Verification
 
 `tests/conformance/test_mcp_client.py` runs against a real MCP server
