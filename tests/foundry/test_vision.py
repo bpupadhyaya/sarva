@@ -138,6 +138,24 @@ def test_vision_encoder_config_rejects_non_positive_n_channels():
         _tiny_vision_config(n_channels=-3)
 
 
+def test_vision_encoder_config_rejects_non_finite_or_non_positive_norm_eps():
+    # A real bug found by a much later fresh-eyes sweep, the identical
+    # gap already fixed for RopeScalingConfig.factor in layers.py and
+    # for TransformerConfig.norm_eps one file over, just never
+    # propagated to this sibling class's own copy of the same field:
+    # norm_eps flows unchecked into every RMSNorm(config.dim,
+    # eps=config.norm_eps) call. A plain `norm_eps <= 0` check would
+    # still let NaN through silently (`nan <= 0` is False in Python).
+    import pytest
+
+    with pytest.raises(ValueError, match="norm_eps"):
+        _tiny_vision_config(norm_eps=float("nan"))
+    with pytest.raises(ValueError, match="norm_eps"):
+        _tiny_vision_config(norm_eps=0)
+    with pytest.raises(ValueError, match="norm_eps"):
+        _tiny_vision_config(norm_eps=-1.0)
+
+
 def test_n_patches_matches_the_grid():
     config = _tiny_vision_config(image_size=32, patch_size=8)
     assert config.patches_per_side == 4

@@ -235,6 +235,25 @@ def test_transformer_config_rejects_non_positive_vocab_size():
         _tiny_config(vocab_size=-5)
 
 
+def test_transformer_config_rejects_non_finite_or_non_positive_norm_eps():
+    # A real bug found by a much later fresh-eyes sweep, the identical
+    # gap already fixed for RopeScalingConfig.factor in layers.py, just
+    # never propagated to this sibling field: norm_eps flows unchecked
+    # into every RMSNorm(config.dim, eps=config.norm_eps) call. A plain
+    # `norm_eps <= 0` check would still let NaN through silently (`nan
+    # <= 0` is False in Python). norm_eps=nan used to construct with no
+    # error, then produce 100% NaN logits from a real forward pass with
+    # no exception anywhere.
+    import pytest
+
+    with pytest.raises(ValueError):
+        _tiny_config(norm_eps=float("nan"))
+    with pytest.raises(ValueError):
+        _tiny_config(norm_eps=0)
+    with pytest.raises(ValueError):
+        _tiny_config(norm_eps=-1.0)
+
+
 def test_forward_raises_a_clear_error_past_max_seq_len():
     # Found by running examples/03_train_toy_transformer.py's generation
     # loop, which grows the sequence one token at a time past

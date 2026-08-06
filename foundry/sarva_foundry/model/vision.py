@@ -35,6 +35,7 @@ deferred follow-up work.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch.nn.functional as F
@@ -144,6 +145,19 @@ class VisionEncoderConfig:
         # RuntimeError instead.
         if self.n_kv_heads <= 0:
             raise ValueError(f"n_kv_heads must be positive, got {self.n_kv_heads}")
+        # A real bug found by a much later fresh-eyes sweep, the identical
+        # gap already fixed for RopeScalingConfig.factor in layers.py and
+        # for TransformerConfig.norm_eps one file over, just never
+        # propagated to this sibling class's own copy of the same field:
+        # norm_eps flows unchecked into every RMSNorm(config.dim,
+        # eps=config.norm_eps) call, whose `torch.rsqrt(variance +
+        # self.eps)` has no finiteness/sign guard of its own. A plain
+        # `norm_eps <= 0` check would still let NaN through silently
+        # (`nan <= 0` is False in Python). `math.isfinite` rejects both
+        # NaN and +/-Inf in one check, on top of the existing
+        # non-positive rejection.
+        if not math.isfinite(self.norm_eps) or self.norm_eps <= 0:
+            raise ValueError(f"norm_eps must be a finite positive number, got {self.norm_eps}")
 
     @property
     def patches_per_side(self) -> int:

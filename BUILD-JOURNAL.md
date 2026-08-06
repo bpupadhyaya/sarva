@@ -19818,3 +19818,70 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `norm_eps` was never validated in `TransformerConfig` or `VisionEncoderConfig` — the identical fix already applied to `RopeScalingConfig.factor`, never propagated to two sibling classes
+
+Round 167. This round's sweep found that `TransformerConfig.
+__post_init__` and `VisionEncoderConfig.__post_init__` -- both already
+audited field-by-field to completeness in prior rounds (161 and 166
+respectively) -- had one field neither audit actually covered:
+`norm_eps`, a numeric tuning constant rather than one of the structural
+shape fields (`dim`/`n_heads`/`n_layers`/etc.) those sweeps enumerated.
+It flows unchecked into every `RMSNorm(config.dim, eps=config.
+norm_eps)` call in both files, whose `torch.rsqrt(variance + self.eps)`
+has no finiteness/sign guard of its own.
+
+This is the exact same bug class `RopeScalingConfig.factor` (`layers.py`)
+already had fixed in an earlier round -- a plain `factor <= 0` check
+would still let NaN through silently, since `nan <= 0` is `False` in
+Python -- just never propagated to this sibling field in two other
+classes in the same package.
+
+**Confirmed live**: `TransformerConfig(norm_eps=float("nan"), ...)`
+constructs with no error, then produces 100% NaN logits from a real
+`DecoderOnlyTransformer` forward pass with no exception anywhere;
+`norm_eps=-1e9` (a plausible sign-flip corruption, not just NaN)
+produces the identical silent 100%-NaN-logits corruption via `rsqrt` of
+a negative operand. Reachable through the same untrusted `config.json`
+path already established for every other field in both classes --
+`foundry_provider.py`'s own `_CONFIG_FIELDS` includes `norm_eps`,
+deserialized via `json.loads`, which round-trips the non-standard NaN
+literal with zero diagnostics, exactly as already documented for
+`RopeScalingConfig.factor`.
+
+**Fixed** by adding `if not math.isfinite(self.norm_eps) or
+self.norm_eps <= 0: raise ValueError(...)` to both `__post_init__`
+methods, matching `RopeScalingConfig.factor`'s own fix exactly
+(`math.isfinite` rejects both NaN and +/-Inf in one check, on top of
+the existing non-positive rejection). `math` added to both files'
+imports.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for
+`norm_eps=nan`, `norm_eps=0`, and `norm_eps=-1.0`.
+
+**2 new tests, 862 -> 864 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round,
+matching the established foundry-internals-only config-validation
+precedent (rounds 133-140/161/166).
+
+**One hundred twenty-two of the last one hundred twenty-three rounds
+(46-67, 70-167) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** Both `TransformerConfig` and
+`VisionEncoderConfig` now validate every field they declare, including
+`norm_eps` -- but this round's own finding is itself the caution:
+rounds 161 and 166 each claimed "all structural fields" complete for
+their respective class, and both were right about the fields they were
+looking at, just not comprehensive about which fields existed to look
+at. The two previously-flagged leads (`bpe.py`'s duplicate-
+`special_tokens` off-by-one, `provenance.py`'s empty-manifest
+inconsistency) remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
