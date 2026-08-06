@@ -364,6 +364,29 @@ async def test_generate_still_reports_end_turn_for_a_normal_stop():
 
 
 @pytest.mark.asyncio
+async def test_generate_reports_real_token_usage_not_a_hardcoded_zero():
+    # A real bug found by a later fresh-eyes sweep: this adapter always
+    # yielded usage=Usage() (0 input, 0 output tokens), with a comment
+    # claiming Ollama's /api/chat "doesn't return token usage" --
+    # factually wrong. The same final chunk this adapter already reads
+    # done_reason off also carries prompt_eval_count/eval_count,
+    # documented Ollama wire fields, confirmed live against a real
+    # running Ollama server. AgentLoop's own `spend.total_tokens +=
+    # done.usage.input_tokens + done.usage.output_tokens` means a
+    # hardcoded-zero Usage silently made Budget.max_total_tokens
+    # unenforceable for every Ollama-routed call.
+    body = (
+        b'{"message": {"content": "hello"}, "done": true, "done_reason": "stop", '
+        b'"prompt_eval_count": 35, "eval_count": 3}\n'
+    )
+    events = [e async for e in _provider(body).generate(_req())]
+    done = [e for e in events if isinstance(e, DoneEvent)][0]
+
+    assert done.usage.input_tokens == 35
+    assert done.usage.output_tokens == 3
+
+
+@pytest.mark.asyncio
 async def test_generate_tool_use_is_not_overridden_by_a_stop_done_reason():
     # Ollama reports done_reason="stop" even for a turn that ends in a
     # tool call (it has no distinct "made a tool call" reason of its

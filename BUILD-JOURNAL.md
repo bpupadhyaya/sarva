@@ -17938,3 +17938,63 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `OllamaProvider.generate()` hardcoded token usage to zero, on the factually wrong assumption that Ollama "doesn't return token usage"
+
+Round 138. `OllamaProvider.generate()` always yielded `usage=Usage()`
+-- 0 input tokens, 0 output tokens, no matter how many tokens were
+actually processed -- with a comment claiming Ollama's `/api/chat`
+"doesn't return token usage." That claim is simply wrong for the real,
+current API: the exact same final chunk this adapter already reads
+`done_reason` off also carries `prompt_eval_count` (input tokens) and
+`eval_count` (output tokens), documented Ollama wire fields, never
+read. Every other real provider adapter (Anthropic/OpenAI/Google/
+Foundry) computes real `Usage` from real response fields; Ollama was
+the one adapter that hardcoded zero.
+
+Not cosmetic: `AgentLoop`'s own `spend.total_tokens += done.usage.
+input_tokens + done.usage.output_tokens` means a hardcoded-zero
+`Usage` silently makes `Budget.max_total_tokens` unenforceable for
+every Ollama-routed call -- the "free & private" local-model tier this
+module's own docstring calls a first-class, verified-live supported
+path, and the one most likely to run unattended for a long session
+with no API-cost pressure prompting a user to notice. The same round
+that added `done_reason` parsing off this identical final chunk never
+revisited the standing "no usage" assumption sitting two lines below
+it.
+
+**Confirmed live two ways**: a raw `curl` to a real running Ollama
+server's `/api/chat` showed the real wire response carrying
+`prompt_eval_count: 35, eval_count: 3`; calling the actual
+`OllamaProvider` class against that same server for the identical
+exchange reported `input_tokens=0, output_tokens=0` instead of the
+real 35/3.
+
+**Fixed** by capturing `prompt_eval_count`/`eval_count` off the same
+final chunk `done_reason` is already read from, and building a real
+`Usage` from them -- `cost_usd` stays `0.0`, since local inference
+genuinely is free, unlike the token counts.
+
+**Verified live**: the same real-server exchange now reports the real
+35/3 token counts instead of 0/0.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `0 == 35`.
+
+**1 new test, 826 -> 827 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the `done_reason` chapter, in this adapter's
+own ongoing per-bug narrative.
+
+**Ninety-three of the last ninety-four rounds (46-67, 70-138) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -204,6 +204,25 @@ class OllamaProvider:
         # default -- there's no verified evidence an unlisted value
         # ever means anything other than a normal completion.
         raw_done_reason: str | None = None
+        # A real bug found by a later fresh-eyes sweep: the comment right
+        # below this one previously claimed Ollama's /api/chat "doesn't
+        # return token usage" -- factually wrong for the real, current
+        # API. The same final chunk this adapter already reads
+        # `done_reason` off (see the comment above) also carries
+        # `prompt_eval_count` (input tokens) and `eval_count` (output
+        # tokens), documented Ollama wire fields, confirmed live against
+        # a real running Ollama server. Every other real provider adapter
+        # computes real Usage from real response fields; this was the
+        # one that hardcoded zero. AgentLoop's own `spend.total_tokens +=
+        # done.usage.input_tokens + done.usage.output_tokens` means a
+        # hardcoded-zero Usage silently makes Budget.max_total_tokens
+        # unenforceable for every Ollama-routed call -- the "free &
+        # private" local-model tier this file's own docstring calls a
+        # first-class, verified-live supported path, and the one most
+        # likely to run unattended for a long session with no API-cost
+        # pressure prompting a user to notice.
+        prompt_eval_count = 0
+        eval_count = 0
 
         try:
             async with self._client.stream(
@@ -286,6 +305,8 @@ class OllamaProvider:
                         done_reason = StopReason.TOOL_USE
                     if chunk.get("done"):
                         raw_done_reason = chunk.get("done_reason")
+                        prompt_eval_count = chunk.get("prompt_eval_count") or 0
+                        eval_count = chunk.get("eval_count") or 0
                         break
         except httpx.ConnectError as e:
             yield StreamErrorEvent(
@@ -318,7 +339,10 @@ class OllamaProvider:
         yield DoneEvent(
             stop_reason=done_reason,
             message=Message(role="assistant", content=content),
-            usage=Usage(),  # local inference — no token accounting from Ollama's chat API
+            # cost_usd stays 0.0 -- local inference is genuinely free,
+            # unlike input_tokens/output_tokens which Ollama's final
+            # chunk does report (see the comment above `raw_done_reason`).
+            usage=Usage(input_tokens=prompt_eval_count, output_tokens=eval_count),
         )
 
     async def close(self) -> None:

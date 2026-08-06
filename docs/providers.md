@@ -842,6 +842,43 @@ did before. Verified by reverting and watching the new test fail with
 the literal old bug's own shape: `END_TURN` instead of `MAX_TOKENS`.
 3 new tests, 811 → 814 Python tests.
 
+### The same adapter's `Usage` was hardcoded to zero, on the factually wrong assumption that Ollama "doesn't return token usage"
+
+A much later fresh-eyes sweep found that `OllamaProvider.generate()`
+always yielded `usage=Usage()` — 0 input tokens, 0 output tokens, no
+matter how many tokens were actually processed — with a comment
+claiming Ollama's `/api/chat` "doesn't return token usage." That claim
+is simply wrong for the real, current API: the exact same final chunk
+this adapter already reads `done_reason` off (the chapter directly
+above) also carries `prompt_eval_count` (input tokens) and `eval_count`
+(output tokens), documented Ollama wire fields — confirmed live against
+a real running Ollama server and a real local model, both via a raw
+`curl` to `/api/chat` and via the actual `OllamaProvider` class. Every
+other real provider adapter (Anthropic/OpenAI/Google/Foundry) computes
+real `Usage` from real response fields; Ollama was the one adapter that
+hardcoded zero.
+
+Not a cosmetic gap: `AgentLoop`'s own `spend.total_tokens += done.
+usage.input_tokens + done.usage.output_tokens` means a hardcoded-zero
+`Usage` silently makes `Budget.max_total_tokens` unenforceable for
+every Ollama-routed call — the "free & private" local-model tier this
+module's own docstring calls a first-class, verified-live supported
+path, and the one most likely to run unattended for a long session,
+since there's no API-cost pressure prompting a user to notice. Notably,
+the same round that added `done_reason` parsing off this identical
+final chunk never revisited the standing "no usage" assumption sitting
+two lines below it.
+
+Fixed by capturing `prompt_eval_count`/`eval_count` off the same final
+chunk `done_reason` is already read from, and building a real `Usage`
+from them — `cost_usd` stays `0.0`, since local inference genuinely is
+free, unlike the token counts. Verified live: a real request against a
+running Ollama server that previously reported `input_tokens=0,
+output_tokens=0` for a real 35-input/3-output-token exchange now
+reports the real counts. Verified by reverting and watching the new
+test fail with the literal old bug's own shape: `0 == 35`. 1 new test,
+826 → 827 Python tests.
+
 ### `redacted_thinking` blocks were silently dropped, breaking multi-turn tool use once thinking flagged its own reasoning
 
 The signed-`thinking`-block round trip above was already hardened, with
