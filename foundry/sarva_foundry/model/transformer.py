@@ -143,6 +143,30 @@ class TransformerConfig:
         # exactly.
         if not math.isfinite(self.norm_eps) or self.norm_eps <= 0:
             raise ValueError(f"norm_eps must be a finite positive number, got {self.norm_eps}")
+        # A real bug found by a much later fresh-eyes sweep, the sixth
+        # sibling field in this exact __post_init__ to get this
+        # treatment: max_seq_len feeds straight into GroupedQueryAttention,
+        # which precomputes its RoPE cos/sin tables via `torch.arange(
+        # max_seq_len)` -- but was never validated for being positive.
+        # max_seq_len=0 doesn't crash construction (torch.arange(0) is
+        # just an empty tensor, and precompute_rope's own blanket
+        # finiteness check is vacuously true over zero elements), and is
+        # already caught cleanly and actionably later, at actual forward()
+        # time ("sequence length N exceeds max_seq_len 0 the RoPE tables
+        # were precomputed for") -- genuinely fine, matching this
+        # project's own "a clean error, even if deferred to actual use,
+        # is acceptable" discipline. A NEGATIVE max_seq_len is not fine:
+        # `torch.arange(negative)` raises a raw, implementation-leaking
+        # RuntimeError ("upper bound and lower bound inconsistent with
+        # step sign") immediately during model CONSTRUCTION, before a
+        # single token is ever processed -- confirmed live. The identical
+        # "confusing raw RuntimeError instead of a clean ValueError at
+        # construction time" shape already closed for every one of this
+        # class's five other sibling fields (vocab_size/dim/n_heads/
+        # n_layers/n_kv_heads), reachable through the identical untrusted
+        # config.json path all of them are.
+        if self.max_seq_len <= 0:
+            raise ValueError(f"max_seq_len must be positive, got {self.max_seq_len}")
 
     @property
     def head_dim(self) -> int:

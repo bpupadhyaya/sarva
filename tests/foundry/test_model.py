@@ -254,6 +254,24 @@ def test_transformer_config_rejects_non_finite_or_non_positive_norm_eps():
         _tiny_config(norm_eps=-1.0)
 
 
+def test_transformer_config_rejects_a_negative_max_seq_len():
+    # A real bug found by a much later fresh-eyes sweep, the sixth
+    # sibling field in this exact __post_init__ to get this treatment:
+    # max_seq_len was never validated. A negative value used to crash
+    # DecoderOnlyTransformer's own construction with a raw, confusing
+    # RuntimeError ("upper bound and lower bound inconsistent with step
+    # sign") from torch.arange(negative) deep inside RoPE table
+    # precomputation, instead of a clean ValueError naming the real
+    # problem. (max_seq_len=0 is deliberately NOT rejected here -- it's
+    # already caught cleanly and actionably later, at actual forward()
+    # time, matching this project's own "a clean error, even if deferred
+    # to actual use, is acceptable" discipline.)
+    import pytest
+
+    with pytest.raises(ValueError, match="max_seq_len"):
+        _tiny_config(max_seq_len=-5)
+
+
 def test_forward_raises_a_clear_error_past_max_seq_len():
     # Found by running examples/03_train_toy_transformer.py's generation
     # loop, which grows the sequence one token at a time past

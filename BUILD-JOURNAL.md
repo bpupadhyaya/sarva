@@ -20365,3 +20365,81 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `TransformerConfig.max_seq_len` was never validated — a negative value crashed model construction with a raw PyTorch `RuntimeError`, the sixth sibling field in this exact class to get this treatment
+
+Round 175. With the Agent tool's per-session subagent spawn limit still
+exhausted, this round's sweep was again done directly. Starting from
+the established "any function with 2+ prior sibling-parameter fixes
+likely has one more" lens, and having confirmed `TransformerConfig`'s
+`vocab_size`/`dim`/`n_heads`/`n_layers`/`n_kv_heads`/`norm_eps` were
+already all validated (rounds 133-167), the remaining unvalidated
+fields (`max_seq_len`, `rope_theta`, `hidden_dim`) were checked one by
+one. `rope_theta` turned out safe: `precompute_rope`'s own blanket
+`torch.isfinite(cos).all() and torch.isfinite(sin).all()` check already
+catches any theta value (zero, negative, NaN) that would produce
+non-finite RoPE tables, raising a clean `ValueError` -- confirmed live
+for all three. `max_seq_len` was not safe.
+
+`max_seq_len` feeds straight into `GroupedQueryAttention`, which
+precomputes its RoPE cos/sin tables via `torch.arange(max_seq_len)`.
+`max_seq_len=0` doesn't crash construction (`torch.arange(0)` is just
+an empty tensor, and the isfinite check above is vacuously true over
+zero elements) -- and is already caught cleanly and actionably later,
+at actual `forward()` time ("sequence length N exceeds max_seq_len 0
+the RoPE tables were precomputed for"), matching this project's own
+"a clean error, even if deferred to actual use, is acceptable"
+discipline. A *negative* `max_seq_len` is not fine: `torch.arange(
+negative)` raises a raw, implementation-leaking `RuntimeError` ("upper
+bound and lower bound inconsistent with step sign") immediately during
+model construction, before a single token is ever processed -- the
+identical "confusing raw RuntimeError instead of a clean ValueError at
+construction time" shape already closed for every one of this class's
+five other sibling fields.
+
+**Confirmed live**: `TransformerConfig(max_seq_len=-5, ...)` constructed
+cleanly (dataclass construction alone doesn't touch RoPE), but
+`DecoderOnlyTransformer(cfg)` immediately crashed with `RuntimeError:
+upper bound and lower bound inconsistent with step sign`. `max_seq_len=0`
+was independently confirmed to already fail cleanly at forward() time
+with an actionable message, so it was deliberately left unrejected at
+construction time -- only the negative case needed the new check.
+
+**Fixed** by adding `if self.max_seq_len <= 0: raise ValueError(...)`
+to `TransformerConfig.__post_init__`, matching this class's own
+established convention. (`<= 0`, not a negative-only check, since a
+zero `max_seq_len` genuinely can never process a single real token
+either -- the deferred forward()-time error already makes that clear,
+but rejecting it at construction time too is consistent with every
+other sibling field in this same method.)
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for
+`max_seq_len=-5`.
+
+**1 new test, 875 -> 876 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching the
+established foundry-internals-only config-validation precedent.
+
+**One hundred thirty of the last one hundred thirty-one rounds
+(46-67, 70-175) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** A sixth instance of "one sibling field
+left unvalidated" in this exact class, found by methodically checking
+every remaining declared field (`max_seq_len`, `rope_theta`,
+`hidden_dim`) one by one rather than assuming the class was fully
+audited after round 167's `norm_eps` fix -- `rope_theta` genuinely
+turned out safe on inspection, a useful reminder that this lens
+finds candidates to *check*, not automatic bugs to fix. Rounds 173-175
+were all completed via direct tool use (Grep/Read/Bash/Edit) rather
+than a dispatched background agent, with identical workflow discipline
+throughout. The already-known `bpe.py`/`provenance.py` leads remain
+confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
