@@ -56,6 +56,22 @@ class VisionEncoderConfig:
     norm_eps: float = 1e-6
 
     def __post_init__(self) -> None:
+        # A real bug found by a later fresh-eyes sweep, on the very
+        # class this __post_init__ was already revisited twice for
+        # (n_layers, n_kv_heads, below): image_size/patch_size were only
+        # ever checked for divisibility against EACH OTHER, never for
+        # being positive. patch_size=0 raises the modulo check's own
+        # raw ZeroDivisionError instead of a clean ValueError; a
+        # negative patch_size that happens to divide image_size evenly
+        # (Python's `%` follows the divisor's sign, so 16 % -4 == 0)
+        # passes silently, producing a negative `patches_per_side` that
+        # only surfaces as a confusing raw RuntimeError deep inside
+        # nn.Conv2d's construction ("negative dimension") once
+        # VisionEncoder is actually built. Confirmed live both ways.
+        if self.image_size <= 0:
+            raise ValueError(f"image_size must be positive, got {self.image_size}")
+        if self.patch_size <= 0:
+            raise ValueError(f"patch_size must be positive, got {self.patch_size}")
         if self.image_size % self.patch_size != 0:
             raise ValueError(
                 f"image_size ({self.image_size}) must be divisible by "

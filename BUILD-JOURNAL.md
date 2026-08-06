@@ -17998,3 +17998,68 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `VisionEncoderConfig.image_size`/`patch_size` were only ever checked against each other, never for being positive -- on the very class already revisited twice for this exact gap
+
+Round 139. `VisionEncoderConfig.__post_init__` was already revisited
+twice (rounds 134, 135) specifically to add missing positivity checks
+to this class's `n_layers`/`n_kv_heads` fields -- but the two fields
+checked FIRST in that same `__post_init__`, `image_size` and
+`patch_size`, were only ever validated for divisibility against each
+other, never for being positive on their own.
+
+**Confirmed live, two failure shapes**:
+
+- `patch_size=0` raised a raw, implementation-leaking
+  `ZeroDivisionError: integer modulo by zero` straight out of
+  `__post_init__`'s own `image_size % patch_size` check, instead of the
+  clean `ValueError` every other field in this same `__post_init__`
+  produces.
+- `patch_size=-4` (with `image_size=16`) -- a negative value that
+  happens to divide `image_size` evenly, since Python's `%` follows the
+  divisor's sign (`16 % -4 == 0`) -- passed construction with no error
+  at all, silently producing `patches_per_side=-4` and a plausible-
+  looking positive `n_patches=16` (squared). The corruption stayed
+  invisible until `VisionEncoder(cfg)` was actually built, crashing
+  deep inside `nn.Conv2d`'s construction with a raw `RuntimeError:
+  Trying to create tensor with negative dimension`.
+
+Not contrived: `image_size`/`patch_size` are exactly the kind of
+externally-supplied architecture hyperparameters a training script or
+example computes programmatically -- the same class of "plausible-
+looking numeric config field" that motivated the identical `n_layers`/
+`n_kv_heads` fixes already shipped for this exact class.
+`tests/foundry/test_vision.py` had dedicated regression tests for
+`n_layers=0` and `n_kv_heads=0` but none for `patch_size<=0` or
+`image_size<=0`, confirming the gap was simply never noticed rather
+than deliberately left out.
+
+**Fixed** by adding `<= 0` positivity checks for both fields, ahead of
+the existing divisibility check.
+
+**Verified by reverting** and watching the new test fail with the
+literal old shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 827 -> 828 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for foundry-internals-only config-validation
+fixes in this file family.
+
+**Ninety-four of the last ninety-five rounds (46-67, 70-139) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** `VisionEncoderConfig` has now had every one of its six
+fields (`image_size`, `patch_size`, `dim`, `n_layers`, `n_heads`,
+`n_kv_heads`) individually confirmed validated across four separate
+rounds (133-135, 139) -- the prior "believed fully validated" claims
+in rounds 134/135's own journal entries turned out to be premature
+twice over, worth remembering before declaring any config class fully
+audited again.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -34,6 +34,27 @@ def test_vision_encoder_config_rejects_non_divisible_image_size():
         _tiny_vision_config(image_size=17, patch_size=4)
 
 
+def test_vision_encoder_config_rejects_non_positive_image_size_or_patch_size():
+    # A real bug found by a later fresh-eyes sweep, on the very class
+    # this __post_init__ was already revisited twice for (n_layers,
+    # n_kv_heads): image_size/patch_size were only ever checked for
+    # divisibility against each other, never for being positive.
+    # patch_size=0 used to raise a raw ZeroDivisionError instead of a
+    # clean ValueError; a negative patch_size that happens to divide
+    # image_size evenly (Python's `%` follows the divisor's sign) used
+    # to pass silently, producing a negative patches_per_side that only
+    # surfaced as a confusing raw RuntimeError deep inside nn.Conv2d
+    # once VisionEncoder was actually built.
+    import pytest
+
+    with pytest.raises(ValueError, match="image_size"):
+        _tiny_vision_config(image_size=0, patch_size=4)
+    with pytest.raises(ValueError, match="patch_size"):
+        _tiny_vision_config(image_size=16, patch_size=0)
+    with pytest.raises(ValueError, match="patch_size"):
+        _tiny_vision_config(image_size=16, patch_size=-4)  # -4 divides 16 evenly in Python
+
+
 def test_vision_encoder_config_rejects_non_positive_n_layers():
     # A real bug found by a fresh-eyes sweep: the identical shape round
     # 133 already fixed for TransformerConfig.n_layers, one sibling
