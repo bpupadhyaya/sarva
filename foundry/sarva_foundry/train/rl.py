@@ -36,6 +36,8 @@ data and rewards, do the gradient update."
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -62,9 +64,26 @@ def sample_completion(
     `prompt_ids` makes `torch.tensor(ids)` an empty tensor with no
     elements to infer a dtype from, defaulting to float32 instead of
     int64 and crashing the token embedding lookup with a raw,
-    implementation-leaking `RuntimeError` instead of a clear one."""
+    implementation-leaking `RuntimeError` instead of a clear one.
+
+    A second real bug found by a much later fresh-eyes sweep, the
+    identical gap found and fixed in `generate_with_cache` too:
+    `temperature=nan` was never rejected. `nan <= 0` is `False` in
+    Python (the same truthiness-adjacent shape already found for
+    `grad_clip`/`peak_lr`/`beta` elsewhere in this package), so a NaN
+    temperature fell through to the sampling branch instead of the
+    greedy one, and `F.softmax(next_logits / nan, ...)` produces an
+    all-NaN probability tensor that crashes `torch.multinomial` with a
+    raw, implementation-leaking `RuntimeError: probability tensor
+    contains either inf, nan or element < 0` -- confirmed live -- instead
+    of a clear error naming the real cause. `temperature=+inf` is
+    deliberately still allowed: confirmed live, it produces a valid
+    (if degenerate, uniform-random) sample with no error, a legitimate
+    extreme rather than a broken one."""
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty -- there's nothing to condition on")
+    if math.isnan(temperature):
+        raise ValueError(f"temperature must not be NaN, got {temperature}")
     model.eval()
     generated: list[int] = []
     ids = list(prompt_ids)

@@ -169,3 +169,18 @@ def test_sample_completion_raises_a_clear_error_on_an_empty_prompt():
     model = DecoderOnlyTransformer(_tiny_config())
     with pytest.raises(ValueError, match="must not be empty"):
         sample_completion(model, [], max_new_tokens=5, temperature=0.0)
+
+
+def test_generate_with_cache_rejects_a_nan_temperature_instead_of_a_raw_runtimeerror():
+    # A real bug found by a much later fresh-eyes sweep, the identical
+    # gap found and fixed in this function's own drop-in-compatible
+    # sibling, sample_completion (see that test's own comment for the
+    # full confirmed-live repro): nan <= 0 is False in Python, so a NaN
+    # temperature used to fall through to the sampling branch instead
+    # of the greedy one, and softmax(logits / nan) produced an all-NaN
+    # probability tensor that crashed torch.multinomial with a raw,
+    # implementation-leaking RuntimeError instead of a clear one.
+    torch.manual_seed(0)
+    model = DecoderOnlyTransformer(_tiny_config())
+    with pytest.raises(ValueError, match="temperature"):
+        generate_with_cache(model, [1, 2, 3], max_new_tokens=4, temperature=float("nan"))

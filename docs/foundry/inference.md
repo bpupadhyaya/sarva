@@ -301,6 +301,28 @@ gracefully. Fixed by folding `not prompt_ids` into that same guard, so
 an empty message gets the identical clean, empty-response treatment —
 not its own special case, not a crash.
 
+### `temperature=nan` crashed with a raw `torch.multinomial` error, on this function and its own drop-in-compatible sibling alike
+
+A much later fresh-eyes sweep found `temperature` was never validated
+either, in both `generate_with_cache` and its own drop-in-compatible
+sibling `sarva_foundry.train.rl.sample_completion`. `temperature <= 0`
+is documented, intentional greedy behavior — but `nan <= 0` is `False`
+in Python, the same truthiness-adjacent shape already found for
+`grad_clip`/`peak_lr`/`beta` elsewhere in this project's training
+package, so a NaN temperature fell through to the sampling branch
+instead. `F.softmax(next_logits / nan, ...)` produces an all-NaN
+probability tensor, which crashes `torch.multinomial` with a raw,
+implementation-leaking `RuntimeError: probability tensor contains
+either inf, nan or element < 0` instead of a clear error naming the
+real cause. Confirmed live on both functions identically. `temperature
+=+inf` is deliberately still allowed — confirmed live, it produces a
+valid (if degenerate, uniform-random) sample with no error, a
+legitimate extreme rather than a broken one, so only the genuinely NaN
+case is rejected. Fixed identically in both functions. Verified by
+reverting and watching both new tests fail with the literal old bug's
+own shape: the raw `RuntimeError` from `torch.multinomial`. 2 new
+tests, 880 → 882 Python tests.
+
 ## Quantization: real int8 weight-only compression
 
 §3.6f's "inference/serving stack" names KV-cache, paged attention, and

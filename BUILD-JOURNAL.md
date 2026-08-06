@@ -20652,3 +20652,65 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `temperature=nan` crashed `sample_completion`/`generate_with_cache` with a raw `torch.multinomial` error, on both drop-in-compatible siblings alike
+
+Round 179. Continuing the direct-tool-use sweep (Agent tool subagent
+budget still exhausted), this round checked `sample_completion`'s
+`temperature` parameter for the same "sign/NaN-sensitive numeric value
+with no guard" shape rounds 176-178 kept finding, though this one
+crashes loudly rather than corrupting silently -- a real, well-
+precedented bug in its own right, just a different (lower) severity
+tier than the grad_clip/peak_lr/beta cluster.
+
+`temperature <= 0` is documented, intentional greedy behavior -- but
+`nan <= 0` is `False` in Python, the exact same truthiness-adjacent
+shape already found for `grad_clip`/`peak_lr`/`beta` this session, so a
+NaN temperature fell through to the sampling branch instead of the
+greedy one. `F.softmax(next_logits / nan, ...)` produces an all-NaN
+probability tensor, which crashes `torch.multinomial` with a raw,
+implementation-leaking `RuntimeError: probability tensor contains
+either inf, nan or element < 0` -- matching the exact "raw
+implementation-leaking error instead of a clean ValueError" bug class
+already fixed dozens of times this session, including once already in
+this exact function (the empty-`prompt_ids` fix its own docstring
+narrates).
+
+**Confirmed live** on both `sample_completion` and its own explicitly
+named "drop-in-compatible sibling," `sarva_foundry.inference.
+generate_with_cache` -- both crash identically. `temperature=+inf` was
+independently checked and confirmed safe: it produces a valid (if
+degenerate, uniform-random) sample with no error, a legitimate extreme
+rather than a broken one, so only the genuinely NaN case needed
+rejecting.
+
+**Fixed** identically in both functions: `if math.isnan(temperature):
+raise ValueError(...)`, added right alongside each function's own
+existing empty-`prompt_ids` guard.
+
+**Verified by reverting** and watching both new tests fail with the
+literal old bug's own shape: the raw `RuntimeError` from `torch.
+multinomial`.
+
+**2 new tests, 880 -> 882 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/inference.md` gained a
+new subsection directly after the existing empty-prompt fix narrative
+for these exact two sibling functions.
+
+**One hundred thirty-four of the last one hundred thirty-five rounds
+(46-67, 70-179) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** Rounds 176-179 form a coherent cluster: a
+`nan <= 0` (or `< 0`) truthiness gap found four times over in four
+different files across the same training/inference module family,
+three of them silently reversing a training objective's direction and
+one crashing loudly instead. The already-known `bpe.py`/`provenance.py`
+leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

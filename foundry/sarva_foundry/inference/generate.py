@@ -18,6 +18,8 @@ key/value projection instead of recomputing the whole prefix, using
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -70,6 +72,20 @@ def generate_with_cache(
         raise ValueError(
             "prompt_ids must not be empty -- there's no prefix to prefill the KV cache from"
         )
+    # A real bug found by a much later fresh-eyes sweep, the identical
+    # gap found and fixed in this function's own drop-in-compatible
+    # sibling, `sarva_foundry.train.rl.sample_completion` (see that
+    # function's own comment for the full confirmed-live repro):
+    # temperature=nan was never rejected. `nan <= 0` is `False` in
+    # Python, so a NaN temperature fell through to the sampling branch
+    # below instead of the greedy one, and `F.softmax(next_logits /
+    # nan, ...)` produces an all-NaN probability tensor that crashes
+    # `torch.multinomial` with a raw, implementation-leaking
+    # RuntimeError instead of a clear one. `temperature=+inf` is
+    # deliberately still allowed -- confirmed live, it produces a
+    # valid (if degenerate, uniform-random) sample with no error.
+    if math.isnan(temperature):
+        raise ValueError(f"temperature must not be NaN, got {temperature}")
     model.eval()
     device = next(model.parameters()).device
     cache = KVCache(

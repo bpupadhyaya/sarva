@@ -36,6 +36,19 @@ def test_sample_completion_with_zero_temperature_is_greedy_and_deterministic():
     assert a == b
 
 
+def test_sample_completion_rejects_a_nan_temperature_instead_of_a_raw_runtimeerror():
+    # A real bug found by a much later fresh-eyes sweep, the identical
+    # gap found and fixed in this function's own drop-in-compatible
+    # sibling, generate_with_cache: `nan <= 0` is False in Python, so a
+    # NaN temperature used to fall through to the sampling branch
+    # instead of the greedy one, and softmax(logits / nan) produced an
+    # all-NaN probability tensor that crashed torch.multinomial with a
+    # raw, implementation-leaking RuntimeError instead of a clear one.
+    model = DecoderOnlyTransformer(_tiny_config())
+    with pytest.raises(ValueError, match="temperature"):
+        sample_completion(model, prompt_ids=[1, 2, 3], max_new_tokens=4, temperature=float("nan"))
+
+
 def test_sample_completion_stops_at_the_stop_token():
     model = DecoderOnlyTransformer(_tiny_config())
     # With temperature=0 (greedy), find whatever token the model picks
