@@ -177,9 +177,44 @@ def contains_match(output: str, case: BenchmarkCase) -> bool:
     set (mirroring `-`/`.`) and a third lookahead, `(?!,\\d)`, that
     rejects a match immediately followed by a comma and then a digit --
     an ordinary trailing comma before a space or word (`"12, not 13"`)
-    stays allowed, only a genuine thousands-continuation is rejected."""
-    pattern = r"(?<![\w.,-])" + re.escape(case.expected.strip()) + r"(?!\w)(?!\.\d*[1-9])(?!,\d)"
-    return re.search(pattern, output.strip(), re.IGNORECASE) is not None
+    stays allowed, only a genuine thousands-continuation is rejected.
+
+    A sixth bug, the mirror image of the fourth (decimal all-zero) one,
+    found by a much later fresh-eyes sweep: the fifth bug's own fix
+    closed the false-positive direction (a comma-grouped WRONG answer,
+    e.g. `"12,000"` matching a shorter `expected="12"`) but introduced
+    no corresponding handling for the false-negative direction -- a
+    comma-grouped CORRECT answer never matches `expected` at all, since
+    the literal substring search has no way to see "1200" inside the
+    text "1,200"; the comma sits right in the middle of what would
+    otherwise be an exact match. Confirmed live: `expected="1200"`
+    against the entirely ordinary model output `"1,200"` (thousands-
+    grouped formatting for any answer >= 1000 is completely standard,
+    not a contrived shape -- the same real-world formatting habit the
+    fifth bug's own fix was written to reject when the VALUE differs)
+    scored `correct=False` for a numerically exact answer, silently
+    under-reporting real accuracy with no error or warning -- the same
+    "deflates a right answer" failure shape as the fourth bug, just for
+    thousands-commas instead of trailing decimal zeros. Fixed by
+    stripping genuine thousands-separator commas (a comma between two
+    digits, followed by exactly three digits with no fourth digit right
+    after) out of the text being searched, but only when `expected`
+    itself is a plain (optionally negative) integer -- a non-numeric
+    expected answer (e.g. a yes/no or word-based benchmark case) is left
+    untouched, so this can't introduce a spurious match where none of
+    the digit-boundary logic above is even in play. This normalization
+    happens before the existing boundary pattern runs, so every prior
+    fix's own digit/sign/decimal/comma-adjacency guard still applies
+    identically to the now comma-free text -- a comma-grouped WRONG
+    answer (the fifth bug's own case) still correctly fails to match,
+    since stripping its separator doesn't change the underlying value
+    being searched for."""
+    expected = case.expected.strip()
+    text = output.strip()
+    if re.fullmatch(r"-?\d+", expected):
+        text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+    pattern = r"(?<![\w.,-])" + re.escape(expected) + r"(?!\w)(?!\.\d*[1-9])(?!,\d)"
+    return re.search(pattern, text, re.IGNORECASE) is not None
 
 
 async def run_benchmark(

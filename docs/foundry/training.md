@@ -860,6 +860,38 @@ watched it fail with the exact reward-hacking result (`1.0` for a
 completion with no reasoning) before re-applying. 1 new test, 866 →
 867 Python tests.
 
+**A ninth real reward-hacking exploit -- really a reward-STARVING one,
+found by a much later fresh-eyes sweep, independently of the identical
+gap found and fixed in `sarva.eval.harness.contains_match`:** an
+earlier fix closed the comma thousands-separator's false-positive
+direction (a comma-grouped WRONG completion, e.g. `"1,200"`, scoring
+`1.0` against a shorter `expected_answer` like `"200"`), but a
+comma-grouped CORRECT completion never matched `expected_answer` at
+all -- the literal substring search has no way to see `"1200"` inside
+the text `"1,200"`, since the comma sits right in the middle of what
+would otherwise be an exact match. Confirmed directly:
+`answer_reward("<think>...</think>The answer is 1,200", "1200")`
+returned `0.0` for a numerically exact completion -- thousands-grouped
+formatting for any answer ≥ 1000 is completely ordinary
+sampled-completion output, not contrived. This silently denied real
+training reward for a genuinely correct answer, corrupting the RL
+signal in the same "deflates reward for a right answer" direction as
+the sixth bug's own all-zero-decimal gap, just for thousands-commas
+instead of trailing decimal zeros. Fixed by stripping a genuine
+thousands-separator comma (a comma between two digits, followed by
+exactly three digits with no fourth digit right after) out of the
+answer segment before matching, but only when `expected_answer` itself
+is a plain (optionally negative) integer -- this project's bundled
+reasoning tasks are all integer arithmetic, and leaving a non-numeric
+expected answer untouched means the normalization can never introduce a
+spurious match the boundary logic above doesn't already govern. The
+identical gap and fix landed in `sarva.eval.harness.contains_match` at
+the same time -- see `docs/eval.md`'s own write-up for the shared
+story. Verified by reverting and watching the new test fail with the
+literal old bug's own shape: `answer_reward(..., "1200")` for a
+`"1,200"` completion returning `0.0` instead of `1.0`. 1 new test in
+this file (2 total across both files), 883 → 885 Python tests.
+
 **The already-published 31% → 56% numbers below were re-checked
 against both fixes above, not left standing on faith:** re-ran
 `examples/17_reasoning_token_training.py` (same fixed seed,

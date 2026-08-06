@@ -223,6 +223,52 @@ and `contains_match("12,000", expected="12")` both returning `True`,
 `answer_reward(..., "200")` for a `"1,200"` completion returning `1.0`.
 2 new tests, 784 → 786 Python tests.
 
+## A sixth bug in the same boundary logic, the mirror image of the fifth: a comma-grouped CORRECT answer never matched at all
+
+A much later fresh-eyes sweep checked `contains_match` a sixth time.
+The fifth bug's own fix closed the false-positive direction (a
+comma-grouped WRONG answer matching a shorter `expected` value), but
+introduced no corresponding fix for the false-negative direction: a
+comma-grouped CORRECT answer never matched `expected` either, since a
+literal substring search has no way to see `"1200"` inside the text
+`"1,200"` — the comma sits right in the middle of what would otherwise
+be an exact match. Confirmed live: `expected="1200"` against the
+entirely ordinary model output `"1,200"` (thousands-grouped formatting
+for any answer ≥ 1000 is completely standard, not contrived — the same
+formatting habit the fifth bug's own fix was written to reject when the
+*value* actually differs) scored `correct=False` for a numerically
+exact answer, silently under-reporting real accuracy with no error or
+warning — the same "deflates a right answer" failure shape as the
+fourth bug (the all-zero decimal continuation), just for
+thousands-commas instead of trailing decimal zeros.
+
+The identical gap existed in `sarva_foundry.train.reasoning.
+answer_reward`'s own copy of this pattern, the same "copied before the
+later fix landed" propagation gap every prior fix in this function has
+named — this one corrupts the actual RL training signal, not just a
+benchmark report: a genuinely correct, comma-grouped completion was
+silently denied real training reward. Confirmed directly:
+`answer_reward("<think>...</think>The answer is 1,200", "1200")`
+returned `0.0` for a numerically exact completion.
+
+Fixed in both places by stripping genuine thousands-separator commas (a
+comma between two digits, followed by exactly three digits with no
+fourth digit right after) out of the text being searched, but only when
+`expected` itself is a plain (optionally negative) integer — a
+non-numeric expected answer (a yes/no or word-based case) is left
+untouched, so the normalization can't introduce a spurious match
+outside the digit-boundary logic already governing this function. This
+runs before the existing boundary pattern, so every prior fix's own
+digit/sign/decimal/comma-adjacency guard still applies identically to
+the now comma-free text — the fifth bug's own case (a comma-grouped
+WRONG answer) still correctly fails to match, since stripping its
+separator doesn't change the underlying value being searched for.
+Verified by reverting and watching the new tests fail with the literal
+old bug's own shape in both files: `contains_match("1,200",
+expected="1200")` and `answer_reward("<think>...</think>The answer is
+1,200", "1200")` both returning the "no match"/`0.0` result for a
+numerically exact answer. 2 new tests, 883 → 885 Python tests.
+
 ## A `ProviderError` on one case doesn't sink the whole run
 
 If a case's request fails (rate limit, auth, any `ProviderError`), that

@@ -232,6 +232,35 @@ def test_answer_reward_is_not_comma_blind():
     assert answer_reward(correct_comma_formatted, "1,200") == 1.0
 
 
+def test_answer_reward_recognizes_a_thousands_grouped_correct_answer():
+    # A ninth real reward-hacking exploit -- really a reward-STARVING
+    # one, the mirror image of the sixth bug (the all-zero decimal
+    # continuation) -- found by a much later fresh-eyes sweep,
+    # independently of the identical gap found and fixed in
+    # sarva.eval.harness.contains_match: the seventh bug's own fix
+    # closed the false-positive direction (a comma-grouped WRONG
+    # completion scoring 1.0) but a comma-grouped CORRECT completion
+    # never matched expected_answer at all, since the literal substring
+    # search has no way to see "1200" inside "1,200". Confirmed
+    # directly: answer_reward("<think>...</think>The answer is 1,200",
+    # "1200") returned 0.0 for a numerically exact completion --
+    # thousands-grouped formatting for any answer >= 1000 is completely
+    # ordinary sampled-completion output, silently denying real training
+    # reward for a genuinely correct answer.
+    correct_grouped = "<think>900 plus 300</think>The answer is 1,200."
+    assert answer_reward(correct_grouped, "1200") == 1.0
+    correct_ungrouped = "<think>900 plus 300</think>The answer is 1200."
+    assert answer_reward(correct_ungrouped, "1200") == 1.0
+    # Multi-group numbers (more than one separator) must be handled too.
+    correct_million = "<think>a big multiplication</think>The answer is 1,200,000."
+    assert answer_reward(correct_million, "1200000") == 1.0
+    # The seventh bug's own case must still score zero -- stripping a
+    # thousands separator must never make a genuinely WRONG comma-grouped
+    # completion start matching a shorter expected value.
+    wrong_leading = "<think>40 times 30</think>The answer is 1,200."
+    assert answer_reward(wrong_leading, "200") == 0.0
+
+
 def test_reasoning_reward_combines_format_and_answer_with_default_weights():
     both_right = "<think>2+3=5</think>5"
     assert reasoning_reward(both_right, "5") == 1.0  # 0.3*1 + 0.7*1

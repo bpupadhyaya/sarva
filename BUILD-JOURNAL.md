@@ -20851,3 +20851,89 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `contains_match`'s own sixth bug, and its sibling `answer_reward`'s ninth: a comma-grouped CORRECT answer never matched at all
+
+Round 186. After three consecutive clean sweeps (182-184) and a fourth
+(185), this round returned to `sarva.eval.harness.contains_match` --
+already the single most-fixed function in this codebase, with five
+prior documented bugs in its digit/sign/decimal/comma boundary logic --
+checking it a sixth time rather than assuming five rounds of fixes had
+closed every gap in the same shape.
+
+The fifth bug's own fix (round ~146-ish, see `docs/eval.md`) closed the
+comma thousands-separator's false-positive direction: a comma-grouped
+WRONG answer (`"1,200"`) no longer spuriously matches a shorter
+`expected` (`"200"`). But it introduced no corresponding fix for the
+opposite direction: a comma-grouped CORRECT answer never matched
+`expected` either. A literal substring search has no way to see
+`"1200"` inside the text `"1,200"` -- the comma sits right in the
+middle of what would otherwise be an exact match.
+
+**Confirmed live**: `contains_match("1,200", expected="1200")`
+returned `False` for a numerically exact answer. Thousands-grouped
+formatting for any answer >= 1000 is completely ordinary model output,
+not a contrived shape -- the exact same formatting habit the fifth
+bug's own fix was written to reject when the *value* genuinely
+differs. This silently under-reports real accuracy with no error or
+warning, the same "deflates a right answer" direction as the fourth
+bug (the all-zero decimal continuation) found earlier in this same
+function.
+
+**The identical gap existed in `sarva_foundry.train.reasoning.
+answer_reward`'s own copy of this exact pattern** -- the same "copied
+before the later fix landed" propagation gap every prior fix in that
+function has named, and confirmed as its own, separate real bug (its
+ninth) rather than assumed fixed by analogy: `answer_reward("<think>
+...</think>The answer is 1,200", "1200")` returned `0.0` for a
+numerically exact completion. This one corrupts the actual RL training
+signal, not just a benchmark report: a genuinely correct, comma-grouped
+completion was silently denied real training reward.
+
+**Fixed in both places** by stripping genuine thousands-separator
+commas (a comma between two digits, followed by exactly three digits
+with no fourth digit right after) out of the text/answer segment before
+matching, but only when `expected`/`expected_answer` itself is a plain
+(optionally negative) integer -- a non-numeric expected value is left
+untouched, so the normalization can't introduce a spurious match
+outside the digit-boundary logic already governing both functions. This
+runs before the existing boundary pattern, so every prior fix's own
+digit/sign/decimal/comma-adjacency guard still applies identically to
+the now comma-free text -- the fifth bug's own case (a comma-grouped
+WRONG answer) still correctly fails to match in both functions, since
+stripping its separator doesn't change the underlying value being
+searched for.
+
+**Verified by reverting** both files and watching the new tests fail
+with the literal old bug's own shape: `contains_match("1,200",
+expected="1200")` and `answer_reward(..., "1200")` for a `"1,200"`
+completion both returning the "no match" result for a numerically exact
+answer.
+
+**2 new tests, 883 -> 885 Python tests, `ruff check`/`format --check`
+clean on all four touched files.** `docs/eval.md` gained a new
+"sixth bug" section directly after the fifth bug's own write-up;
+`docs/foundry/training.md` gained a new "ninth exploit" paragraph in
+the same reasoning-training chapter, matching the numbering convention
+`answer_reward`'s own docstring already uses (correcting a numbering
+collision caught before commit: "eighth" was already taken by the
+opening-`<think>`-check bug, so this one is the ninth).
+
+**137 of the last 142 rounds (46-67, 70-181, 186) have found and
+shipped real fixes; rounds 68-69 and 182-185 remain the six clean
+sweeps.** The lesson repeats again, now for a sixth time on the same
+function: a fix that closes one direction of a symmetric bug shape
+(false-positive vs. false-negative) is worth explicitly re-checking for
+the opposite direction, not assumed complete once the originally-found
+direction is closed -- the fourth bug (decimal all-zero) and now this
+sixth/ninth bug (comma thousands-grouping) are both exactly this
+pattern, on two different characters, in two different files.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

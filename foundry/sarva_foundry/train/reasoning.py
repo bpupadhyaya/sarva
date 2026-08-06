@@ -216,6 +216,35 @@ def answer_reward(completion_text: str, expected_answer: str) -> float:
     # rejects a match immediately followed by a comma and then a digit
     # -- an ordinary trailing comma before a space or word stays
     # matchable, only a genuine thousands-continuation is rejected.
+    #
+    # A ninth real reward-hacking exploit -- really a reward-STARVING
+    # one, the mirror image of the sixth bug above -- found by a much
+    # later fresh-eyes sweep, independently of the identical gap found
+    # and fixed in `sarva.eval.harness.contains_match`: the seventh
+    # bug's own fix closed the false-positive direction (a comma-grouped
+    # WRONG completion scoring 1.0) but a comma-grouped CORRECT
+    # completion never matched `expected_answer` at all -- the literal
+    # substring search has no way to see "1200" inside "1,200", since
+    # the comma sits in the middle of what would otherwise be an exact
+    # match. Confirmed directly: `answer_reward("<think>...</think>The
+    # answer is 1,200", "1200")` returned `0.0` for a numerically exact
+    # completion -- thousands-grouped formatting for any answer >= 1000
+    # is completely ordinary sampled-completion output, not contrived.
+    # This silently denies real training reward for a genuinely correct
+    # answer, corrupting the RL signal the same "deflates reward for a
+    # right answer" direction as the sixth bug's own all-zero-decimal
+    # gap, just for thousands-commas instead of trailing decimal zeros.
+    # Fixed the identical way `contains_match` was: strip a genuine
+    # thousands-separator comma (a comma between two digits, followed by
+    # exactly three digits with no fourth digit right after) out of the
+    # answer segment before matching, but only when `expected_answer`
+    # itself is a plain (optionally negative) integer -- this project's
+    # bundled reasoning tasks are all integer arithmetic, and leaving a
+    # non-numeric expected answer untouched means this normalization can
+    # never introduce a spurious match the boundary logic above doesn't
+    # already govern.
+    if re.fullmatch(r"-?\d+", expected_answer):
+        answer_segment = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", answer_segment)
     pattern = r"(?<![\w.,-])" + re.escape(expected_answer) + r"(?!\w)(?!\.\d*[1-9])(?!,\d)"
     return 1.0 if re.search(pattern, answer_segment) else 0.0
 

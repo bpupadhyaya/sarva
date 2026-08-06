@@ -173,6 +173,39 @@ def test_contains_match_is_not_comma_blind():
     assert contains_match("The total is 1,200 dollars.", case_comma)
 
 
+def test_contains_match_recognizes_a_thousands_grouped_correct_answer():
+    # A sixth bug, found by a much later fresh-eyes sweep, the mirror
+    # image of the fourth (decimal all-zero) one: the fifth bug's own fix
+    # closed the false-positive direction (a comma-grouped WRONG answer
+    # matching a shorter expected value) but a comma-grouped CORRECT
+    # answer never matched expected at all -- the literal substring
+    # search has no way to see "1200" inside "1,200", since the comma
+    # sits in the middle of what would otherwise be an exact match.
+    # Confirmed live: expected="1200" against the entirely ordinary model
+    # output "1,200" (thousands-grouped formatting for any answer >= 1000
+    # is completely standard model output, not contrived) scored
+    # correct=False for a numerically exact answer.
+    case = BenchmarkCase(id="big-add", prompt="p", expected="1200")
+    assert contains_match("1,200", case)
+    assert contains_match("The answer is 1,200.", case)
+    assert contains_match("1200", case)  # the un-grouped form must still match too
+    # Multi-group numbers (more than one separator) must be handled too.
+    case_million = BenchmarkCase(id="big-mul-2", prompt="p", expected="1200000")
+    assert contains_match("1,200,000", case_million)
+
+    # The fifth bug's own case must still be rejected -- stripping a
+    # thousands separator must never make a genuinely WRONG comma-grouped
+    # answer start matching a shorter expected value.
+    case_200 = BenchmarkCase(id="big-mul", prompt="p", expected="200")
+    assert not contains_match("Let me compute: 40 * 30 = 1,200.", case_200)
+
+    # A non-numeric expected value (a yes/no or word-based benchmark
+    # case) must be left untouched by the new normalization.
+    case_word = BenchmarkCase(id="word-1", prompt="p", expected="yes")
+    assert contains_match("yes, I think so", case_word)
+    assert not contains_match("no", case_word)
+
+
 def test_arithmetic_benchmark_is_bundled_and_has_real_cases():
     assert ARITHMETIC.name == "arithmetic"
     assert len(ARITHMETIC.cases) == 10
