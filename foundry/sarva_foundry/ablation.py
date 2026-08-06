@@ -166,6 +166,20 @@ def run_ablation(
     `token_ids` corpus, chunked identically. `seeds` defaults to three —
     enough to compute a real (if small-sample) standard deviation, not
     just one number pretending to be representative."""
+    # A real bug found by a fresh-eyes sweep: record_every is a plain,
+    # unvalidated int -- a caller wanting maximum recording granularity,
+    # or one who derives it programmatically (e.g. `steps // 10` for a
+    # quick smoke-test ablation with steps < 10), can land on 0 with
+    # nothing anywhere to catch it. The training loop's own `step %
+    # record_every` then raises a raw ZeroDivisionError on its very
+    # first iteration -- AFTER trainer.train_step() has already run one
+    # real (if wasted) gradient-update pass. The same "unvalidated
+    # numeric parameter leaking a raw implementation exception" shape
+    # this module's own AblationResult.get()/ArmResult.stdev_final_loss
+    # were already fixed for, one parameter over neither of those
+    # earlier sweeps reached. Confirmed live before this fix.
+    if record_every <= 0:
+        raise ValueError(f"record_every must be positive, got {record_every}")
     dataset = TextChunkDataset(token_ids, seq_len=seq_len)
 
     results: list[ArmResult] = []

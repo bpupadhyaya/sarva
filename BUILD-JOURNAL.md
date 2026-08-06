@@ -18119,3 +18119,57 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `run_ablation`'s `record_every` was a plain, unvalidated int -- a zero value crashed mid-training with a raw `ZeroDivisionError`, one parameter over from two already-fixed exceptions in the same module
+
+Round 141. Deliberately broadening scope away from the now-exhausted
+`TransformerConfig`/`VisionEncoderConfig` positivity-check vein
+(rounds 133-140), this round's sweep found `foundry/sarva_foundry/
+ablation.py`'s `run_ablation`: `record_every` (default `10`) is a
+plain, unvalidated `int` parameter controlling how often a loss-curve
+point is recorded. Nothing anywhere rejects `record_every=0`. The
+training loop's own `step % record_every` raises a raw
+`ZeroDivisionError: integer modulo by zero` on the very first
+iteration -- AFTER `trainer.train_step()` has already run one real (if
+wasted) gradient-update forward/backward pass.
+
+Not contrived: `record_every` is a public, user-facing keyword
+argument of a small-scale research tool whose own docstring emphasizes
+"researchers can test new ideas at small scale." A caller wanting
+maximum recording granularity, or one who derives the value
+programmatically (e.g. `record_every = steps // 10` for a quick
+smoke-test ablation with `steps < 10`), lands on `0` with nothing to
+catch it. This is the identical "unvalidated numeric parameter leaking
+a raw implementation exception" shape this exact module already fixed
+twice before -- `AblationResult.get()`'s bare `StopIteration` and
+`ArmResult.stdev_final_loss`'s bare `AttributeError` -- just one
+parameter over, never reached by either of those two earlier sweeps.
+
+**Confirmed live**: `run_ablation([arm], ..., record_every=0)` raised
+`ZeroDivisionError: integer modulo by zero` at the training loop's
+first iteration.
+
+**Fixed** by rejecting `record_every <= 0` with a clean `ValueError`
+at the top of `run_ablation`, before any training work begins.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: the raw `ZeroDivisionError` propagating
+uncaught.
+
+**1 new test, 830 -> 831 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update: this module's
+own prior `StopIteration`/`AttributeError` fixes never got a dedicated
+docs chapter either.
+
+**Ninety-six of the last ninety-seven rounds (46-67, 70-141) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

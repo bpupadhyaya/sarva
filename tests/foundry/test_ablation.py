@@ -199,3 +199,25 @@ def test_run_ablation_records_a_real_loss_curve_not_just_a_final_number():
     curve = result.get("a").loss_curves[0]
     assert len(curve) > 1  # more than just the final loss
     assert curve[-1] == result.get("a").final_losses[0]  # the curve's last point IS the final loss
+
+
+def test_run_ablation_rejects_a_non_positive_record_every_instead_of_crashing_mid_training():
+    # A real bug found by a fresh-eyes sweep: record_every was a plain,
+    # unvalidated int -- a caller wanting maximum recording granularity,
+    # or one who derives it programmatically (e.g. `steps // 10` for a
+    # quick smoke-test ablation with steps < 10), can land on 0 with
+    # nothing anywhere to catch it. The training loop's own `step %
+    # record_every` used to raise a raw ZeroDivisionError on its very
+    # first iteration -- AFTER trainer.train_step() had already run one
+    # real (if wasted) gradient-update pass. The same "unvalidated
+    # numeric parameter leaking a raw implementation exception" shape
+    # AblationResult.get()/ArmResult.stdev_final_loss were already fixed
+    # for, one parameter over neither of those earlier fixes reached.
+    _, token_ids = _tokenized_corpus()
+    config = TransformerConfig(
+        vocab_size=300, dim=16, n_layers=1, n_heads=2, n_kv_heads=1, max_seq_len=16
+    )
+    arms = [AblationArm(name="a", model_config=config)]
+
+    with pytest.raises(ValueError, match="record_every"):
+        run_ablation(arms, token_ids, seq_len=16, batch_size=2, steps=5, seeds=[0], record_every=0)
