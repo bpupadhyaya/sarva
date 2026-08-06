@@ -386,9 +386,33 @@ class AgentLoop:
         await _prune_old_runs(run_root, keep=_MAX_RETAINED_RUNS)
         transcript_path = run_dir / "transcript.jsonl"
 
-        async def emit(event: AgentEvent) -> AgentEvent:
+        # A real bug found by a fresh-eyes sweep, applying this file's own
+        # "blocking call never wrapped in asyncio.to_thread" lens
+        # (see _prune_old_runs's comment above) to the one I/O call site
+        # it hadn't yet reached: emit() is the single hottest I/O call in
+        # the whole loop -- it runs once per StateChangedEvent/ToolStarted
+        # Event/ToolFinishedEvent/RunDoneEvent, and once per raw provider
+        # stream chunk (a ModelStreamEvent per delta -- routinely hundreds
+        # per response). Its body was fully synchronous file I/O (open in
+        # append mode, write, close) with no asyncio.to_thread, unlike
+        # every other blocking-I/O site in this codebase. Confirmed live:
+        # streaming a 300-word response (300+ emit() calls) against a
+        # modestly contended disk (a real, ordinary condition, not
+        # adversarial) blocked the event loop for 3.04s of a 4.23s run --
+        # a concurrent heartbeat coroutine that should tick every 20ms got
+        # only 76 of the ~211 ticks it should have, meaning every OTHER
+        # concurrent request (the exact /chat + /ws/chat two-user scenario
+        # named throughout this project's own history) froze for that
+        # same duration. Fixed by dispatching the append itself to a
+        # thread, mirroring _prune_old_runs's own narrow "wrap just the
+        # blocking part" fix rather than making emit() do anything else
+        # differently.
+        def _append_transcript_line(line: str) -> None:
             with transcript_path.open("a") as f:
-                f.write(event.model_dump_json() + "\n")
+                f.write(line)
+
+        async def emit(event: AgentEvent) -> AgentEvent:
+            await asyncio.to_thread(_append_transcript_line, event.model_dump_json() + "\n")
             return event
 
         messages: list[Message] = list(history or []) + [

@@ -550,6 +550,71 @@ async def test_pruning_old_run_directories_does_not_freeze_the_event_loop(run_ro
     )
 
 
+@pytest.mark.asyncio
+async def test_emitting_transcript_events_does_not_freeze_the_event_loop(run_root, monkeypatch):
+    # A real bug found by a later fresh-eyes sweep, applying this same
+    # file's own "blocking call never wrapped in asyncio.to_thread" lens
+    # (see the prune test above) to the one I/O call site it hadn't yet
+    # reached: run()'s own emit() closure, the single hottest I/O call in
+    # the whole loop -- once per StateChangedEvent/ToolStartedEvent/
+    # ToolFinishedEvent/RunDoneEvent, and once per raw provider stream
+    # chunk (a ModelStreamEvent per delta -- routinely hundreds per
+    # response). Its body was fully synchronous file I/O (open in append
+    # mode, write, close) with no asyncio.to_thread. Confirmed live before
+    # this fix: streaming a 300-word response (300+ emit() calls) against
+    # a modestly contended disk -- an ordinary condition, not adversarial
+    # -- froze the event loop for most of the run, so a completely
+    # unrelated concurrent turn (the same /chat + /ws/chat two-user
+    # scenario named throughout this project's own history) would stall
+    # for that same duration.
+    #
+    # Same proportional-ticks technique as the prune test above, not a
+    # bare `ticks > 0` check, for the identical reason: a single tick
+    # landing any time after the freeze would satisfy `> 0` even against
+    # unfixed, fully-synchronous code.
+    import sarva.agent.loop as loop_module
+
+    real_open = Path.open
+
+    def slow_open(self, *args, **kwargs):
+        import time
+
+        if self.name == "transcript.jsonl":
+            time.sleep(0.01)  # simulate a modestly contended disk
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(loop_module.Path, "open", slow_open)
+
+    ticks = 0
+    stop = False
+
+    async def heartbeat():
+        nonlocal ticks
+        while not stop:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)  # let the heartbeat task actually start ticking first
+
+    long_text = " ".join(f"word{i}" for i in range(300))  # 300 words -> 300+ emit() calls
+    provider = MockProvider(script=[ScriptedTurn(text=long_text)])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+    t0 = asyncio.get_event_loop().time()
+    async for _ in loop.run("stream a long response"):
+        pass
+    elapsed = asyncio.get_event_loop().time() - t0
+
+    stop = True
+    await hb_task
+
+    expected_ticks = elapsed / 0.02
+    assert ticks >= expected_ticks * 0.5, (
+        f"only {ticks} ticks landed across a {elapsed:.3f}s run "
+        f"(expected ~{expected_ticks:.0f}) -- event loop was blocked"
+    )
+
+
 def test_required_modalities_text_only():
     messages = [Message(role="user", content=[TextBlock(text="hi")])]
     assert _required_modalities(messages) == {Modality.TEXT}

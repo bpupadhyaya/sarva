@@ -160,6 +160,43 @@ repro now shows the event loop staying responsive throughout, and the
 30-trial sibling-deletion stress run came back clean (0/30) on the
 combined fix. 1 new test, 753 → 754 Python tests.
 
+### `_prune_old_runs` turned out not to be the only unwrapped blocking call in this file after all — `emit()` itself, the single hottest I/O call in the whole loop, was still fully synchronous
+
+A round-131 fresh-eyes sweep, applying this same chapter's own lens one
+more time, found that `run()`'s own `emit()` closure — the one that
+appends every `AgentEvent` to `transcript.jsonl` — was still fully
+synchronous file I/O (open in append mode, write, close) with no
+`asyncio.to_thread` anywhere. It's called once per `StateChangedEvent`/
+`ToolStartedEvent`/`ToolFinishedEvent`/`RunDoneEvent`, and, critically,
+once per raw provider stream chunk — a `ModelStreamEvent` per delta,
+routinely hundreds per response — making it by far the hottest I/O call
+site in this file, yet it was never caught by the sweep that fixed
+`_prune_old_runs` above, since that one only ran occasionally (once per
+`run()` call, only when the retention cap was exceeded) rather than
+constantly.
+
+Confirmed live: streaming a 300-word response (300+ `emit()` calls)
+against a modestly contended disk — an ordinary condition, not
+adversarial — froze the event loop for most of the run: a concurrent
+heartbeat coroutine that should tick roughly every 20ms landed only 76
+of the ~203 ticks it should have across a 4.06s run. Exactly the same
+consequence as the `_prune_old_runs` bug above: any other concurrently
+in-flight request (the same `/chat`/`/ws/chat` two-user scenario named
+throughout this chapter) would stall for that same duration, every
+single streamed turn, not just the occasional prune.
+
+Fixed the same narrow way the `_prune_old_runs` split settled on:
+dispatch only the blocking part — the actual file append — to a thread
+via `asyncio.to_thread`, leaving `emit()`'s own signature and every call
+site unchanged. No `.active`-style atomicity concern applies here the
+way it did for pruning, since each `run()` call's transcript file is
+private to that run — concurrent writers to the *same* file were never
+a scenario `emit()` needs to handle. Verified live: the identical
+300-word repro now keeps the heartbeat fully responsive throughout.
+Verified by reverting and watching the new test fail with the literal
+old shape: 76 ticks landed instead of the expected ~203. 1 new test,
+818 → 819 Python tests.
+
 ## Tool use: concurrent, typed, gated by one policy
 
 A `Tool` is a small, explicit contract:

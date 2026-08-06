@@ -17514,3 +17514,61 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `AgentLoop.run()`'s own `emit()` closure -- the single hottest I/O call in the whole loop -- was still fully synchronous, freezing the event loop on every streamed turn
+
+Round 131. Applying the same "blocking call inside an `async def`,
+never wrapped in `asyncio.to_thread`" lens that fixed `_prune_old_runs`
+in this same file, this round's sweep found the one call site that
+fix never reached: `run()`'s `emit()` closure, which appends every
+`AgentEvent` to `transcript.jsonl`. Its body was fully synchronous file
+I/O (open in append mode, write, close) with no `asyncio.to_thread`
+anywhere -- and unlike `_prune_old_runs`, which only runs occasionally,
+`emit()` runs once per `StateChangedEvent`/`ToolStartedEvent`/
+`ToolFinishedEvent`/`RunDoneEvent`, and once per raw provider stream
+chunk -- a `ModelStreamEvent` per delta, routinely hundreds per
+response -- making it the hottest I/O call in the whole file.
+
+`build_providers()`-driven concurrency is what made this matter: any
+real `sarva serve` process handling concurrent `/chat`/`/ws/chat`
+requests (two users, or two tabs of the same user, named throughout
+this file's own prior fixes) would have every OTHER in-flight request
+stall for the cumulative duration of one streaming turn's hundreds of
+blocking file opens.
+
+**Confirmed live**: streaming a 300-word response (300+ `emit()`
+calls) against a modestly contended disk -- an ordinary condition, not
+adversarial -- froze the event loop for most of the run: a concurrent
+heartbeat coroutine that should tick roughly every 20ms landed only 76
+of the ~203 ticks it should have across a 4.06s run.
+
+**Fixed** the same narrow way the `_prune_old_runs` split settled on:
+dispatch only the blocking file append to a thread via `asyncio.
+to_thread`, leaving `emit()`'s signature and every call site
+unchanged. No cross-writer atomicity concern applies here the way it
+did for pruning, since each run's transcript file is private to that
+run.
+
+**Verified live**: the identical 300-word repro now keeps the
+heartbeat fully responsive throughout the run.
+
+**Verified by reverting** and watching the new test fail with the
+literal old shape: 76 ticks landed instead of the expected ~203.
+
+**1 new test, 818 -> 819 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/agent-loop.md` gained a new
+subsection directly after the `_prune_old_runs` chapter, in the same
+ongoing per-bug narrative.
+
+**Eighty-six of the last eighty-seven rounds (46-67, 70-131) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.**
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
