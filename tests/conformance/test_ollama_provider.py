@@ -16,6 +16,7 @@ from sarva.multimodal.content import (
     ImageBlock,
     Message,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultBlock,
 )
@@ -190,6 +191,26 @@ async def test_document_block_still_raises_not_silently_dropped():
     )
     with pytest.raises(ValueError, match="DocumentBlock"):
         await _to_ollama_message(m)
+
+
+async def test_thinking_block_is_dropped_not_raised():
+    # A real bug found by a fresh-eyes sweep, the identical gap already
+    # closed in the OpenAI/Google adapters, never applied here: this
+    # adapter's own generate() produces a ThinkingBlock whenever a
+    # hybrid-thinking model streams a populated `message.thinking` field
+    # (see test_generate_surfaces_real_thinking_deltas_and_a_thinking_block),
+    # but _to_ollama_message -- which translates a Message BACK into a
+    # wire request for the next turn -- had no case for it at all,
+    # falling through to the catch-all raise. Confirmed live: any
+    # ordinary multi-turn conversation with a hybrid-thinking Ollama
+    # model crashed the very next turn the moment history containing the
+    # just-produced ThinkingBlock was resent.
+    m = Message(
+        role="assistant",
+        content=[ThinkingBlock(text="let me think..."), TextBlock(text="4")],
+    )
+    out = await _to_ollama_message(m)
+    assert out == {"role": "assistant", "content": "4"}
 
 
 def test_strip_local_prefix_removes_the_provider_namespace():

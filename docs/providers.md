@@ -1110,6 +1110,47 @@ Verified by reverting and watching the new test fail with the literal
 old bug's own shape: `thinking_deltas == []` instead of the real
 streamed reasoning. 1 new test, 849 → 850 Python tests.
 
+### The `ThinkingBlock` that fix produces couldn't actually survive to the next turn — a still-open gap the inbound fix's own scope never covered
+
+A much later fresh-eyes sweep found the fix above only closed *reading*
+`message.thinking` out into a `ThinkingBlock` — it never checked
+whether that same `ThinkingBlock` could be sent back on a subsequent
+turn. `_to_ollama_message` (the function that translates a `Message`
+back into a wire request) dispatches on block type — `TextBlock`,
+`ImageBlock`, `ToolCallBlock`, `ToolResultBlock` each have a case — but
+had no case for `ThinkingBlock` at all, falling through to the
+catch-all `else: raise ValueError(...)`. Sibling comparison across the
+other three adapters found the gap immediately: `AnthropicProvider`
+round-trips `ThinkingBlock` (with its signature); `OpenAIProvider` and
+`GoogleProvider` both have an explicit `elif isinstance(b,
+ThinkingBlock): continue`, deliberately and *explicitly* dropped rather
+than silently. Ollama had neither — the only adapter with no case at
+all, and the only one whose own `generate()` self-produces the exact
+block type it couldn't consume back.
+
+Confirmed live: any ordinary multi-turn conversation with a real
+hybrid-thinking Ollama model (`sarva chat --session foo` run twice, a
+session continuation over `/chat`/`/ws/chat`, or a single turn where
+the model reasons then calls a tool, looping `AgentLoop` back to
+`CALLING_MODEL` with the just-appended `ThinkingBlock`-bearing message)
+crashed the very next `provider.generate()` call the moment
+`AgentLoop` resent the accumulated history — `state=FAILED`,
+`detail="OllamaProvider cannot translate a 'ThinkingBlock' content
+block..."`. Not a hypothetical multi-step scenario: this project's own
+registered default local model family (`qwen3`) is exactly the
+hybrid-thinking model the inbound fix above was written and verified
+against, so any session continuation with it hit this immediately.
+
+Fixed by adding the same explicit, documented drop the OpenAI/Google
+adapters already use: `elif isinstance(b, ThinkingBlock): continue`,
+with the same reasoning — Ollama's `/api/chat` has no documented way to
+feed a prior turn's reasoning trace back in as request content, so
+there's nothing meaningful to round-trip yet. Verified by reverting and
+watching the new test fail with the literal old bug's own shape: a
+raised `ValueError` naming `'ThinkingBlock'` where a clean `{"role":
+"assistant", "content": "4"}` was expected. 1 new test, 867 → 868
+Python tests.
+
 ## The model registry: adding a model is a YAML edit, not a code change
 
 `core/sarva/providers/data/models.yaml` is the one file that says which

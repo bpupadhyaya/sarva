@@ -110,6 +110,28 @@ async def _to_ollama_message(m: Message) -> dict[str, Any]:
                         "yet)"
                     )
             text_parts.append("".join(result_text_parts))
+        elif isinstance(b, ThinkingBlock):
+            # A real bug found by a fresh-eyes sweep, the identical gap
+            # already closed in the OpenAI/Google adapters, never applied
+            # here: this adapter's own generate() produces a ThinkingBlock
+            # (inserted into the assistant Message whenever a hybrid-
+            # thinking model streams a populated `message.thinking`
+            # field, confirmed live against a real running server -- see
+            # this file's own thinking-field comment below), but this
+            # function -- the one that translates a Message BACK into a
+            # wire request for the next turn -- had no case for it at
+            # all, falling through to the catch-all raise. Confirmed
+            # live: any ordinary multi-turn conversation with a hybrid-
+            # thinking Ollama model (this project's own confirmed-live
+            # default local model family) crashed the very next turn with
+            # `state=FAILED` the moment AgentLoop resent the accumulated
+            # history containing the just-produced ThinkingBlock.
+            # Deliberately, explicitly dropped -- not silently: Ollama's
+            # /api/chat has no documented way to feed a prior turn's
+            # reasoning trace back in as request content, the same
+            # reasoning OpenAI's/Google's adapters already apply to this
+            # exact block type.
+            continue
         else:
             # A block type this adapter has no translation for at all.
             # Raising here is deliberate, matching the

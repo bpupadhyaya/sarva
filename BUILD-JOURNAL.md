@@ -20020,3 +20020,71 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The `ThinkingBlock` OllamaProvider's own inbound fix produces couldn't actually survive to the next turn — a still-open gap the inbound fix's own scope never covered
+
+Round 170. An earlier round fixed `OllamaProvider.generate()` silently
+discarding a real hybrid-thinking model's `message.thinking` field,
+inserting a `ThinkingBlock` into the assembled message instead. This
+round's sweep found that fix's own scope never covered the other
+direction: `_to_ollama_message` (the function that translates a
+`Message` back into a wire request for the next turn) dispatches on
+block type -- `TextBlock`, `ImageBlock`, `ToolCallBlock`,
+`ToolResultBlock` each have a case -- but had no case for
+`ThinkingBlock` at all, falling through to the catch-all `else: raise
+ValueError(...)`.
+
+Sibling comparison across the other three adapters found the gap
+immediately: `AnthropicProvider` round-trips `ThinkingBlock` (with its
+signature); `OpenAIProvider` and `GoogleProvider` both have an explicit
+`elif isinstance(b, ThinkingBlock): continue`, deliberately and
+explicitly dropped rather than silently. Ollama had neither -- the
+only adapter with no case at all, and the only one whose own
+`generate()` self-produces the exact block type it couldn't consume
+back.
+
+**Confirmed live**: any ordinary multi-turn conversation with a real
+hybrid-thinking Ollama model -- `sarva chat --session foo` run twice, a
+session continuation over `/chat`/`/ws/chat`, or a single turn where
+the model reasons then calls a tool -- crashed the very next
+`provider.generate()` call the moment `AgentLoop` resent the
+accumulated history containing the just-produced `ThinkingBlock`,
+`state=FAILED`, `detail="OllamaProvider cannot translate a
+'ThinkingBlock' content block..."`. Not a hypothetical scenario: this
+project's own registered default local model family (`qwen3`) is
+exactly the hybrid-thinking model the inbound fix was verified
+against, so any session continuation with it hit this immediately.
+
+**Fixed** by adding the same explicit, documented drop the OpenAI/
+Google adapters already use: `elif isinstance(b, ThinkingBlock):
+continue`, with the same reasoning -- Ollama's `/api/chat` has no
+documented way to feed a prior turn's reasoning trace back in as
+request content.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: a raised `ValueError` naming
+`'ThinkingBlock'` where a clean translated message was expected.
+
+**1 new test, 867 -> 868 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the inbound-thinking-field fix it directly
+follows up on.
+
+**One hundred twenty-five of the last one hundred twenty-six rounds
+(46-67, 70-170) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** Another instance of a fix's own scope
+leaving the adjacent half of the same feature open -- a fix that reads
+new data into a new block type is only half done until every place
+that block type can flow back out is checked too, the same lesson
+already drawn from the config-validation "field-by-field, not
+all-at-once" gaps in rounds 161/166/167. The already-known `bpe.py`/
+`provenance.py` leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
