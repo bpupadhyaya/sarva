@@ -85,6 +85,22 @@ def _dedup_near_duplicates_by_key[T](
     # duplicating the check in each public wrapper.
     if num_hashes <= 0:
         raise ValueError(f"num_hashes must be positive, got {num_hashes}")
+    # A real bug found by a later fresh-eyes sweep, the sibling
+    # parameter one over from num_hashes above, in this exact function:
+    # shingle_size was likewise never validated. _shingles' own `len(
+    # text) < size` guard is always False for size <= 0, so every
+    # comprehension iteration slices `text[i:i+0]`, which is always "" --
+    # every non-empty document in the corpus collapses to the identical
+    # single-element shingle set {""}, regardless of actual content.
+    # Their MinHash signatures become bit-identical, so every pair
+    # scores similarity 1.0 and every document after the first is
+    # silently treated as a near-duplicate and dropped -- pure silent
+    # data loss in a corpus-cleaning pipeline, with no crash, no
+    # warning, and no record that a collision occurred. Confirmed live:
+    # three genuinely unrelated real documents collapsed from 3 kept
+    # down to 1 with shingle_size=0.
+    if shingle_size <= 0:
+        raise ValueError(f"shingle_size must be positive, got {shingle_size}")
     kept: list[T] = []
     kept_signatures: list[tuple[int, ...]] = []
     for item in items:

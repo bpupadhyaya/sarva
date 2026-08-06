@@ -18406,3 +18406,63 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `dedup_near_duplicates`'s `shingle_size` -- the sibling parameter one over from `num_hashes` -- was likewise unvalidated, silently collapsing unrelated documents into "duplicates"
+
+Round 146. One round after fixing `run_ablation`'s `batch_size` (the
+sibling parameter one over from `record_every`), this round's sweep
+found the identical shape in `near_dedup.py`: `shingle_size` -- the
+sibling parameter one over from `num_hashes`, fixed in round 142 --
+was likewise never validated.
+
+`_shingles`' own `len(text) < size` guard is always `False` for `size
+<= 0`, so with `shingle_size=0` every comprehension iteration slices
+`text[i:i+0]`, which is always `""`. Every non-empty document in the
+corpus collapses to the identical single-element shingle set `{""}`,
+regardless of actual content. Their MinHash signatures become
+bit-identical, every pair scores similarity `1.0`, and every document
+after the first is silently treated as a near-duplicate of the first
+and dropped -- pure silent data loss in a corpus-cleaning pipeline,
+with no crash, no warning, and no record that a collision occurred.
+
+**Confirmed live**: three genuinely unrelated real documents (a fox
+sentence, a revenue sentence, a photosynthesis sentence) collapsed
+from 3 kept down to 1 with `shingle_size=0`.
+
+Not contrived: `shingle_size` is a plain public keyword argument on
+both real entry points a data-cleaning pipeline script calls directly
+-- exactly the kind of value a caller might compute programmatically
+(e.g. as a fraction of a short average-document length) rather than
+always supplying the literal default of `5`. `num_hashes` got a
+dedicated regression test in round 142; `shingle_size` had none,
+confirming the gap was simply never exercised.
+
+**Fixed** by adding the same `<= 0` positivity check `num_hashes`
+already has, at the same single choke point both public entry points
+funnel through.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError`.
+
+**1 new test, 835 -> 836 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update, matching
+established precedent for this module.
+
+**One hundred one of the last one hundred two rounds (46-67, 70-146)
+have found and shipped real fixes; rounds 68-69 remain the only two
+clean sweeps.** Six rounds in a row now (141-146) have found the
+identical "one function, two numeric parameters, only one got the
+positivity check" shape -- always the sibling parameter directly
+adjacent to an already-fixed one. Worth a standing practice: whenever
+this shape is found and fixed, check every OTHER numeric parameter in
+the same function signature in the same pass, not just the one the
+sweep happened to find.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

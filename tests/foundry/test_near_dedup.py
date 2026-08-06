@@ -129,3 +129,22 @@ def test_dedup_near_duplicates_rejects_a_non_positive_num_hashes():
         dedup_near_duplicates([_DOC_A, _DOC_B], num_hashes=0)
     with pytest.raises(ValueError, match="num_hashes"):
         dedup_near_duplicates([_DOC_A, _DOC_B], num_hashes=-1)
+
+
+def test_dedup_near_duplicates_rejects_a_non_positive_shingle_size():
+    # A real bug found by a later fresh-eyes sweep, the sibling
+    # parameter one over from num_hashes above, in this exact function:
+    # shingle_size was likewise never validated. _shingles' own `len(
+    # text) < size` guard is always False for size <= 0, so every
+    # comprehension iteration used to slice `text[i:i+0]`, which is
+    # always "" -- every non-empty document in the corpus collapsed to
+    # the identical single-element shingle set {""}, regardless of
+    # actual content, so every document after the first was silently
+    # treated as a near-duplicate and dropped with no crash, no
+    # warning, and no record that a collision occurred.
+    import pytest
+
+    with pytest.raises(ValueError, match="shingle_size"):
+        dedup_near_duplicates([_DOC_A, _DOC_C], shingle_size=0)
+    with pytest.raises(ValueError, match="shingle_size"):
+        dedup_near_duplicates([_DOC_A, _DOC_C], shingle_size=-1)
