@@ -17865,3 +17865,76 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `_whisper_model`'s own `lru_cache` had the identical unsynchronized check-then-act race already found and fixed twice elsewhere in this project
+
+Round 137. Applying the identical lens that caught round 128's
+`_probe_ollama` bug and round 130's `FoundryProvider` checkpoint-cache
+bug, this round's sweep found the third instance of the same shape:
+`core/sarva/audio.py`'s `_whisper_model`, a plain `functools.lru_cache`.
+`lru_cache` only holds its own internal lock around the cache dict's
+read/insert bookkeeping -- it releases that lock *before* calling the
+wrapped function itself, so two threads racing a cold cache both see a
+miss and both construct a real, expensive `WhisperModel` (a weight
+download on first use, then real CTranslate2 model initialization).
+
+`AudioToTextDegrader.degrade()` calls `transcribe()` via `asyncio.
+to_thread`, so two concurrent voice-message transcriptions -- two
+users, or two tabs of the same user, against a freshly-started `sarva
+serve` process, both defaulting to `model_size="tiny"` -- genuinely
+race this on real OS threads. Nothing adversarial required; the exact
+"two concurrent users on a long-running server" scenario this journal
+has used to justify nearly every other cache/lock fix in this project.
+Round 130's own journal entry explicitly named this as worth auditing
+directly rather than waiting to rediscover a third time -- it hadn't
+been, until now.
+
+**Confirmed live**: 8 threads synchronized via a `threading.Barrier` to
+hit a cold cache at the same instant produced 8 real `WhisperModel`
+constructions, not the 1 this cache exists to guarantee -- defeating
+the exact "reloading it every call would be a real performance
+regression" guarantee this module's own docstring names.
+
+**Fixed** with a manual `dict` + `threading.Lock` around the whole
+check-construct-store span (the same shape as the round 128/130
+fixes), preserving the original `maxsize=4` LRU-eviction behavior via
+an `OrderedDict` rather than switching to an unbounded cache --
+`functools.lru_cache` itself can't be made to hold its lock across the
+wrapped call, so this had to become a hand-written cache rather than a
+decorator tweak.
+
+**Verified live**: the identical 8-concurrent-callers repro now
+measures exactly 1 real construction.
+
+**Verified by reverting** and confirming the original `lru_cache`-based
+code reproduces the same race shape (8 real constructions) once the
+fake model's own init is given a realistic amount of latency to widen
+the race window -- the checked-in test itself fails structurally
+against the reverted code (the manual cache's own internal attribute no
+longer exists), so this additional targeted repro was run separately to
+confirm the actual race, not just the structural change.
+
+**1 new test, 825 -> 826 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/packaging.md` gained a new
+paragraph directly after the Windows-TTS chapter, in this module's own
+ongoing per-bug narrative.
+
+**Ninety-two of the last ninety-three rounds (46-67, 70-137) have
+found and shipped real fixes; rounds 68-69 remain the only two clean
+sweeps.** Three separate module-level caches across two different
+subsystems (`core/sarva/runtime.py`, `core/sarva/providers/
+foundry_provider.py`, `core/sarva/audio.py`) have now independently
+needed the exact same "wrap the whole check-then-act span in a lock"
+fix. No further module-level caches of this shape (keyed lookup,
+populated by expensive I/O/construction, no lock) are currently known
+in the codebase, but this remains the single highest-yield lens to
+apply first whenever a new one is introduced.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

@@ -1318,6 +1318,37 @@ runner running `sarva.audio.synthesize()` for real, the same
 discipline `release-bundle.yml`'s own Windows matrix leg already
 established for the desktop bundle.
 
+**`_whisper_model`'s own `lru_cache`, named above as the fix for
+redundant reloads, turned out to have an unsynchronized check-then-act
+race — the identical shape already found and fixed twice elsewhere in
+this project (`_probe_ollama`, round 128; `FoundryProvider`'s
+`load_checkpoint_bundle`, round 130).** A much later fresh-eyes sweep
+found that `functools.lru_cache` only holds its own internal lock
+around the cache dict's read/insert bookkeeping — it releases that lock
+*before* calling the wrapped function itself, so two threads racing a
+cold cache both see a miss and both construct a real, expensive
+`WhisperModel` (a weight download on first use, then real CTranslate2
+model initialization). `AudioToTextDegrader.degrade()` calls
+`transcribe()` via `asyncio.to_thread`, so two concurrent voice-message
+transcriptions — two users, or two tabs of the same user, against a
+freshly-started `sarva serve` process, both defaulting to
+`model_size="tiny"` — genuinely race this on real OS threads; nothing
+adversarial required. Confirmed live: 8 threads synchronized via a
+`threading.Barrier` to hit a cold cache at the same instant produced 8
+real `WhisperModel` constructions, not the 1 this cache exists to
+guarantee — defeating the exact "reloading it every call would be a
+real performance regression" guarantee this module's own docstring
+names. Fixed with a manual `dict` + `threading.Lock` around the whole
+check-construct-store span (the same shape as the round 128/130
+fixes), preserving the original `maxsize=4` LRU-eviction behavior via
+an `OrderedDict` rather than switching to an unbounded cache. Verified
+live the identical 8-concurrent-callers repro now measures exactly 1
+real construction. Verified by reverting and confirming the original
+`lru_cache`-based code reproduces the same race shape (8 real
+constructions) once the fake model's own init is given a realistic
+amount of latency to widen the race window. 1 new test, 825 → 826
+Python tests.
+
 ## CLI conformance tests
 
 Until now, only `doctor` had `typer.testing.CliRunner` coverage

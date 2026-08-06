@@ -71,7 +71,8 @@ import platform
 import shutil
 import subprocess
 import tempfile
-from functools import lru_cache
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 DEFAULT_MACOS_VOICE = "Samantha"
@@ -266,11 +267,46 @@ def stt_extra_installed() -> bool:
     return True
 
 
-@lru_cache(maxsize=4)
-def _whisper_model(model_size: str):
-    from faster_whisper import WhisperModel
+# A real bug found by a fresh-eyes sweep, applying the identical lens
+# already used twice over on this project's other module-level caches
+# (_probe_ollama, round 128; FoundryProvider's load_checkpoint_bundle,
+# round 130): functools.lru_cache (used here previously) only holds its
+# own internal lock around the cache dict's read/insert bookkeeping --
+# it releases that lock BEFORE calling the wrapped function itself, so
+# two threads racing a cold cache both see a miss and both construct a
+# real WhisperModel (an expensive load: a weight download on first use,
+# then real CTranslate2 model initialization). AudioToTextDegrader.
+# degrade() calls transcribe() via asyncio.to_thread, so two concurrent
+# voice-message transcriptions -- two users, or two tabs of the same
+# user, against a freshly-started `sarva serve` process, both defaulting
+# to model_size="tiny" -- genuinely race this on real OS threads.
+# Confirmed live: 8 threads synchronized to hit a cold cache at the same
+# instant produced 8 real WhisperModel constructions, not the 1 this
+# cache exists to guarantee -- defeating the exact "reloading it every
+# call would be a real performance regression" guarantee this module's
+# own docstring names. Fixed with a manual dict + threading.Lock around
+# the whole check-construct-store span (the same shape as the round
+# 128/130 fixes), preserving lru_cache's original maxsize=4 LRU-eviction
+# behavior via an OrderedDict rather than an unbounded dict.
+_whisper_model_lock = threading.Lock()
+_whisper_model_cache: OrderedDict[str, object] = OrderedDict()
+_WHISPER_MODEL_CACHE_MAXSIZE = 4
 
-    return WhisperModel(model_size, device="cpu", compute_type="int8")
+
+def _whisper_model(model_size: str):
+    with _whisper_model_lock:
+        cached = _whisper_model_cache.get(model_size)
+        if cached is not None:
+            _whisper_model_cache.move_to_end(model_size)
+            return cached
+
+        from faster_whisper import WhisperModel
+
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        _whisper_model_cache[model_size] = model
+        if len(_whisper_model_cache) > _WHISPER_MODEL_CACHE_MAXSIZE:
+            _whisper_model_cache.popitem(last=False)
+        return model
 
 
 _DECODE_TIMEOUT_SECONDS = 30
@@ -375,7 +411,8 @@ def transcribe(audio_bytes: bytes, model_size: str = "tiny") -> str:
     docstring for the real, confirmed bug this closes. Only the risky
     native-decode step is isolated, not the (expensive to reload)
     whisper model itself, which stays cached in-process via
-    `_whisper_model`'s `lru_cache`.
+    `_whisper_model`'s own lock-guarded cache (see its own comment for
+    why this is no longer a plain `functools.lru_cache`).
 
     Raises `RuntimeError` if the decoded audio exceeds
     `_MAX_TRANSCRIBE_SECONDS` -- see this module's own comment just

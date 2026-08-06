@@ -79,6 +79,64 @@ def test_transcribe_raises_a_clear_error_without_the_extra():
         transcribe(b"irrelevant, never reached")
 
 
+def test_concurrent_cold_calls_never_construct_the_same_whisper_model_twice(monkeypatch):
+    # A real bug found by a fresh-eyes sweep, applying the identical lens
+    # already used twice over on this project's other module-level
+    # caches (_probe_ollama, round 128; FoundryProvider's
+    # load_checkpoint_bundle, round 130): _whisper_model used to be a
+    # plain functools.lru_cache, which only holds its own internal lock
+    # around the cache dict's read/insert bookkeeping -- it releases
+    # that lock BEFORE calling the wrapped function itself, so two
+    # threads racing a cold cache both see a miss and both construct a
+    # real (expensive) WhisperModel. AudioToTextDegrader.degrade() calls
+    # transcribe() via asyncio.to_thread, so two concurrent voice-message
+    # transcriptions genuinely race this on real OS threads. Proven here
+    # with real OS threads racing _whisper_model() against the SAME
+    # model_size, a threading.Barrier forcing them through the
+    # read-check at the same instant, and a fake WhisperModel standing
+    # in for the real (network-downloading) one.
+    import threading
+    import time
+
+    import sarva.audio as audio_module
+
+    monkeypatch.setattr(
+        audio_module, "_whisper_model_cache", type(audio_module._whisper_model_cache)()
+    )
+
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+
+    class _FakeWhisperModel:
+        def __init__(self, model_size, **kwargs):
+            with calls_lock:
+                calls["n"] += 1
+            time.sleep(0.05)  # widen the race window, simulating real model-init latency
+
+    fake_module = type(sys)("faster_whisper")
+    fake_module.WhisperModel = _FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    n_callers = 8
+    barrier = threading.Barrier(n_callers)
+
+    def call_one():
+        barrier.wait()
+        audio_module._whisper_model("tiny")
+
+    threads = [threading.Thread(target=call_one) for _ in range(n_callers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert calls["n"] == 1, (
+        f"expected exactly 1 real WhisperModel construction for {n_callers} concurrent "
+        f"callers against one cold, unchanged model_size, got {calls['n']} -- the cache's "
+        "own guarantee of constructing each model once was defeated by a race"
+    )
+
+
 def test_synthesize_raises_a_clear_runtime_error_with_no_engine(monkeypatch):
     import sarva.audio as audio_module
 
