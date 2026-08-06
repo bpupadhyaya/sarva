@@ -325,6 +325,35 @@ class OllamaProvider:
                             retryable=True,
                         )
                         return
+                    # A real bug found by a fresh-eyes sweep, one shape the
+                    # neighboring JSONDecodeError branch above doesn't
+                    # cover: Ollama's real wire protocol has a third line
+                    # shape, `{"error": "..."}`, sent when generation fails
+                    # *after* streaming has already started (context
+                    # canceled, GPU OOM, a crashed backend) -- too late for
+                    # the `response.status_code >= 400` pre-flight check
+                    # above to ever see it, since the 200 response line and
+                    # some real content may already have streamed. This
+                    # loop only ever inspected `"message"`/`"done"`, so an
+                    # error line was silently ignored: the `async for` just
+                    # fell through, `done_reason` stayed defaulted to
+                    # END_TURN, and `prompt_eval_count`/`eval_count` stayed
+                    # 0 -- every signal said "normal, complete, successful
+                    # turn." Confirmed live with a mocked transport
+                    # streaming real content then an error line: a
+                    # genuinely truncated, wrong answer came back as a
+                    # clean DoneEvent with stop_reason=END_TURN and zero
+                    # usage, no StreamErrorEvent at all -- AgentLoop treats
+                    # END_TURN as success, so the truncated text gets
+                    # persisted to the transcript and shown to the user
+                    # with no error and no retry offered.
+                    if chunk.get("error"):
+                        yield StreamErrorEvent(
+                            code="provider",
+                            detail=f"Ollama reported an error mid-stream: {chunk['error']}",
+                            retryable=True,
+                        )
+                        return
                     msg = chunk.get("message", {})
                     if msg.get("thinking"):
                         thinking_acc += msg["thinking"]

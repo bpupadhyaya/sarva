@@ -19324,3 +19324,75 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A third real line shape in the Ollama streaming loop — a mid-stream `{"error": ...}` chunk was silently ignored, reported as a clean successful completion
+
+Round 160. This round's sweep found `core/sarva/providers/
+ollama_provider.py`'s `OllamaProvider.generate()`: the NDJSON streaming
+loop (`async for line in response.aiter_lines()`) only ever inspected
+`chunk["message"]` and `chunk["done"]`. Ollama's real wire protocol has
+a third line shape -- a JSON line carrying a top-level `"error"` key,
+sent when generation fails *after* streaming has already started
+(context canceled, GPU OOM, a crashed backend). This is genuinely
+different from the two failure modes this loop already handles: too
+late for the `status_code >= 400` pre-flight check (the 200 status and
+some real content may already have streamed), and the JSON itself is
+perfectly well-formed, so the existing `JSONDecodeError` handler right
+next to this gap never fires either.
+
+The loop silently ignored an error line: execution fell through to the
+post-loop code with `done_reason` still defaulted to `END_TURN` and
+`prompt_eval_count`/`eval_count` still `0` -- every signal saying
+"normal, complete, successful turn" for a call that actually failed
+mid-generation.
+
+**Confirmed live**: `httpx.MockTransport` streaming real content ("The
+capital of") followed by an error line (`{"error": "context
+canceled"}`) produced a clean `DoneEvent` with `stop_reason=END_TURN`
+and zero `Usage`, no `StreamErrorEvent` anywhere. `AgentLoop` treats
+`END_TURN` as success -- a genuinely truncated, wrong answer would get
+persisted straight to the transcript and shown to the user with no
+error and no retry offered, in the project's own "free & private"
+zero-config default tier.
+
+**Fixed** by checking `chunk.get("error")` right after the JSON parse
+succeeds, mirroring the neighboring `JSONDecodeError` branch: an error
+line yields a `StreamErrorEvent` (`retryable=True`, matching this
+loop's existing convention) and returns.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: a `DoneEvent` where a `StreamErrorEvent`
+was expected.
+
+**1 new test, 853 -> 854 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/providers.md` gained a new
+subsection directly after the malformed-NDJSON-line fix, in the same
+Ollama streaming-loop per-bug narrative.
+
+**One hundred fifteen of the last one hundred sixteen rounds (46-67,
+70-160) have found and shipped real fixes; rounds 68-69 remain the
+only two clean sweeps.** This is the third real bug found in this
+exact `generate()` streaming loop (malformed-NDJSON-line, the
+text/tool-call interleaving-order bug, now this) -- the Ollama adapter,
+being the one hand-rolled-NDJSON adapter with no SDK to lean on for
+free error handling, keeps being the one place these gaps surface.
+
+**A secondary lead surfaced by this round's sweep, deferred**:
+`TransformerConfig` in `foundry/sarva_foundry/model/transformer.py`
+(`dim`, `vocab_size`, and related fields) is never range/sign-validated
+in `__post_init__`, reachable via `FoundryProvider`'s untrusted
+`config.json` load path -- a legitimate, on-brand candidate for a
+future round, deprioritized this round in favor of the Ollama bug's
+broader reach (every Ollama chat turn goes through this exact loop, no
+special opt-in or corrupted-file precondition required). The
+already-known `bpe.py` duplicate-`special_tokens` off-by-one remains
+unreachable -- no caller in the repo passes duplicates.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

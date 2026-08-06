@@ -318,6 +318,43 @@ tests (the same hermetic-httpx discipline `test_fetch.py` already
 established) cover both the streaming happy path and this regression.
 2 new tests, 543 → 545 Python tests.
 
+### A third real line shape in the same streaming loop — Ollama's mid-stream `{"error": ...}` chunk was silently ignored
+
+A much later fresh-eyes sweep found a third line shape this same
+`async for line in response.aiter_lines()` loop never checked for,
+sitting right alongside the malformed-NDJSON-line fix above. Ollama's
+real wire protocol sends a JSON line carrying a top-level `"error"` key
+when generation fails *after* streaming has already started — a
+context-canceled request, a GPU OOM, a crashed backend — genuinely
+different from a malformed *response* (the `status_code >= 400`
+pre-flight check above can never see this: the 200 status and some real
+content may already have streamed by the time the engine fails) and
+different from a malformed *line* (the JSON itself is perfectly
+well-formed). The loop only ever inspected `chunk["message"]` and
+`chunk["done"]`, so an error line was silently ignored: execution fell
+through to the post-loop code with `done_reason` still defaulted to
+`END_TURN` and `prompt_eval_count`/`eval_count` still `0` — every
+signal saying "normal, complete, successful turn."
+
+Confirmed live with `httpx.MockTransport` streaming real content
+("The capital of") followed by an error line (`{"error": "context
+canceled"}`): the result was a clean `DoneEvent` with
+`stop_reason=END_TURN` and zero `Usage`, no `StreamErrorEvent`
+anywhere. `AgentLoop` treats `END_TURN` as success — a genuinely
+truncated, wrong answer would get persisted straight to the transcript
+and shown to the user with no error and no retry offered, for the
+project's own "free & private" zero-config default tier, the one most
+likely to run unattended with no API-cost pressure prompting a user to
+notice something went wrong.
+
+Fixed by checking `chunk.get("error")` right after the JSON parse
+succeeds, mirroring the neighboring `JSONDecodeError` branch: an error
+line yields a `StreamErrorEvent` (`retryable=True`, matching this
+loop's existing convention) and returns, instead of falling through.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape — a `DoneEvent` where a `StreamErrorEvent` was
+expected. 1 new test, 853 → 854 Python tests.
+
 ### A malformed Anthropic SDK response had the identical gap — found by reasoning through the SDK's own exception hierarchy, no API key needed
 
 `AnthropicProvider.generate()`'s three `except` clauses

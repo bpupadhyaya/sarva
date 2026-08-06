@@ -260,6 +260,34 @@ async def test_generate_yields_a_clean_stream_error_on_a_malformed_ndjson_line()
 
 
 @pytest.mark.asyncio
+async def test_generate_yields_a_clean_stream_error_on_a_mid_stream_error_chunk():
+    # A real bug found by a fresh-eyes sweep, one line shape the
+    # neighboring malformed-NDJSON-line test above doesn't cover:
+    # Ollama's real wire protocol sends `{"error": "..."}` when
+    # generation fails *after* streaming has already started (context
+    # canceled, GPU OOM, a crashed backend) -- too late for the
+    # `status_code >= 400` pre-flight check to ever see it. The loop only
+    # ever inspected `"message"`/`"done"`, so this line was silently
+    # ignored: the truncated partial text came back as a clean DoneEvent
+    # with stop_reason=END_TURN and zero usage, no StreamErrorEvent at
+    # all -- AgentLoop treats END_TURN as success, so a genuinely wrong,
+    # truncated answer would get persisted to the transcript and shown to
+    # the user as if it completed normally.
+    body = (
+        b'{"message": {"content": "The capital of"}, "done": false}\n'
+        b'{"error": "context canceled"}\n'
+    )
+
+    events = [e async for e in _provider(body).generate(_req())]
+
+    assert events[0] == TextDeltaEvent(text="The capital of")
+    assert isinstance(events[-1], StreamErrorEvent)
+    assert events[-1].retryable is True
+    assert "context canceled" in events[-1].detail
+    assert not any(isinstance(e, DoneEvent) for e in events)
+
+
+@pytest.mark.asyncio
 async def test_interleaved_text_and_tool_calls_keep_their_chronological_order():
     # A real bug found by a fresh-eyes sweep, the identical gap already
     # found and fixed in google_provider.py, just never propagated here:
