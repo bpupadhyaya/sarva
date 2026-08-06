@@ -755,6 +755,29 @@ real: reverted the fix and watched it fail with the exact
 reward-hacking result (`1.0` for a wrong decimal answer) before
 re-applying.
 
+**An eighth real reward-hacking exploit, found by a much later
+fresh-eyes sweep: `answer_reward` never checked for an opening
+`<think>` at all, only the closing `</think>` count.** `format_reward`
+requires exactly one of *each* tag, but `answer_reward` only ever
+required exactly one `</think>` before scanning whatever followed it —
+a completion with a bare `</think>` and zero real `<think>` blocks (no
+reasoning attempted whatsoever) still passed that single check.
+Confirmed directly, not hypothetical: `answer_reward("</think>The
+answer is 45", "45")` returned `1.0` — full 0.7-weighted answer credit
+for a completion `format_reward` correctly scores `0.0`, so
+`reasoning_reward` came out to `0.7`, dramatically higher than an
+honest, entirely unformatted attempt (`0.0`) and trivially discoverable
+by GRPO's own sampling/optimization loop, the same exploitable shortcut
+every prior bug in this function closed. Fixed by additionally
+requiring exactly one `<think>` and that it appear *before* the
+`</think>` — closing a related variant too, where the single `<think>`
+tag exists but appears after the `</think>` it's supposed to open,
+which passes a bare `count == 1` check on both tags but is equally
+degenerate. Verified the new test is real: reverted the fix and
+watched it fail with the exact reward-hacking result (`1.0` for a
+completion with no reasoning) before re-applying. 1 new test, 866 →
+867 Python tests.
+
 **The already-published 31% → 56% numbers below were re-checked
 against both fixes above, not left standing on faith:** re-ran
 `examples/17_reasoning_token_training.py` (same fixed seed,

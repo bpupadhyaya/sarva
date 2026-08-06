@@ -98,6 +98,24 @@ def test_answer_reward_rejects_a_repeated_closing_tag_even_if_the_answer_appears
     assert answer_reward(completion, "5") == 0.0
 
 
+def test_answer_reward_requires_a_real_opening_think_tag_not_just_a_bare_closing_tag():
+    # An eighth real reward-hacking exploit, found by a much later
+    # fresh-eyes sweep: this function only ever checked the </think>
+    # count, never that a real <think> block existed at all.
+    # format_reward requires exactly one of EACH tag; answer_reward's
+    # own weaker check let a completion with a bare "</think>" and zero
+    # reasoning attempted still score full 1.0 answer credit -- 0.7 of
+    # reasoning_reward's max, dramatically higher than an honest,
+    # entirely unformatted attempt (0.0), and trivially discoverable by
+    # GRPO's own sampling loop.
+    assert answer_reward("</think>The answer is 45", "45") == 0.0
+    assert reasoning_reward("</think>The answer is 45", "45") == 0.0
+    # The related variant: a single <think> present but appearing AFTER
+    # the </think> it's supposed to open -- passes a bare count == 1
+    # check on both tags but is equally degenerate.
+    assert answer_reward("</think>45<think>", "45") == 0.0
+
+
 def test_answer_reward_does_not_reward_a_wrong_answer_containing_the_right_digit():
     # A third real reward-hacking exploit, found the same way
     # sarva.eval.harness.contains_match's identical bug was: a raw

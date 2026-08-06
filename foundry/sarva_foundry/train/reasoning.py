@@ -102,8 +102,31 @@ def answer_reward(completion_text: str, expected_answer: str) -> float:
     function scans with extra copies of the target digit, inflating the
     larger 0.7-weighted answer reward without genuinely answering
     correctly. A completion with more than one `</think>` is treated as
-    malformed by both reward functions consistently, not just one."""
-    if completion_text.count(THINK_END) != 1:
+    malformed by both reward functions consistently, not just one.
+
+    **An eighth real reward-hacking exploit, found by a much later
+    fresh-eyes sweep: this function never checked for an opening
+    `<think>` at all, only the closing `</think>` count above.**
+    `format_reward` requires exactly one of EACH tag, but this function
+    only ever required exactly one `</think>` before scanning whatever
+    follows it -- a completion with a bare `</think>` and zero real
+    `<think>` blocks (no reasoning attempted at all) still passed that
+    single check. Confirmed directly: `answer_reward("</think>The
+    answer is 45", "45")` returned `1.0` -- full 0.7-weighted answer
+    credit for a completion that never even attempted the reasoning
+    format `format_reward` correctly scores `0.0`, so
+    `reasoning_reward` came out to `0.7`, dramatically higher than an
+    honest, entirely unformatted attempt (`0.0`) and trivially
+    discoverable by GRPO's own sampling/optimization loop, the exact
+    same class of exploitable shortcut every prior bug in this function
+    closed. A related variant -- the single `<think>` present but
+    appearing AFTER the `</think>` it's supposed to open (e.g.
+    `"</think>45<think>"`) -- passes a bare `count == 1` check on both
+    tags but is equally degenerate, so this fix also checks ordering,
+    not just presence."""
+    if completion_text.count(THINK_START) != 1 or completion_text.count(THINK_END) != 1:
+        return 0.0
+    if completion_text.index(THINK_START) > completion_text.index(THINK_END):
         return 0.0
     answer_segment = completion_text.split(THINK_END, 1)[1]
     # A fourth real reward-hacking exploit, an independent instance of

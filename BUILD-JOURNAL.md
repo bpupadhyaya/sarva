@@ -19963,3 +19963,60 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `answer_reward` never checked for an opening `<think>` tag — an eighth real reward-hacking exploit in the same function that already has seven documented fixes of this exact bug class
+
+Round 169. This round's sweep found `foundry/sarva_foundry/train/
+reasoning.py`'s `answer_reward()` -- already fixed seven times over
+for independently-discovered reward-hacking exploits -- had one more:
+it only ever checked `completion_text.count(THINK_END) != 1`, never
+that a real `<think>` block existed at all. `format_reward()` requires
+exactly one of *each* tag; `answer_reward()`'s own weaker check let a
+completion with a bare `</think>` and zero real reasoning attempted
+still pass through to the answer-scanning logic.
+
+**Confirmed live**: `answer_reward("</think>The answer is 45", "45")`
+returned `1.0` -- full 0.7-weighted answer credit for a completion
+`format_reward` correctly scores `0.0` -- so `reasoning_reward` came
+out to `0.7`, dramatically higher than an honest, entirely unformatted
+attempt (`0.0`) and trivially discoverable by GRPO's own sampling/
+optimization loop, the exact same class of exploitable shortcut every
+one of the seven prior bugs in this function closed. `reasoning_reward`
+and `answer_reward` are genuinely reachable public API (exported from
+`sarva_foundry/train/__init__.py`, consumed by `examples/17_
+reasoning_token_training.py`'s real GRPO loop), not dead/example-only
+code.
+
+**Fixed** by additionally requiring exactly one `<think>` and that it
+appear *before* the `</think>` -- the ordering check also closes a
+related variant where the single `<think>` tag exists but appears
+*after* the `</think>` it's supposed to open (e.g. `"</think>45
+<think>"`), which passes a bare `count == 1` check on both tags but is
+equally degenerate.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `1.0` where `0.0` was expected, for a
+completion with zero real reasoning.
+
+**1 new test, 866 -> 867 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/training.md` gained a
+new paragraph directly continuing the existing seven-exploit per-bug
+narrative for this exact function.
+
+**One hundred twenty-four of the last one hundred twenty-five rounds
+(46-67, 70-169) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** This is the eighth independently-discovered
+reward-hacking exploit in one function -- a strong reminder that a
+verifiable-reward function is itself an adversarial surface GRPO's own
+optimization actively probes, not a one-time correctness check to get
+right and move on from. The already-known `bpe.py`/`provenance.py`
+leads remain confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
