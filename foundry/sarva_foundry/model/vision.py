@@ -56,6 +56,25 @@ class VisionEncoderConfig:
     norm_eps: float = 1e-6
 
     def __post_init__(self) -> None:
+        # A real bug found by a much later fresh-eyes sweep, on the one
+        # field every prior sweep of this exact __post_init__ (five
+        # rounds' worth, one per sibling field below) never got to:
+        # n_channels feeds straight into PatchEmbed's nn.Conv2d as
+        # in_channels, but was never validated for being positive.
+        # n_channels=-3 constructs cleanly and only surfaces as a
+        # confusing raw RuntimeError ("negative dimension") deep inside
+        # nn.Conv2d's weight allocation once PatchEmbed is actually
+        # built -- the identical failure shape every sibling fix below
+        # already closed for its own field. n_channels=0 is worse:
+        # PyTorch's Conv2d silently "succeeds" with a zero-element
+        # weight tensor, producing an output with 0 channels instead of
+        # `dim` channels, which then crashes several layers deeper
+        # inside RMSNorm.forward with an unrelated tensor-size-mismatch
+        # RuntimeError that names neither n_channels nor anything a
+        # caller could connect back to the real root cause. Confirmed
+        # live both ways.
+        if self.n_channels <= 0:
+            raise ValueError(f"n_channels must be positive, got {self.n_channels}")
         # A real bug found by a later fresh-eyes sweep, on the very
         # class this __post_init__ was already revisited twice for
         # (n_layers, n_kv_heads, below): image_size/patch_size were only

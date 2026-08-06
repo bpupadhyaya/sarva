@@ -117,6 +117,27 @@ def test_vision_encoder_config_rejects_non_positive_dim():
         _tiny_vision_config(dim=0)
 
 
+def test_vision_encoder_config_rejects_non_positive_n_channels():
+    # A real bug found by a much later fresh-eyes sweep, on the one
+    # field every prior sweep of this exact __post_init__ (five rounds'
+    # worth, one per sibling field) never got to: n_channels feeds
+    # straight into PatchEmbed's nn.Conv2d as in_channels, but was never
+    # validated for being positive. n_channels=-3 used to construct
+    # cleanly and only surface as a confusing raw RuntimeError deep
+    # inside nn.Conv2d's weight allocation once PatchEmbed was actually
+    # built; n_channels=0 was worse -- PyTorch's Conv2d silently
+    # "succeeds" with a zero-element weight tensor, producing an output
+    # with 0 channels instead of `dim` channels, which then crashed
+    # several layers deeper inside RMSNorm.forward with an unrelated
+    # tensor-size-mismatch error.
+    import pytest
+
+    with pytest.raises(ValueError, match="n_channels"):
+        _tiny_vision_config(n_channels=0)
+    with pytest.raises(ValueError, match="n_channels"):
+        _tiny_vision_config(n_channels=-3)
+
+
 def test_n_patches_matches_the_grid():
     config = _tiny_vision_config(image_size=32, patch_size=8)
     assert config.patches_per_side == 4

@@ -19757,3 +19757,64 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `VisionEncoderConfig.__post_init__` never validated `n_channels` — the one sibling field five prior rounds of this exact class's fixes never got to
+
+Round 166. This round's sweep found `foundry/sarva_foundry/model/
+vision.py`'s `VisionEncoderConfig.__post_init__` -- already revisited
+across five prior rounds for `image_size`/`patch_size`/`n_heads`/
+`dim`/`n_layers`/`n_kv_heads` -- still had one genuinely unchecked
+field: `n_channels`, declared first among the dataclass fields but
+never referenced anywhere in `__post_init__`. It flows unchecked
+straight into `PatchEmbed.__init__`'s `nn.Conv2d(config.n_channels,
+config.dim, ...)` as `in_channels`.
+
+**Confirmed live**: `VisionEncoderConfig(n_channels=-3, ...)` constructs
+with no error; building `PatchEmbed`/`VisionEncoder` from it then
+raises a raw, implementation-leaking `RuntimeError: Trying to create
+tensor with negative dimension -3: [32, -3, 4, 4]` deep inside
+`nn.Conv2d`'s weight allocation -- the exact "confusing raw
+RuntimeError instead of a clean ValueError" shape every one of this
+class's five sibling-field fixes already closed. `n_channels=0` is
+worse: it constructs cleanly, `PatchEmbed` builds cleanly (with a
+PyTorch `UserWarning: Initializing zero-element tensors is a no-op`),
+and produces an output with 0 channels instead of `dim` channels,
+which then crashes several layers deeper inside `RMSNorm.forward` with
+an unrelated tensor-size-mismatch `RuntimeError` that names neither
+`n_channels` nor anything a caller could connect back to the real root
+cause.
+
+**Fixed** by adding `if self.n_channels <= 0: raise ValueError(...)` at
+the top of `__post_init__`, matching this class's own established
+clean-`ValueError`-at-construction-time convention exactly.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ValueError` for both
+`n_channels=0` and `n_channels=-3`.
+
+**1 new test, 861 -> 862 Python tests, all passing, `ruff
+check`/`format --check` clean.** No `docs/*.md` update this round --
+`VisionEncoderConfig`'s own five prior validation fixes were never
+documented in `docs/foundry/transformer.md` either, matching the
+established foundry-internals-only config-validation precedent (rounds
+133-140/161).
+
+**One hundred twenty-one of the last one hundred twenty-two rounds
+(46-67, 70-166) have found and shipped real fixes; rounds 68-69 remain
+the only two clean sweeps.** `VisionEncoderConfig` now has all seven of
+its structural fields validated -- the same lesson round 161 already
+drew for its sibling `TransformerConfig` applies here too: "no further
+'this class is done' claim should be treated as load-bearing without a
+fresh field-by-field read of the actual `__post_init__` body." The
+two previously-flagged leads (`bpe.py`'s duplicate-`special_tokens`
+off-by-one, `provenance.py`'s empty-manifest inconsistency) remain
+confirmed unreachable.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
