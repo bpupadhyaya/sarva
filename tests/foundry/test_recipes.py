@@ -101,6 +101,42 @@ def test_compute_estimate_uses_the_standard_6nd_flops_formula_exactly():
     assert estimate.estimated_cost_usd == expected_hours * 2.0
 
 
+def test_compute_estimate_rejects_non_positive_flops_per_second_or_dollars_per_hour():
+    # A real bug found by a fresh-eyes sweep, the identical "unvalidated
+    # numeric parameter used as a divisor" shape found repeatedly
+    # elsewhere in this package: neither caller-supplied parameter was
+    # ever validated. flops_per_second=0.0 (a plausible "unmeasured/
+    # unavailable" sentinel from an upstream benchmark pipeline) used to
+    # raise a raw ZeroDivisionError; a negative flops_per_second (a
+    # plausible sign-flip bug upstream) used to silently produce a
+    # negative gpu_hours/estimated_cost_usd instead of crashing.
+    # dollars_per_hour is only ever a multiplier here, so it can't
+    # divide by zero, but a non-positive value is equally nonsensical
+    # for a real market price and produced the same silent-garbage-
+    # output shape.
+    import pytest
+
+    recipe = Recipe(
+        name="toy",
+        description="",
+        model=LAPTOP_125M.model,
+        total_tokens=1000,
+        batch_size=1,
+        learning_rate=1e-3,
+        warmup_steps=0,
+        runnable_here=True,
+    )
+
+    with pytest.raises(ValueError, match="flops_per_second"):
+        recipe.compute_estimate(flops_per_second=0.0, dollars_per_hour=2.0)
+    with pytest.raises(ValueError, match="flops_per_second"):
+        recipe.compute_estimate(flops_per_second=-1e15, dollars_per_hour=2.0)
+    with pytest.raises(ValueError, match="dollars_per_hour"):
+        recipe.compute_estimate(flops_per_second=1e15, dollars_per_hour=0.0)
+    with pytest.raises(ValueError, match="dollars_per_hour"):
+        recipe.compute_estimate(flops_per_second=1e15, dollars_per_hour=-2.0)
+
+
 def test_compute_estimate_scales_linearly_with_token_budget():
     small_budget = Recipe(
         name="a",

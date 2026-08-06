@@ -18466,3 +18466,65 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `Recipe.compute_estimate()` never validated either of its own caller-supplied hardware numbers -- one method down from the MoE `param_count()` fix in the same class
+
+Round 147. Applying the identical "unvalidated numeric parameter used
+as a divisor" lens that has now found seven straight bugs across
+rounds 141-146, this round's sweep found `foundry/sarva_foundry/
+recipes/recipe.py`'s `Recipe.compute_estimate()`: neither
+`flops_per_second` nor `dollars_per_hour` was ever validated, one
+method down from this same class's own earlier MoE `param_count()`
+fix.
+
+`flops_per_second=0.0` -- a plausible "unmeasured/unavailable" sentinel
+from an upstream benchmark pipeline, the exact kind of real
+measured-speed value `docs/foundry/recipes.md`'s own "real measured
+check" example script feeds into this call -- raised a raw,
+undocumented `ZeroDivisionError`. A negative `flops_per_second` (a
+plausible sign-flip bug upstream) didn't crash at all: it silently
+produced a negative `gpu_hours`/`estimated_cost_usd`. `dollars_per_hour`
+is only ever a multiplier here, so it can't divide by zero, but a
+non-positive value is equally nonsensical for a real market price and
+produces the identical silent-garbage-output shape.
+
+Not contrived: `Recipe.compute_estimate` is a genuinely public,
+documented API, used directly in `examples/16_foundry_recipes.py` and
+`docs/foundry/recipes.md`'s own "Build it yourself" snippet -- this
+module's own docstring is explicit that it never hardcodes GPU
+throughput/pricing and requires the caller to supply real, current
+numbers themselves, the same "no fabricated numbers" discipline used
+elsewhere in this codebase.
+
+**Confirmed live**: `flops_per_second=0.0` raised `ZeroDivisionError:
+float division by zero`; `flops_per_second=-1e15` silently produced
+`gpu_hours=-2.30e-10, estimated_cost_usd=-2.30e-10` instead of raising.
+
+**Fixed** by rejecting non-positive values for both parameters up
+front, matching this module's own "no fabricated numbers" discipline
+-- an invalid input should fail loudly, not silently produce an
+invalid dollar figure.
+
+**Verified by reverting** and watching the new test fail with the
+literal old bug's own shape: a raw `ZeroDivisionError` propagating
+uncaught.
+
+**1 new test, 836 -> 837 Python tests, all passing, `ruff
+check`/`format --check` clean.** `docs/foundry/recipes.md` gained a
+new subsection directly after the MoE `param_count()` fix, in this
+module's own ongoing per-bug narrative.
+
+**One hundred two of the last one hundred three rounds (46-67, 70-147)
+have found and shipped real fixes; rounds 68-69 remain the only two
+clean sweeps.** Seven rounds in a row (141-147) have now found the
+identical "unvalidated numeric parameter used as a range()/divisor"
+shape.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

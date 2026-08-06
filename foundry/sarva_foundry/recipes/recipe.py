@@ -119,6 +119,24 @@ class Recipe:
         both of which the caller must supply themselves (see module
         docstring for why this function doesn't assume any specific
         hardware or price)."""
+        # A real bug found by a fresh-eyes sweep, the identical
+        # "unvalidated numeric parameter used as a divisor" shape
+        # rounds 141-146 already found repeatedly elsewhere in this
+        # package: neither caller-supplied parameter was ever validated.
+        # flops_per_second=0.0 (a plausible "unmeasured/unavailable"
+        # sentinel from an upstream benchmark pipeline) raised a raw,
+        # undocumented ZeroDivisionError; a negative flops_per_second
+        # (a plausible sign-flip bug upstream) didn't crash at all --
+        # it silently produced a negative gpu_hours/estimated_cost_usd,
+        # an obviously-wrong but uncaught result. dollars_per_hour is
+        # only ever a multiplier here, so it can't divide by zero, but
+        # a non-positive value is equally nonsensical for a real market
+        # price and produces the identical silent-garbage-output shape.
+        # Confirmed live before this fix.
+        if flops_per_second <= 0:
+            raise ValueError(f"flops_per_second must be positive, got {flops_per_second}")
+        if dollars_per_hour <= 0:
+            raise ValueError(f"dollars_per_hour must be positive, got {dollars_per_hour}")
         flops = 6.0 * self.param_count() * self.total_tokens
         gpu_hours = flops / flops_per_second / 3600.0
         return ComputeEstimate(

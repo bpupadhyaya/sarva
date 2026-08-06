@@ -98,6 +98,28 @@ instantiated MoE model exactly. Verified by reverting and watching the
 new test fail with the literal old mismatch reproducing itself
 (`11340032 == 14297344` — false). 1 new test.
 
+### A much later fresh-eyes sweep found `compute_estimate()` never validated either of its own caller-supplied hardware numbers
+
+Neither `flops_per_second` nor `dollars_per_hour` was ever checked --
+the identical "unvalidated numeric parameter used as a divisor" shape
+already found repeatedly elsewhere in `sarva_foundry`, here one method
+down from the MoE fix above, in the same class. `flops_per_second=0.0`
+(a plausible "unmeasured/unavailable" sentinel from an upstream
+benchmark pipeline -- the exact kind of real measured-speed value the
+"real measured check" section above feeds into this call) raised a
+raw, undocumented `ZeroDivisionError`; a negative `flops_per_second` (a
+plausible sign-flip bug upstream) didn't crash at all -- it silently
+produced a negative `gpu_hours`/`estimated_cost_usd`. `dollars_per_hour`
+is only ever a multiplier here, so it can't divide by zero, but a
+non-positive value is equally nonsensical for a real market price and
+produced the same silent-garbage-output shape. Fixed by rejecting
+non-positive values for both parameters up front, matching this
+module's own "no fabricated numbers" discipline: an invalid input
+should fail loudly, not silently produce an invalid dollar figure.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape: a raw `ZeroDivisionError` propagating uncaught. 1
+new test.
+
 ## Build it yourself
 
 ```python
