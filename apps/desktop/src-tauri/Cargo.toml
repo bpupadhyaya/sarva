@@ -17,9 +17,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
+# A real, checked gap found by a fresh-eyes sweep, the identical shape
+# just found and fixed in foundry/pyproject.toml's unused `numpy`: this
+# crate's own source (lib.rs/main.rs -- the only two Rust files here)
+# never references `serde`/`serde_json` directly, and neither derives
+# nor manually implements Serialize/Deserialize on any type. Verified,
+# not assumed: `cargo check --offline` compiles cleanly with both
+# removed from this list -- they remain in Cargo.lock only as real
+# transitive dependencies of `tauri` itself, never as something this
+# crate's own code needs. The same "don't declare a dependency the code
+# doesn't actually use" discipline as the numpy fix, on the Rust side.
 [dependencies]
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"

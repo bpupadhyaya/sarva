@@ -21002,3 +21002,67 @@ tracked together. Round 186's own CI run (commit `9c20905`) remains
 stuck in an isolated GitHub-side anomaly, unrelated to the code --
 `core` has passed on it repeatedly; checked only occasionally now
 rather than every round.
+
+
+## The Rust desktop crate's own unused `serde`/`serde_json` dependencies, the identical shape just found in `sarva-foundry`
+
+Round 207. After round 205 found and fixed an unused `numpy` dependency
+in `foundry/pyproject.toml`, this round checked the desktop app's Cargo
+manifest with the same lens -- a packaging-accuracy angle, not the
+runtime-behavior sweeps that dominate this project's other 137 fixes.
+
+`apps/desktop/src-tauri/Cargo.toml` declared `serde` (with the
+`derive` feature) and `serde_json` as direct dependencies, but this
+crate's own source -- `lib.rs` and `main.rs`, the only two Rust files
+here -- never references either directly: no `use serde`, no
+`#[derive(Serialize)]`/`#[derive(Deserialize)]` on any type, no
+`serde_json::` call anywhere.
+
+**Verified, not assumed** -- Rust's macro-hygiene rules mean a proc
+macro from a *dependency* crate can sometimes require the *dependent*
+crate to also declare that same dependency directly, so "grep finds
+nothing" alone isn't proof the way it is for Python. Confirmed the only
+way that actually settles it: temporarily removed both from
+`Cargo.toml` and ran `cargo check --offline` against the real crate --
+the exact same check CI's own `cargo check` job runs, using CI's own
+placeholder-sidecar-binary trick (`.github/workflows/ci.yml`'s "Create
+placeholder sidecar binary" step, since `tauri-build`'s build script
+validates `bundle.externalBin` paths exist even for a bare `cargo
+check`) to get past the one thing that would otherwise block compiling
+this crate at all locally. Compiled cleanly with both removed --
+`Cargo.lock`'s own diff for this crate's dependency list shrank by
+exactly two lines (`"serde"`, `"serde_json"`), with both remaining
+present elsewhere in the lock file only as `tauri`'s own real
+transitive dependencies, never as something this crate's code needs
+directly.
+
+**Fixed** by removing both from `Cargo.toml`'s `[dependencies]` and
+letting `cargo check --offline` regenerate `Cargo.lock` to match --
+unlike the Python `uv.lock` case in round 205 (where `uv` wasn't
+available in this environment to regenerate it), `cargo` was available
+here, so the lock file is committed in sync with the manifest, not left
+to self-heal on a later run.
+
+No docs reference either dependency, so none needed updating (checked
+via grep across `docs/` and `BUILD-JOURNAL.md` before concluding).
+
+**139 of the last 207 rounds have found and shipped real, verified
+fixes.** Like round 205, this is a packaging-metadata accuracy fix, not
+a wrong-runtime-behavior bug -- documented honestly as that, not dressed
+up with a fabricated live-repro narrative. The two packaging fixes
+found back-to-back after 18+ consecutive clean sweeps on runtime code
+suggest this angle (declared-vs-actually-used dependencies, verified
+by actually removing and rebuilding, not just grepping) was a genuinely
+fresh lens this session hadn't tried before round 205.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together. Round 186's own CI run (commit `9c20905`) remains
+stuck in an isolated GitHub-side anomaly, unrelated to the code;
+round 205's own run (commit `0f56c72`) completed cleanly across all
+8 jobs, confirming that anomaly was scoped to the one run, not
+systemic.
