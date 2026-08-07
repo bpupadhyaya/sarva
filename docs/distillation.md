@@ -31,8 +31,8 @@ plain data, serialized as line-delimited JSON.
 `sarva.distill` produces plain records, not `sarva_foundry.train.sft.
 SFTExample` objects directly. This is intentional: `core`'s and
 `sarva_foundry`'s `pyproject.toml`s name completely disjoint dependency
-sets (`anthropic`/`openai`/`google-genai`/`fastapi`/... vs. `torch`/
-`numpy`), and neither package imports the other. A caller who wants to
+sets (`anthropic`/`openai`/`google-genai`/`fastapi`/... vs. `torch`), and
+neither package imports the other. A caller who wants to
 turn distilled data into foundry SFT training data writes the one line
 of glue themselves:
 
@@ -85,6 +85,24 @@ crash mid-write destroys every previously-saved distillation record,
 real generated data that cost real provider API calls to produce.
 Confirmed live before fixing it. Now uses the shared `sarva.atomic_write`
 helper, same as every other real call site this bug class was found at.
+
+## A stale dependency claim, found by a fresh-eyes sweep of the two packages' own `pyproject.toml`s
+
+`sarva_foundry`'s dependency list declared `numpy` as a hard requirement
+alongside `torch` — but nothing in the package (its own source, its
+tests, or the bundled `examples/`) ever actually imports `numpy`, calls
+`.numpy()` on a tensor, or uses `torch.from_numpy`, confirmed by an
+exhaustive grep across all three rather than assumed from how the
+package might have looked at an earlier point. `torch` itself tolerates
+`numpy` being absent entirely (its own numpy-interop code paths degrade
+gracefully when that import fails), so this was never even a load-bearing
+transitive need — just an unused line nobody had removed. Not a runtime
+bug (nothing behaves incorrectly because of it), but a real, checked
+inaccuracy in the one place a real installer reads to decide what to
+pull in — the same "don't state something that isn't true" discipline
+this project already applies to `models.yaml`'s pricing/capability
+claims. Removed from `foundry/pyproject.toml`'s `dependencies`; this
+chapter's own "torch/numpy" phrasing above is updated to match.
 
 ## Try it
 

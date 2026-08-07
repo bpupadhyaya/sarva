@@ -8,9 +8,21 @@ license = "MIT"
 # can't reach outside the project directory).
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
+# A real, checked gap found by a fresh-eyes sweep: numpy was declared
+# here as a hard dependency, but nothing in sarva_foundry (its own
+# source, its tests, or the bundled examples) ever imports it, calls
+# `.numpy()` on a tensor, or uses `torch.from_numpy` -- confirmed by an
+# exhaustive grep across all three, not assumed from a stale memory of
+# what this package once needed. torch itself tolerates numpy being
+# absent entirely (its own numpy-interop code paths degrade gracefully
+# when the import fails), so this was never a load-bearing transitive
+# requirement either -- just an unused line nobody had removed. A false
+# "this package needs numpy" claim in the one place a real installer
+# reads to decide what to pull in, the same "don't state something that
+# isn't true" discipline this project already applies to model
+# pricing/capability claims in models.yaml.
 dependencies = [
     "torch>=2.5",
-    "numpy>=2.0",
 ]
 
 [build-system]

@@ -20937,3 +20937,68 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## A stale dependency claim: `sarva-foundry` declared `numpy` as a hard requirement it never actually used
+
+Round 205. After a long run of clean sweeps (182-185, 187-204) with
+essentially every module in the codebase swept at least once, this
+round returned to a genuinely different surface: the two packages'
+own `pyproject.toml`s, which hadn't had a fresh-eyes sweep this
+session.
+
+`foundry/pyproject.toml` declared `numpy>=2.0` as a hard dependency
+alongside `torch`. Confirmed by exhaustive grep across `sarva_foundry`'s
+own source, its tests (`tests/foundry/`), and the bundled
+`examples/`: nothing imports `numpy`, calls `.numpy()` on a tensor, or
+uses `torch.from_numpy` anywhere. `torch` itself tolerates `numpy`
+being absent entirely (its own numpy-interop code paths degrade
+gracefully when that import fails, a well-established property of the
+library, not assumed), so this was never even a load-bearing
+transitive requirement -- just an unused line nobody had removed.
+
+**Not a runtime bug** -- nothing in this codebase behaves incorrectly
+because of it, and the local test suite (885 tests) is unaffected
+either way. But it is a real, checked inaccuracy in the one place a
+real installer actually reads to decide what to pull in: `pip install
+sarva-foundry` (or `pip install sarva[foundry]`) would unnecessarily
+require `numpy` for a package that never touches it. The same "don't
+state something that isn't true" discipline this project already
+applies to `models.yaml`'s pricing/capability claims, applied here to
+a dependency declaration instead.
+
+**Fixed** by removing `numpy>=2.0` from `foundry/pyproject.toml`'s
+`dependencies` list. `uv.lock` could not be regenerated in this
+environment (`uv` isn't installed here) -- CI's own `uv sync` step
+runs without `--frozen`/`--locked` for the Python side, so it will
+self-heal by re-resolving on its next run; this is noted honestly
+rather than silently left inconsistent.
+
+**Two docs chapters made the identical stale claim** ("`sarva_foundry`'s
+[dependencies] are `torch`/`numpy`") and were updated to match:
+`docs/distillation.md` (which also gained a new section documenting
+this exact fix) and `docs/foundry/inference.md`. `BUILD-JOURNAL.md`'s
+own two historical mentions of "torch/numpy" (this append-only journal's
+usual discipline) were deliberately left untouched -- they're accurate
+records of what was true at the time those entries were written, not
+live claims that need to track current reality the way the per-chapter
+docs do.
+
+**138 of the last 205 rounds have found and shipped real, verified
+fixes; rounds 68-69 and 182-204 (minus this one) remain clean sweeps.**
+This round is a different category from the other 137 -- a packaging-
+metadata accuracy fix, not a wrong-runtime-behavior bug -- documented
+honestly as exactly that rather than dressed up with a fabricated
+"confirmed live" narrative the way every prior fix's real repro
+actually earned.
+
+**Next:** the completeness-audit backlog remains at three items
+needing external-dependency/scope decisions from the author (a
+code-execution sandbox tool, web search, image generation). The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together. Round 186's own CI run (commit `9c20905`) remains
+stuck in an isolated GitHub-side anomaly, unrelated to the code --
+`core` has passed on it repeatedly; checked only occasionally now
+rather than every round.

@@ -13,7 +13,9 @@ router all treat a from-scratch checkpoint identically to a frontier one.
 
 `core`/`sarva_foundry` have been kept **dependency-disjoint** since the
 distillation glue script: `core`'s dependencies are lightweight API-client
-SDKs, `sarva_foundry`'s are `torch`/`numpy`. Most Sarva installs never
+SDKs, `sarva_foundry`'s is `torch` (see the distillation chapter's own
+"stale dependency claim" note for the real, checked `numpy` removal this
+phrasing already reflects). Most Sarva installs never
 train or run a local model and shouldn't be forced to pull in torch just
 to `pip install sarva`. So `sarva_foundry` is an **optional extra**:
 
