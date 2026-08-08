@@ -30,6 +30,8 @@ def _clear_provider_env(monkeypatch) -> None:
     monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: False)
     monkeypatch.setattr(audio, "stt_extra_installed", lambda: False)
     monkeypatch.setattr(audio, "tts_engine_available", lambda: False)
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: None)
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda name: None)
 
 
 def test_run_diagnostics_reports_every_provider_as_unavailable_with_nothing_configured(
@@ -48,6 +50,8 @@ def test_run_diagnostics_reports_every_provider_as_unavailable_with_nothing_conf
         "Foundry (local from-scratch models)",
         "Speech-to-text (local Whisper)",
         "Text-to-speech (local)",
+        "Code execution sandbox (Docker/Podman)",
+        "Image generation (local FLUX or OpenAI)",
     }
     assert all(isinstance(c, DiagnosticCheck) for c in checks)
     assert all(c.ok is False for c in checks)
@@ -114,6 +118,51 @@ def test_run_diagnostics_reflects_tts_engine_available(monkeypatch):
     checks = {c.name: c for c in run_diagnostics()}
 
     assert checks["Text-to-speech (local)"].ok is True
+
+
+def test_run_diagnostics_reflects_docker_or_podman_found(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(
+        runtime.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "docker" else None
+    )
+
+    checks = {c.name: c for c in run_diagnostics()}
+
+    sandbox = checks["Code execution sandbox (Docker/Podman)"]
+    assert sandbox.ok is True
+    assert "/usr/bin/docker" in sandbox.detail
+
+
+def test_run_diagnostics_reflects_sarva_image_extra_installed(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(
+        runtime.importlib.util,
+        "find_spec",
+        lambda name: object() if name == "diffusers" else None,
+    )
+
+    checks = {c.name: c for c in run_diagnostics()}
+
+    image = checks["Image generation (local FLUX or OpenAI)"]
+    assert image.ok is True
+    assert "sarva[image] installed" in image.detail
+
+
+def test_run_diagnostics_reflects_openai_key_as_an_image_generation_fallback(monkeypatch):
+    # sarva[image] deliberately still simulated NOT installed here -- the
+    # decisive property is that OPENAI_API_KEY alone is enough to make
+    # this check report ok=True, the same "additional option, only if
+    # you already have it" fallback ImageGenerationTool itself
+    # implements, and the detail should say which path will actually be
+    # used, not just that image generation is available somehow.
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+
+    checks = {c.name: c for c in run_diagnostics()}
+
+    image = checks["Image generation (local FLUX or OpenAI)"]
+    assert image.ok is True
+    assert "OpenAI" in image.detail
 
 
 def test_run_diagnostics_reports_foundry_extra_not_installed(monkeypatch):

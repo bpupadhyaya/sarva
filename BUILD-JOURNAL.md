@@ -21268,3 +21268,54 @@ users who already have one. The three infra-blocked items remain
 deferred (Tauri `csp: null`, RL harness sandboxing, inference
 batching); the quantization/`Budget` NaN-validation gap has three
 confirmed-but-unreachable instances tracked together.
+
+
+## `sarva doctor` never reported whether `run_code`/`generate_image` would actually work -- the two tools just shipped were the one gap this project's own doctor-check discipline hadn't reached yet
+
+Round 243. A fresh-eyes sweep of the three tools shipped in rounds
+240-242, applying this project's own "freshly-shipped code deserves a
+dedicated bug-hunting pass" pattern. Every OTHER optional capability
+`sarva doctor`/`GET /doctor` reports on (Ollama, foundry, STT, TTS)
+has had a dedicated check since it shipped -- `RunCodeTool` and
+`ImageGenerationTool` didn't get one, so a user had no way to learn
+Docker/Podman were both missing, or that neither `sarva[image]` nor
+`OPENAI_API_KEY` was configured, before actually trying `run_code`/
+`generate_image` mid-conversation and hitting the tool's own honest
+error there instead.
+
+**Fixed** with two new `run_diagnostics()` checks: "Code execution
+sandbox (Docker/Podman)" (`shutil.which` only, not `RunCodeTool`'s own
+stricter `<binary> info` liveness probe -- "installed" is a reasonable
+status-display signal, and the tool's own real-daemon check still runs
+fresh at call time) and "Image generation (local FLUX or OpenAI)"
+(`ok=True` if `sarva[image]` is importable OR `OPENAI_API_KEY` is
+configured, with the detail naming which path will actually be used --
+mirroring `generate_image`'s own real fallback logic, not just
+reporting "available somehow").
+
+**A real regression caught by the existing test suite, not just the
+new tests:** two pre-existing tests (`test_doctor.py`'s "everything
+unavailable" test and `test_server.py`'s CLI/HTTP-parity test) both
+asserted an EXACT set of check names -- adding the two new checks broke
+both immediately, the intended behavior of an exact-set assertion, not
+a bug in either test. Fixed by adding the two new names to both
+expected sets and extending `_clear_provider_env`'s own neutralization
+helper to also stub `shutil.which`/`importlib.util.find_spec` so the
+"everything unavailable" premise stays genuinely true for these two
+checks as well.
+
+3 new dedicated tests (docker/podman found, sarva[image] installed,
+OPENAI_API_KEY as an image-generation fallback) plus the two
+regression fixes above. 908 tests selected by default (917 total
+collected), `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md`'s own `RunCodeTool`/`ImageGenerationTool` sections
+each gained a short note about their new doctor check.
+
+**With the completeness-audit backlog fully closed (rounds 240-242)
+and this doctor-check gap now closed too, no further named feature
+work remains queued** -- subsequent rounds return to the general
+hardening-sweep pattern (46-239) unless the author names new scope.
+The three infra-blocked items remain deferred (Tauri `csp: null`, RL
+harness sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

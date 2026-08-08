@@ -1403,6 +1403,8 @@ def test_doctor_endpoint_returns_the_same_checks_the_cli_command_reports(monkeyp
         "Foundry (local from-scratch models)",
         "Speech-to-text (local Whisper)",
         "Text-to-speech (local)",
+        "Code execution sandbox (Docker/Podman)",
+        "Image generation (local FLUX or OpenAI)",
     }
     anthropic_check = next(c for c in resp.json() if c["name"] == "Anthropic API key")
     assert anthropic_check["ok"] is False

@@ -8,7 +8,9 @@ of sync on availability logic.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -352,6 +354,48 @@ def run_diagnostics() -> list[DiagnosticCheck]:
             "a local engine (say/espeak) is available"
             if tts_ok
             else "no local text-to-speech engine detected -- `sarva speak` will fail",
+        )
+    )
+
+    # A real gap found by a fresh-eyes sweep of the two tools just
+    # shipped alongside WebSearchTool (RunCodeTool, ImageGenerationTool):
+    # every other optional capability this function checks (Ollama,
+    # foundry, STT, TTS) gets a `sarva doctor` line reporting whether
+    # it's actually usable -- these two didn't, so a user with neither
+    # Docker/Podman nor sarva[image] installed had no way to learn
+    # `run_code`/`generate_image` would fail before actually trying
+    # them mid-conversation. `shutil.which` only, not the stricter
+    # `<binary> info` liveness probe `RunCodeTool`'s own
+    # `_find_container_runtime` uses before actually running code --
+    # "installed" is an honest, reasonable signal for a status display;
+    # the tool's own real-daemon check still runs fresh at call time
+    # and gives the precise "isn't currently running" error if the
+    # daemon happens to be down.
+    docker_or_podman = shutil.which("docker") or shutil.which("podman")
+    checks.append(
+        DiagnosticCheck(
+            "Code execution sandbox (Docker/Podman)",
+            docker_or_podman is not None,
+            f"found at {docker_or_podman}"
+            if docker_or_podman
+            else "neither docker nor podman found on PATH -- the run_code tool will "
+            "return a clear error rather than run code unsandboxed",
+        )
+    )
+
+    image_extra_installed = importlib.util.find_spec("diffusers") is not None
+    has_openai_key = bool(get_env("OPENAI_API_KEY"))
+    checks.append(
+        DiagnosticCheck(
+            "Image generation (local FLUX or OpenAI)",
+            image_extra_installed or has_openai_key,
+            "sarva[image] installed -- generate_image uses the free local model"
+            if image_extra_installed
+            else "OPENAI_API_KEY is set -- generate_image will use the paid OpenAI "
+            "Images API (sarva[image] not installed)"
+            if has_openai_key
+            else "sarva[image] extra not installed and OPENAI_API_KEY not set -- "
+            "pip install sarva[image] for free local generation",
         )
     )
 

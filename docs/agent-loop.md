@@ -286,6 +286,17 @@ behavior (the desktop app's sidecar shutdown path): flagged for a
 maintainer with a real Docker install to verify before this tool's
 isolation should be fully trusted in production.
 
+A later, fresh-eyes sweep found `sarva doctor`/`GET /doctor` never
+reported whether `run_code` would actually work — every OTHER optional
+capability this project ships (Ollama, foundry, STT, TTS) gets a
+`sarva doctor` line, but this one didn't, so a user had no way to
+learn Docker/Podman were both missing before actually trying the tool
+mid-conversation. `run_diagnostics()` gained a "Code execution sandbox
+(Docker/Podman)" check (`shutil.which` only, not `RunCodeTool`'s own
+stricter `<binary> info` liveness probe — "installed" is a reasonable
+status-display signal; the tool's own real-daemon check still runs
+fresh at call time).
+
 ### `WebSearchTool`: free by default, a paid index only ever an explicit opt-in
 
 Closed one of the three items the completeness-audit backlog had
@@ -388,6 +399,13 @@ reached when the free path genuinely isn't available. `destructive=True`
 by default, the same reasoning as `WriteFileTool` (a real file write
 that can overwrite an existing one) plus a real monetary cost on the
 paid fallback path.
+
+Same fresh-eyes sweep as `RunCodeTool`'s own doctor-check gap above:
+`run_diagnostics()` gained an "Image generation (local FLUX or
+OpenAI)" check — `ok=True` if either `sarva[image]` is importable or
+`OPENAI_API_KEY` is configured, with the detail naming which path will
+actually be used, matching `generate_image`'s own real fallback logic
+rather than just reporting "available somehow."
 
 `EditFileTool` mirrors a well-proven, simple contract — the same one
 this project's own coding assistant tool uses to edit its own source
