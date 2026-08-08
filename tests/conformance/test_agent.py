@@ -13,7 +13,7 @@ from sarva.agent.budget import Budget
 from sarva.agent.events import LEGAL, AgentState
 from sarva.agent.loop import AgentLoop, _required_modalities
 from sarva.agent.subagents import DelegateTool
-from sarva.agent.tools import ToolContext, always_allow
+from sarva.agent.tools import ImageGenerationTool, ToolContext, always_allow
 from sarva.multimodal.content import (
     AudioBlock,
     ImageBlock,
@@ -1909,6 +1909,99 @@ async def test_delegate_task_is_not_killed_by_the_generic_timeout_when_its_budge
     assert len(finished) == 1
     assert finished[0].result.is_error is False
     assert finished[0].result.content[0].text == "the subagent's real answer"
+
+
+class _GenerateImageProvider:
+    """The tool's own real local generation takes longer than a
+    proportionally tiny _TOOL_TIMEOUT_SECONDS, but is nowhere near its
+    own internal IMAGE_GEN_TIMEOUT_SECONDS ceiling -- ordinary progress,
+    not a hang."""
+
+    name = "mock"
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    async def generate(self, request):
+        self.n += 1
+        if self.n == 1:
+            call = ToolCallBlock(
+                id="g1", name="generate_image", arguments={"prompt": "a cat", "path": "cat.png"}
+            )
+            yield ToolCallEvent(call=call)
+            yield DoneEvent(
+                stop_reason=StopReason.TOOL_USE,
+                message=Message(role="assistant", content=[call]),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+            return
+        yield DoneEvent(
+            stop_reason=StopReason.END_TURN,
+            message=Message(role="assistant", content=[TextBlock(text="here's your cat")]),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_generate_image_is_not_killed_by_the_generic_timeout_when_slower_than_it(
+    run_root, tmp_path, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep of the tool this same
+    # round's own image-generation feature shipped, the identical shape
+    # as the `delegate_task` fix above: `_TOOL_TIMEOUT_SECONDS` (a flat
+    # 90s backstop sized for a genuinely hung ordinary tool) wraps
+    # `generate_image` too, even though `ImageGenerationTool` has its
+    # own internal `IMAGE_GEN_TIMEOUT_SECONDS` (600s) specifically
+    # calibrated for local generation on a 12B-parameter model without a
+    # GPU. Nothing about that internal ceiling ever reached this generic
+    # wrapper, so entirely ordinary local generation taking longer than
+    # 90s (plausible, not contrived, for a model this size on a laptop)
+    # got killed and reported as an error while nowhere near its own
+    # documented 600s allowance. Confirmed live: a scripted "generation"
+    # taking 0.3s, proportionally scaled against a tiny 0.1s
+    # `_TOOL_TIMEOUT_SECONDS`, still came back `is_error=True` with the
+    # flat timeout unmodified.
+    import sys
+    import time
+    import types
+
+    import sarva.agent.loop as loop_module
+    import sarva.agent.tools as tools_module
+
+    monkeypatch.setattr(loop_module, "_TOOL_TIMEOUT_SECONDS", 0.1)
+    # Forces ImageGenerationTool.run()'s own `import diffusers` to
+    # succeed regardless of whether the real (heavy, optional) package
+    # happens to be installed in whatever environment runs this test --
+    # this test's job is proving the timeout-budget fix, not re-verifying
+    # the real diffusers integration (already covered live elsewhere).
+    monkeypatch.setitem(sys.modules, "diffusers", types.ModuleType("diffusers"))
+
+    def _slow_generate(self, prompt):
+        time.sleep(0.3)
+        return b"\x89PNG\r\n\x1a\nfake-but-real-bytes"
+
+    monkeypatch.setattr(tools_module.ImageGenerationTool, "_generate_locally", _slow_generate)
+
+    provider = _GenerateImageProvider()
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    loop = AgentLoop(
+        router=_router(),
+        providers={"mock": provider},
+        tools=[ImageGenerationTool()],
+        workdir=str(workdir),
+        run_root=run_root,
+    )
+
+    events = [e async for e in loop.run("generate a picture of a cat")]
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0].result.is_error is False
+    assert (workdir / "cat.png").exists()
 
 
 @pytest.mark.asyncio

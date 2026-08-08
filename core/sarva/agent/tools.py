@@ -85,7 +85,7 @@ _CONTAINER_RUNTIME_PROBE_TIMEOUT_SECONDS = 5.0
 # CPU alone -- honestly not fast, but genuinely free with no account.
 _IMAGE_GEN_MODEL = "black-forest-labs/FLUX.1-schnell"
 _IMAGE_GEN_STEPS = 4
-_IMAGE_GEN_TIMEOUT_SECONDS = 600
+IMAGE_GEN_TIMEOUT_SECONDS = 600
 _OPENAI_IMAGE_MODEL = "dall-e-3"
 
 
@@ -1214,7 +1214,7 @@ class ImageGenerationTool:
                 # not how long the underlying inference actually runs.
                 data = await asyncio.wait_for(
                     asyncio.to_thread(self._generate_locally, prompt),
-                    timeout=_IMAGE_GEN_TIMEOUT_SECONDS,
+                    timeout=IMAGE_GEN_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
                 return ToolResultBlock(
@@ -1222,7 +1222,7 @@ class ImageGenerationTool:
                     content=[
                         TextBlock(
                             text=f"image generation timed out after "
-                            f"{_IMAGE_GEN_TIMEOUT_SECONDS}s (local generation can be "
+                            f"{IMAGE_GEN_TIMEOUT_SECONDS}s (local generation can be "
                             "slow without a GPU)"
                         )
                     ],

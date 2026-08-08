@@ -48,7 +48,14 @@ from sarva.agent.events import (
     ToolStartedEvent,
 )
 from sarva.agent.subagents import DelegateTool
-from sarva.agent.tools import ConfirmPolicy, Tool, ToolContext, always_allow
+from sarva.agent.tools import (
+    IMAGE_GEN_TIMEOUT_SECONDS,
+    ConfirmPolicy,
+    ImageGenerationTool,
+    Tool,
+    ToolContext,
+    always_allow,
+)
 from sarva.multimodal.content import (
     ContentBlock,
     Degrader,
@@ -1032,6 +1039,22 @@ class AgentLoop:
                     if isinstance(tool, DelegateTool):
                         remaining_wall = self._budget.max_wall_seconds - spend.wall_seconds
                         timeout = max(_TOOL_TIMEOUT_SECONDS, remaining_wall)
+                    elif isinstance(tool, ImageGenerationTool):
+                        # The identical shape as the `DelegateTool` gap just
+                        # above, found by a fresh-eyes sweep of the tool
+                        # this same round's own image-generation feature
+                        # shipped: `ImageGenerationTool.run()` has its own
+                        # internal `IMAGE_GEN_TIMEOUT_SECONDS` (600s) cap,
+                        # specifically calibrated for local generation on a
+                        # 12B-parameter model without a GPU -- but this
+                        # generic 90s wrapper preempted it every time
+                        # generation legitimately took longer than 90s,
+                        # making that 600s ceiling entirely unreachable in
+                        # practice. Confirmed live: a scripted "generation"
+                        # taking 0.3s, proportionally scaled against a tiny
+                        # 0.1s `_TOOL_TIMEOUT_SECONDS`, still came back
+                        # `is_error=True` with the flat timeout unmodified.
+                        timeout = max(_TOOL_TIMEOUT_SECONDS, IMAGE_GEN_TIMEOUT_SECONDS)
                     try:
                         raw = await asyncio.wait_for(tool.run(call.arguments, ctx), timeout=timeout)
                         result = raw.model_copy(update={"tool_call_id": call.id})

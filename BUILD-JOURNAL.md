@@ -21368,3 +21368,62 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `generate_image`'s own internal 600s timeout was silently unreachable -- the loop's generic 90s tool-dispatch wrapper preempted it every time, the identical shape a sibling bug already had for `delegate_task`
+
+Round 245. Continuing the general hardening sweep. A fresh-eyes sweep
+of `AgentLoop`'s own tool-dispatch code -- specifically prompted by
+remembering that `_TOOL_TIMEOUT_SECONDS` (a flat 90s backstop) had
+already needed a special case once before, for `delegate_task` -- asked
+whether `ImageGenerationTool` (round 242, `IMAGE_GEN_TIMEOUT_SECONDS`
+= 600s, deliberately generous for local inference on a 12B-parameter
+model without a GPU) had the identical exposure. It did: `run_one`'s
+`asyncio.wait_for(tool.run(...), timeout=_TOOL_TIMEOUT_SECONDS)` wraps
+every tool call generically, and nothing about `ImageGenerationTool`'s
+own internal timeout ever reached that outer wrapper -- any real local
+generation taking longer than 90s (plausible, not contrived) got
+killed by the OUTER timeout first, reported as a generic "tool call
+timed out after 90s," with `ImageGenerationTool`'s own more patient
+600s logic never getting a chance to run at all. Its own internal
+timeout was, in practice, dead code.
+
+**Confirmed live with the exact same proportional-scaling technique
+the original `delegate_task` fix's own regression test uses:** a
+scripted 0.3s "generation" (via a monkeypatched `_generate_locally`),
+proportionally scaled against a tiny 0.1s `_TOOL_TIMEOUT_SECONDS`,
+still came back `is_error=True` with the flat timeout unmodified --
+the identical repro shape, just for a different tool.
+
+**Fixed** by giving `ImageGenerationTool` calls the same treatment
+`delegate_task` already got: a floor of `IMAGE_GEN_TIMEOUT_SECONDS` on
+the outer wrapper (`max(_TOOL_TIMEOUT_SECONDS, IMAGE_GEN_TIMEOUT_SECONDS)`).
+`IMAGE_GEN_TIMEOUT_SECONDS` (renamed from `_IMAGE_GEN_TIMEOUT_SECONDS`,
+now a public constant) is exported from `tools.py` specifically so
+`loop.py` can reference it -- confirmed no circular import risk first
+(`loop.py` already imports `ConfirmPolicy`/`Tool`/`ToolContext` from
+`tools.py`; `tools.py` imports nothing from `loop.py`).
+
+**Verified with a genuine revert-and-check:** reverted the new
+`loop.py` branch, ran the new test, watched it fail with exactly the
+predicted shape (`"tool call timed out after 0.1s"`) -- then restored
+the fix and confirmed it passes. 1 new test, 908 -> 909 selected by
+default (917 -> 918 total collected), `ruff check`/`ruff format
+--check` both clean. `docs/agent-loop.md` gained a new subsection next
+to `ImageGenerationTool`'s own existing writeup.
+
+**Worth naming as its own lesson:** this is the second time a tool
+with a legitimately longer internal timeout than `_TOOL_TIMEOUT_SECONDS`
+has silently had that internal timeout neutralized by the generic
+wrapper (`delegate_task` was the first, several dozen rounds ago) --
+any FUTURE tool with its own internal timeout longer than 90s needs the
+identical `isinstance` check added here, not assumed automatic. Named
+explicitly rather than left implicit, the same discipline this
+project applies to every other "propagate this fix to every real call
+site" finding.
+
+**Next:** continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

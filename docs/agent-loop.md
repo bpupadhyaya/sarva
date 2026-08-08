@@ -407,6 +407,32 @@ OpenAI)" check — `ok=True` if either `sarva[image]` is importable or
 actually be used, matching `generate_image`'s own real fallback logic
 rather than just reporting "available somehow."
 
+### `generate_image`'s own internal 600s timeout was silently unreachable — the loop's generic 90s tool-dispatch wrapper preempted it every time
+
+A later fresh-eyes sweep of `AgentLoop`'s own tool-dispatch code (see
+"Subagent fan-out" below for the sibling bug this exact mechanism
+already had once, for `delegate_task`) found the identical shape here:
+`run_one`'s `asyncio.wait_for(tool.run(...), timeout=_TOOL_TIMEOUT_SECONDS)`
+(90s, a flat backstop sized for a genuinely hung ordinary tool) wraps
+*every* tool call, including `generate_image` — but `ImageGenerationTool`'s
+own internal `IMAGE_GEN_TIMEOUT_SECONDS` (600s, specifically calibrated
+for local generation on a 12B-parameter model without a GPU) never
+actually got a chance to matter: any real local generation taking
+longer than 90s — entirely plausible, not contrived, for a model this
+size on a laptop — got killed by the OUTER wrapper first, reported as
+a generic "tool call timed out after 90s" with no way for
+`ImageGenerationTool`'s own more patient logic to ever run. Confirmed
+live with the same proportional-scaling technique the `delegate_task`
+fix's own test uses: a scripted 0.3s "generation," proportionally
+scaled against a tiny 0.1s `_TOOL_TIMEOUT_SECONDS`, still came back
+`is_error=True` with the flat timeout unmodified. Fixed by giving
+`ImageGenerationTool` calls a floor of `IMAGE_GEN_TIMEOUT_SECONDS`
+(now a public constant, exported from `tools.py` specifically so
+`loop.py` can reference it), the same `max(_TOOL_TIMEOUT_SECONDS, ...)`
+shape the `delegate_task` fix already established. Verified with a
+genuine revert-and-check: reverted the `loop.py` branch, watched the
+new test fail with exactly this shape, restored it.
+
 `EditFileTool` mirrors a well-proven, simple contract — the same one
 this project's own coding assistant tool uses to edit its own source
 throughout this codebase's development: `old_string` must match
