@@ -50,6 +50,35 @@ _PLAIN_TEXT_MEDIA_TYPES = {
 # shouldn't blow the target model's context window on its own.
 _MAX_EXTRACTED_CHARS = 20_000
 
+# A real bug found by a fresh-eyes sweep applying the same lens that
+# already gave every OTHER CPU-bound media-processing call in this
+# project an explicit ceiling (sarva.audio's _DECODE_TIMEOUT_SECONDS/
+# _TTS_TIMEOUT_SECONDS, the video degrader's subprocess timeout):
+# `_extract_pdf_text`'s own `asyncio.to_thread` wrapper (below) bounds
+# the event-loop-freeze this degrader's own docstring already fixed
+# once, but does nothing to bound its WALL-CLOCK time -- pypdf's cyclic-
+# page-reference guard and LimitReachedError decompression-bomb guard
+# both already fire fast (confirmed live against real crafted PDFs
+# exercising each), but neither protects against a legitimately valid,
+# just extremely large PDF (a real, ordinary document -- a scanned
+# archive or a programmatically generated report can genuinely run to
+# tens of thousands of pages), whose full per-page extract_text() this
+# degrader always runs to completion BEFORE _truncate (above) ever gets
+# a chance to cut the output down. Confirmed live: this degrader's own
+# `degrade()` call blocked past a 5-second deadline against a scripted
+# slow extraction with no recovery -- the whole agent turn would hang
+# indefinitely, since AgentLoop's own Budget.max_wall_seconds check only
+# fires BETWEEN await points, never inside one still in flight. Bounded
+# the same way every sibling call already is, with one honest caveat
+# documented at the call site: unlike the audio/video degraders' real
+# subprocess isolation, `asyncio.to_thread`'s underlying OS thread
+# cannot actually be killed on timeout -- this stops the AGENT TURN from
+# hanging (the real, user-facing symptom), not the abandoned thread
+# itself, matching this project's own "an honest partial mitigation,
+# not a magic bullet" posture elsewhere (e.g. the subagent-cancellation
+# spend-release comment in agent/loop.py).
+_PDF_EXTRACT_TIMEOUT_SECONDS = 30
+
 
 def _extract_pdf_text(raw: bytes) -> str | None:
     """Real per-page text extraction via `pypdf`, or `None` if the bytes
@@ -107,7 +136,17 @@ class DocumentToTextDegrader:
             # serve` process would have been frozen, the same shape as
             # the audio bug, just a smaller and more variable magnitude
             # depending on document size.
-            extracted = await asyncio.to_thread(_extract_pdf_text, raw)
+            try:
+                extracted = await asyncio.wait_for(
+                    asyncio.to_thread(_extract_pdf_text, raw),
+                    timeout=_PDF_EXTRACT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # See _PDF_EXTRACT_TIMEOUT_SECONDS' own comment -- treated
+                # the same as "couldn't extract text" below, the same
+                # honest fallback an unsupported format or a corrupt PDF
+                # already gets.
+                extracted = None
         elif block.media_type in _PLAIN_TEXT_MEDIA_TYPES:
             try:
                 extracted = raw.decode("utf-8")

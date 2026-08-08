@@ -490,6 +490,50 @@ identically regardless of whether the audio extra happens to be
 installed in the environment running them. 1 new test, 852 → 853
 Python tests.
 
+### `asyncio.to_thread` fixed the event-loop freeze but left the whole agent turn unboundedly hangable — the one CPU-bound media call in this project missing an explicit ceiling
+
+A much later hardening sweep, checking `DocumentToTextDegrader` against
+the exact ceiling every OTHER CPU-bound media-processing call in this
+project already has (`sarva.audio`'s `_DECODE_TIMEOUT_SECONDS`/
+`_TTS_TIMEOUT_SECONDS`, the video degrader's own subprocess timeout),
+found the one that had been missed: `_extract_pdf_text`'s
+`asyncio.to_thread` wrapper (the fix two sections above) closes the
+event-loop-freeze bug, but does nothing to bound how long the call
+itself — and therefore the whole agent turn waiting on it — can take.
+
+pypdf's own built-in guards (cyclic-page-reference detection,
+`LimitReachedError` for a decompression bomb) both fire fast, confirmed
+live against real crafted PDFs exercising each — but neither protects
+against a legitimately valid, just extremely large PDF: a real,
+ordinary attachment (a scanned archive, a programmatically generated
+report) can genuinely run to tens of thousands of pages, and this
+degrader always runs full per-page `extract_text()` to completion
+*before* `_truncate` ever gets a chance to cut the output down.
+Confirmed live with a scripted slow extraction: `degrade()` blocked
+past a 5-second deadline with no recovery — and `AgentLoop`'s own
+`Budget.max_wall_seconds` check can't help here either, since it only
+fires *between* await points, never inside one still in flight, so a
+genuinely stuck extraction would hang the entire turn indefinitely.
+
+Fixed the same way every sibling call already is:
+`asyncio.wait_for(asyncio.to_thread(_extract_pdf_text, raw), timeout=
+_PDF_EXTRACT_TIMEOUT_SECONDS)` (30s), falling back to the same honest
+"could not be extracted" message an unsupported format or a corrupt PDF
+already gets. **One honest caveat, documented at the call site rather
+than glossed over:** unlike the audio/video degraders' real subprocess
+isolation, `asyncio.to_thread`'s underlying OS thread cannot actually
+be killed on timeout — this fix stops the *agent turn* from hanging
+(the real, user-facing symptom), not the abandoned worker thread
+itself, the same "honest partial mitigation, not a magic bullet"
+posture this project already applies elsewhere (e.g. the subagent-
+cancellation spend-release comment in `agent/loop.py`).
+
+Verified with a genuine revert-and-check: reverted the fix and watched
+the new test's own outer 1.5-second safety-net `asyncio.wait_for` raise
+`TimeoutError` itself — proof the inner call was still genuinely
+hanging past that deadline — before re-applying. 1 new test, 914 → 915
+Python tests.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

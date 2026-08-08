@@ -21794,3 +21794,50 @@ instead of completing, restored it. 1 new test, 914 selected. `ruff
 check`/`ruff format --check` both clean.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 274: `DocumentToTextDegrader`'s PDF extraction had no wall-clock ceiling -- the one CPU-bound media call in this project missing one
+
+Investigated (and correctly rejected forcing) the long-deferred Tauri
+`csp: null` gap again this round -- confirmed CI's `desktop` job is
+still `cargo check` only, no GUI/headless launch anywhere in this
+environment to verify a policy change against the app's real inline-
+style usage (`App.tsx`'s `style={{display:"none"}}`), so it remains
+genuinely infra-blocked, not stale deferral. Also disproved a DNS-hang
+hypothesis in `multimodal/fetch.py`'s `ensure_public_host` (already
+covered by the generic per-tool-call timeout for the one reachable
+caller, `WebSearchTool`) and a PDF cyclic-page-reference hang
+hypothesis in `_extract_pdf_text` (pypdf 6.14.2 already raises
+`PdfReadError: Detected cyclic page references` immediately, confirmed
+live against a hand-crafted self-referential page tree, already caught
+by the existing except clause).
+
+The THIRD hypothesis from that same sweep held: every other CPU-bound
+media-processing call in this project (`sarva.audio`'s decode/TTS
+timeouts, the video degrader's subprocess timeout) already has an
+explicit wall-clock ceiling; `_extract_pdf_text`'s own `asyncio.
+to_thread` wrapper only ever fixed the event-loop-freeze bug, never the
+turn-hangs-indefinitely one. A legitimately valid, just extremely large
+PDF (a real scanned archive or generated report, not adversarial) runs
+full per-page extraction to completion before `_truncate` gets a chance
+to cut the output down, and `AgentLoop`'s own `Budget.max_wall_seconds`
+check can't help mid-await. **Verified live** with a scripted slow
+extraction: `degrade()` blocked past a 5-second deadline with no
+recovery.
+
+**Fixed** with `asyncio.wait_for(asyncio.to_thread(_extract_pdf_text,
+raw), timeout=_PDF_EXTRACT_TIMEOUT_SECONDS)` (30s), falling back to the
+same honest "could not be extracted" message a corrupt PDF already
+gets. Documented one honest caveat rather than glossing over it: unlike
+the audio/video degraders' real subprocess isolation, the underlying OS
+thread can't actually be killed on timeout -- this stops the agent turn
+from hanging, not the abandoned thread itself.
+
+**Verified with a genuine revert-and-check**: reverted the fix, watched
+the new test's own outer 1.5s safety-net `asyncio.wait_for` raise
+`TimeoutError` itself (proof the inner call was still genuinely hanging
+past its deadline), restored it. 1 new test, 915 selected. `ruff
+check`/`ruff format --check` both clean. `docs/multimodal.md` extended.
+
+**Next:** continuing the hardening sweep, module by module.

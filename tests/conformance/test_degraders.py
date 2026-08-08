@@ -987,6 +987,33 @@ async def test_document_degrader_falls_back_cleanly_on_a_decompression_bomb_pdf(
     assert "application/pdf" in out[0].text
 
 
+async def test_document_degrader_times_out_instead_of_hanging_the_whole_turn(monkeypatch):
+    # A real bug found by a fresh-eyes sweep: every OTHER CPU-bound media-
+    # processing call in this project (audio decode/TTS, video decode) has
+    # an explicit wall-clock ceiling, but _extract_pdf_text's own
+    # asyncio.to_thread wrapper only fixed the event-loop-freeze bug --
+    # it does nothing to bound how long the WHOLE degrade() call, and
+    # therefore the whole agent turn, can take. Confirmed live before this
+    # fix: degrade() blocked past a 5-second deadline with no recovery.
+    import sarva.multimodal.degraders.document as document_module
+
+    monkeypatch.setattr(document_module, "_PDF_EXTRACT_TIMEOUT_SECONDS", 0.2)
+
+    def _hangs_forever(raw: bytes) -> str | None:
+        import time
+
+        time.sleep(2)
+        return "should never get here"
+
+    monkeypatch.setattr(document_module, "_extract_pdf_text", _hangs_forever)
+    block = DocumentBlock(media_type="application/pdf", data=b"%PDF-1.4 pretend bytes")
+
+    out = await asyncio.wait_for(DocumentToTextDegrader().degrade(block), timeout=1.5)
+
+    assert len(out) == 1
+    assert "could not be extracted" in out[0].text
+
+
 async def test_document_degrader_falls_back_cleanly_on_an_unsupported_format():
     # e.g. .docx -- a real, named, deliberately unbuilt format (see the
     # module's own docstring), not something silently mishandled.
