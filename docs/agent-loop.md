@@ -407,6 +407,37 @@ OpenAI)" check — `ok=True` if either `sarva[image]` is importable or
 actually be used, matching `generate_image`'s own real fallback logic
 rather than just reporting "available somehow."
 
+### `generate_image` told the model only a file path — never let it actually see what it made
+
+A later fresh-eyes sweep of `ToolResultBlock` itself (`content: list[
+ContentBlock]  # usually TextBlock/ImageBlock`) found a real,
+confirmed-safe gap: despite the type explicitly supporting it, no tool
+anywhere in this codebase had ever actually returned an `ImageBlock` —
+`generate_image` generated a real image but reported only a file path
+back to the model, with no way for it to ever see, verify, describe,
+or decide to regenerate what it made. Safe by construction, not
+guesswork: `AgentLoop`'s own mid-turn modality re-check (see "Failure
+handling" below) already exists specifically for a tool result
+carrying media the currently-routed model can't see — a vision-capable
+model now sees the real image; a text-only model gets it degraded to
+metadata text via the same `ImageToTextDegrader` every other image
+path already uses; a run with no degraders configured fails the turn
+cleanly with a specific reason. No loop-level code changes were needed
+for this to work correctly, only using the existing mechanism.
+
+**A real test-quality catch along the way, not just a passing test:**
+the first version of the new regression test asserted only `state ==
+DONE` and the final message text — both true whether or not the fix
+was even present, since a text-only tool result reaches `DONE`
+trivially with no degradation ever triggered. Caught by actually
+reverting the fix and watching the "passing" test still pass for the
+wrong reason. Rewritten around two genuinely decisive checks instead:
+the `tool_finished` event's own result carries exactly `["text",
+"image"]` content types, and a capturing mock provider's second turn
+receives real degraded text describing the actual image dimensions
+("4x4") with no raw image block ever reaching it. Reverting the real
+fix against this rewritten test now correctly fails.
+
 ### `generate_image`'s own internal 600s timeout was silently unreachable — the loop's generic 90s tool-dispatch wrapper preempted it every time
 
 A later fresh-eyes sweep of `AgentLoop`'s own tool-dispatch code (see

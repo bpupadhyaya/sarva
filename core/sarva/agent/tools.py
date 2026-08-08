@@ -35,7 +35,7 @@ from sarva.memory.longterm import (
     NoteMatch,
 )
 from sarva.memory.vector import DEFAULT_MEMORY_DB_PATH, VectorMemoryStore
-from sarva.multimodal.content import TextBlock, ToolCallBlock, ToolResultBlock
+from sarva.multimodal.content import ImageBlock, TextBlock, ToolCallBlock, ToolResultBlock
 from sarva.multimodal.fetch import FetchError, ensure_public_host, ssrf_safe_transport
 from sarva.providers.base import ToolSpec
 
@@ -1270,7 +1270,33 @@ class ImageGenerationTool:
                 )
 
         await asyncio.to_thread(self._save, path, data)
-        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=f"image saved to {path}")])
+        # A real, confirmed-safe gap found by a fresh-eyes sweep:
+        # `ToolResultBlock.content`'s own docstring already says "usually
+        # TextBlock/ImageBlock", but until now no tool in this codebase
+        # actually returned an ImageBlock -- this tool generated a real
+        # image and told the model only a file path, with no way for the
+        # model to ever actually SEE what it made (verify it, describe
+        # it, or decide to regenerate). `data=data` (the raw bytes
+        # already in memory, not re-read from `path`) is embedded
+        # directly so the result is self-contained even if the file were
+        # later moved or deleted. Safe by construction, not by luck:
+        # `AgentLoop.run()`'s own already-existing mid-turn modality
+        # check (`required_modalities`/`degrade_message`, see loop.py's
+        # own "a tool result produced mid-turn" comment) already handles
+        # exactly this case generically -- a vision-capable model sees
+        # the real image, a text-only model gets it degraded to metadata
+        # text via the same `ImageToTextDegrader` this project's own
+        # multimodal pipeline already uses everywhere else, and a run
+        # with no degraders configured fails the turn cleanly with a
+        # specific reason. No new loop-level code needed for this to
+        # work correctly.
+        return ToolResultBlock(
+            tool_call_id="",
+            content=[
+                TextBlock(text=f"image saved to {path}"),
+                ImageBlock(media_type="image/png", data=data),
+            ],
+        )
 
 
 class RememberTool:

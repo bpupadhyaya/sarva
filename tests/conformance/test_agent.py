@@ -1017,6 +1017,119 @@ async def test_a_tool_result_carrying_media_is_degraded_mid_turn_when_a_degrader
 
 
 @pytest.mark.asyncio
+async def test_generate_image_result_carries_a_real_image_block_degraded_for_a_text_only_model(
+    run_root, tmp_path, monkeypatch
+):
+    # A real, confirmed-safe gap found by a fresh-eyes sweep:
+    # `ImageGenerationTool` generated a real image but only ever told the
+    # model a file path -- no way for the model to actually SEE what it
+    # made. `ToolResultBlock.content`'s own docstring already says
+    # "usually TextBlock/ImageBlock", and the generic mid-turn
+    # degradation mechanism the two tests above already prove correct
+    # (via the synthetic `_ScreenshotTool`) exists specifically for this
+    # case -- this test proves the REAL `ImageGenerationTool` integrates
+    # with that real mechanism correctly, not just a stand-in.
+    import io
+    import sys
+    import types
+
+    import sarva.agent.tools as tools_module
+    from PIL import Image
+
+    monkeypatch.setitem(sys.modules, "diffusers", types.ModuleType("diffusers"))
+    # A genuinely valid, decodable PNG, not just a plausible-looking magic
+    # header -- ImageToTextDegrader really decodes it (via Pillow) to
+    # extract real width/height/format, so this test's own job (proving
+    # the REAL degradation path accepts a REAL ImageGenerationTool result)
+    # needs bytes that path can actually decode, the same fixture shape
+    # test_degraders.py's own `_png_bytes` helper uses.
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), color=(255, 0, 0)).save(buf, format="PNG")
+    real_png_bytes = buf.getvalue()
+    monkeypatch.setattr(
+        tools_module.ImageGenerationTool, "_generate_locally", lambda self, prompt: real_png_bytes
+    )
+
+    call = ToolCallBlock(
+        id="g1", name="generate_image", arguments={"prompt": "a cat", "path": "cat.png"}
+    )
+    captured_second_request_messages = []
+
+    class _CapturingProvider:
+        name = "mock"
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        async def generate(self, request):
+            self.n += 1
+            if self.n == 1:
+                yield DoneEvent(
+                    stop_reason=StopReason.TOOL_USE,
+                    message=Message(role="assistant", content=[call]),
+                    usage=Usage(input_tokens=1, output_tokens=1),
+                )
+                return
+            # The decisive capture: what the SECOND turn's own request
+            # actually contains, after degradation has run -- proving the
+            # real image bytes were recognized and replaced with real
+            # descriptive text (not silently dropped, not sent raw to a
+            # model declared unable to see them).
+            captured_second_request_messages.extend(request.messages)
+            yield DoneEvent(
+                stop_reason=StopReason.END_TURN,
+                message=Message(role="assistant", content=[TextBlock(text="here's a description")]),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    loop = AgentLoop(
+        router=_text_only_router(),
+        providers={"mock": _CapturingProvider()},
+        tools=[ImageGenerationTool()],
+        run_root=run_root,
+        workdir=str(workdir),
+        degraders={Modality.IMAGE: ImageToTextDegrader()},
+    )
+
+    events = [e async for e in loop.run("generate a picture of a cat")]
+
+    assert events[-1].state == AgentState.DONE
+    assert events[-1].final_message.text() == "here's a description"
+    assert (workdir / "cat.png").read_bytes() == real_png_bytes
+
+    # The genuinely decisive assertion: the tool_finished event carries
+    # the real ImageBlock (proving ImageGenerationTool itself constructs
+    # it), and the degraded text the SECOND provider call actually
+    # received describes the real 4x4 PNG -- proving the whole pipeline,
+    # not just that the run happened to end in DONE (which a text-only
+    # result would also do, trivially, with no degradation ever
+    # triggered -- confirmed by first writing this test against a
+    # text-only result and watching it pass for the wrong reason).
+    finished = next(e for e in events if e.type == "tool_finished")
+    assert [c.type for c in finished.result.content] == ["text", "image"]
+    # Degradation replaces content INSIDE the ToolResultBlock's own
+    # nested `content` list, not at the top-level Message.content --
+    # confirmed directly by printing the real message shape before
+    # writing this traversal, not assumed.
+    all_blocks = [
+        block
+        for m in captured_second_request_messages
+        for top in m.content
+        for block in (top.content if top.type == "tool_result" else [top])
+    ]
+    degraded_text = " ".join(b.text for b in all_blocks if hasattr(b, "text"))
+    assert "4x4" in degraded_text
+    assert not any(b.type == "image" for b in all_blocks), (
+        "the real image bytes must never reach a model declared unable to see them"
+    )
+
+
+@pytest.mark.asyncio
 async def test_degradation_fallback_not_triggered_when_a_supporting_model_exists(run_root):
     """Regression guard: with a genuinely vision-capable model available
     (a test-only router — see _vision_capable_router; the real registry's

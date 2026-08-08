@@ -21588,3 +21588,66 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `generate_image` told the model only a file path -- never let it actually see what it made, despite `ToolResultBlock`'s own type explicitly supporting exactly this
+
+Round 250. Continuing the general hardening sweep, this time pointed
+at `ToolResultBlock` itself: its own field comment (`content: list[
+ContentBlock]  # usually TextBlock/ImageBlock`) explicitly names
+`ImageBlock` as an expected content type -- but a grep across the
+whole codebase found no tool anywhere had ever actually returned one.
+`ImageGenerationTool` (round 242) generated a real image and told the
+model only a file path, with no way for it to ever see, verify,
+describe, or decide to regenerate what it made.
+
+**Confirmed safe by construction before touching anything:** `AgentLoop.
+run()` already has a mid-turn modality re-check (the "a tool result
+produced mid-turn... was appended straight into messages with no check
+against what the already-picked model actually supports" fix, several
+dozen rounds back) built specifically for a tool result carrying media
+the routed model can't see -- degrading it via whatever `ImageToText
+Degrader` is configured, or failing the turn cleanly if none is. This
+already-proven generic mechanism (covered by its own tests using a
+synthetic `_ScreenshotTool`) meant no loop-level code was needed here,
+only actually using it.
+
+**Fixed** by returning `ImageBlock(media_type="image/png", data=data)`
+alongside the existing text confirmation -- `data` is the raw bytes
+already in memory (not re-read from disk), so the result stays
+self-contained even if the file were later moved.
+
+**A real test-quality catch, caught before it shipped, not after:**
+the first version of the new regression test asserted only `state ==
+DONE` and the final message text -- both true whether or not the fix
+was even present, since a text-only tool result reaches `DONE`
+trivially with no degradation ever triggered. Caught by actually
+reverting the fix (following this project's own revert-and-check
+discipline) and watching the "passing" test still pass, for the wrong
+reason -- proving nothing, the exact failure mode this project's own
+methodology notes have flagged before. Rewritten around two genuinely
+decisive checks: the `tool_finished` event's own result carries
+exactly `["text", "image"]` content types, and a capturing mock
+provider's second turn receives real degraded text describing the
+actual image dimensions ("4x4", from a real Pillow-generated PNG, not
+a fake magic-header stand-in that would have failed `ImageToTextDegrader`'s
+own real decode step) with no raw image block ever reaching it.
+Reverting the real fix against this rewritten test now correctly
+fails; restored and confirmed passing.
+
+**Also verified live, independent of the loop-level test:** ran the
+actual `ImageGenerationTool` directly against the tiny FLUX test
+fixture (the same one round 242's own live verification used) and
+confirmed the returned `ToolResultBlock` genuinely contains
+`content types: ['text', 'image']`, `image media_type: 'image/png'`,
+and the image bytes byte-for-byte match what was saved to disk.
+
+1 new test, 909 -> 910 selected by default (918 -> 919 total
+collected), `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md` gained a new subsection.
+
+**Next:** continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
