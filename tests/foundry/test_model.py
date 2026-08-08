@@ -272,6 +272,30 @@ def test_transformer_config_rejects_a_negative_max_seq_len():
         _tiny_config(max_seq_len=-5)
 
 
+def test_transformer_config_rejects_a_non_positive_hidden_dim():
+    # A real bug found by a fresh-eyes sweep, the identical shape
+    # already fixed for MoEConfig.expert_hidden_dim in moe.py -- the
+    # same "optional, explicit-override-or-computed-default" field, one
+    # config class over, that fix never propagated to. hidden_dim=0
+    # constructs cleanly and builds a real, silently degenerate model:
+    # SwiGLU's weight matrices allocate as zero-element tensors, and a
+    # real forward pass runs to completion with no error and no NaN --
+    # every layer's entire feedforward computation silently vanishes.
+    # hidden_dim=-5 is worse the other way: it passes construction with
+    # no error at all, then crashes only once DecoderOnlyTransformer is
+    # actually built, with a raw "Trying to create tensor with negative
+    # dimension" RuntimeError instead of a clean ValueError naming the
+    # real problem. None (the documented "use the computed default"
+    # sentinel) is deliberately still allowed through unchanged.
+    import pytest
+
+    with pytest.raises(ValueError, match="hidden_dim"):
+        _tiny_config(hidden_dim=0)
+    with pytest.raises(ValueError, match="hidden_dim"):
+        _tiny_config(hidden_dim=-5)
+    _tiny_config(hidden_dim=None)  # still allowed: "use the computed default"
+
+
 def test_forward_raises_a_clear_error_past_max_seq_len():
     # Found by running examples/03_train_toy_transformer.py's generation
     # loop, which grows the sequence one token at a time past

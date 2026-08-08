@@ -73,6 +73,29 @@ class TransformerConfig:
             raise ValueError(f"n_heads must be positive, got {self.n_heads}")
         if self.dim % self.n_heads != 0:
             raise ValueError(f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
+        # A real bug found by a fresh-eyes sweep, the identical shape
+        # already fixed for `MoEConfig.expert_hidden_dim` in moe.py --
+        # the same "optional, explicit-override-or-computed-default"
+        # field, one config class over, that fix never propagated to.
+        # `hidden_dim=0` constructs cleanly and produces a real,
+        # silently degenerate model: `SwiGLU(dim, 0)`'s weight matrices
+        # allocate as zero-element tensors, and a real forward pass
+        # confirmed live runs to completion with no error and no NaN --
+        # every layer's entire feedforward computation silently
+        # vanishes, an architecture the checkpoint's own config.json
+        # never actually claims. `hidden_dim=-5` is worse for the
+        # opposite reason: it passes construction here with no error at
+        # all, then crashes only once `DecoderOnlyTransformer` is
+        # actually built, with a raw, implementation-leaking
+        # `RuntimeError: Trying to create tensor with negative
+        # dimension` -- confirmed live -- instead of the clean,
+        # actionable `ValueError` every one of this class's other six
+        # sibling fields already raises at this exact point. Reachable
+        # through the identical untrusted `config.json` path as all of
+        # them (`foundry_provider.py`'s own `_CONFIG_FIELDS` includes
+        # `hidden_dim`).
+        if self.hidden_dim is not None and self.hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive or None, got {self.hidden_dim}")
         if self.hidden_dim is None:
             self.hidden_dim = default_swiglu_hidden_dim(self.dim)
         # A real bug found by a fresh-eyes sweep, applying the identical

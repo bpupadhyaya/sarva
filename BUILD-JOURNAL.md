@@ -21698,3 +21698,56 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `TransformerConfig.hidden_dim` -- the identical "optional override" field already fixed for `MoEConfig.expert_hidden_dim` -- was left unvalidated one config class over
+
+Round 261. Continuing the general hardening sweep, this round's own
+investigation exhausted the "sibling parameter" pattern against every
+remaining foundry model config class: `MoEConfig` (already fully
+validated -- all five of its own fields, confirmed by re-reading it
+fresh) and `VisionEncoderConfig` (also already fully validated -- all
+eight fields) both came back clean. `TransformerConfig` -- the main
+text-model config, and the most-fixed class in this package (seven
+sibling-field fixes already shipped: `vocab_size`, `dim`, `n_heads`,
+`n_layers`, `n_kv_heads`, `norm_eps`, `max_seq_len`) -- had one field
+left: `hidden_dim`, the identical "optional, explicit-override-or-
+computed-default" shape `MoEConfig.expert_hidden_dim` was already
+fixed for, in the sibling MoE config class, never propagated back to
+this one.
+
+**Verified live before fixing, the same discipline as every other
+fix in this file:** `hidden_dim=0` constructs cleanly and builds a
+real, silently degenerate model -- `SwiGLU`'s weight matrices allocate
+as zero-element tensors, and a real forward pass confirmed live runs
+to completion with no error and no NaN, silently vanishing every
+layer's entire feedforward computation. `hidden_dim=-5` is worse the
+other way: it passes construction with no error at all, then crashes
+only once `DecoderOnlyTransformer` is actually built, with a raw
+`RuntimeError: Trying to create tensor with negative dimension`
+instead of the clean, actionable `ValueError` every one of this
+class's other seven fields already raises at this exact point.
+Reachable through the identical untrusted `config.json` path as all of
+them. (`rope_theta`, checked the same round for the same gap, turned
+out already adequately protected: `precompute_rope`'s own finiteness
+check already raises a clean `ValueError` at construction time for
+`theta<=0`/NaN/negative, just not through this class's own
+`__post_init__` -- good enough as-is, not touched.)
+
+**Fixed** identically to `expert_hidden_dim`'s own fix: `hidden_dim`
+must be positive, or `None` (still allowed, the documented "use the
+computed default" sentinel, unchanged). **Verified with a genuine
+revert-and-check**: reverted the new check, watched the new test fail
+with `DID NOT RAISE ValueError`, restored it. 1 new test, 913 selected
+by default (922 total collected), `ruff check`/`ruff format --check`
+both clean.
+
+**Next:** the "sibling parameter" lens is now exhausted across every
+foundry model config class this session checked (`TrainerConfig`,
+`WarmupCosineSchedule`, `MoEConfig`, `VisionEncoderConfig`,
+`TransformerConfig`, `run_ablation`, `dpo_loss`) -- all fully
+validated. Continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
