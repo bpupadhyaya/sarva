@@ -55,6 +55,28 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # automated tool call, not a person.
 _CONFIRM_TIMEOUT_SECONDS = 300
 
+# A real bug found by a fresh-eyes sweep of this file's own hang-
+# prevention discipline: `ws_confirm`'s reply read (right below) and
+# every tool call (AgentLoop's own `_TOOL_TIMEOUT_SECONDS`) are both
+# bounded, closing the exact "a client that never replies hangs the
+# connection forever" bug class -- but the very FIRST read on this
+# socket, the initial `{"message": ...}` frame ws_chat waits for right
+# after `accept()`, was never given the same treatment. Confirmed live:
+# a raw ASGI session that completes the handshake and then never sends
+# anything (an idle tab, a proxy that accepts the upgrade but stalls
+# the body, a client that hangs before its own `ws.onopen` handler
+# runs) left `await websocket.receive_json()` blocked indefinitely --
+# the whole handler, and the task backing it, pinned open forever with
+# no recovery short of the underlying TCP connection actually dropping.
+# Unlike the confirm-reply wait, nothing here is waiting on a human:
+# the desktop client (App.tsx) sends its first frame synchronously from
+# `ws.onopen`, using a message the user already typed before the socket
+# was even opened -- so a short bound is correct, not a regression for
+# any real client, matching "a hung connection is scored as a failure,
+# never left to block forever" the same way loop.py's own tool-call
+# timeout already does.
+_INITIAL_FRAME_TIMEOUT_SECONDS = 30
+
 # A real bug found by actually racing two concurrent turns on the same
 # session with asyncio.gather (mirroring /chat and /ws/chat's own
 # concurrency model exactly -- no threads needed, since a single-
@@ -438,7 +460,9 @@ def create_app() -> FastAPI:
         await websocket.accept()
         try:
             try:
-                payload = await websocket.receive_json()
+                payload = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=_INITIAL_FRAME_TIMEOUT_SECONDS
+                )
                 if not isinstance(payload, dict):
                     # Valid JSON, but not an object -- e.g. a bare list or
                     # string -- makes every payload.get(...) call below
@@ -446,6 +470,16 @@ def create_app() -> FastAPI:
                     # handling as a malformed-JSON frame rather than left
                     # to surface as a different, uncaught exception type.
                     raise TypeError(f"expected a JSON object, got {type(payload).__name__}")
+            except TimeoutError:
+                # See _INITIAL_FRAME_TIMEOUT_SECONDS' own comment: a
+                # client that completes the handshake and then never
+                # sends anything must not pin this connection open
+                # forever.
+                await _send_failure(
+                    f"timed out after {_INITIAL_FRAME_TIMEOUT_SECONDS}s waiting for the "
+                    "initial request"
+                )
+                return
             except ValueError as e:
                 # A real bug found by actually sending a non-JSON first
                 # frame: Starlette's receive_json() does a bare

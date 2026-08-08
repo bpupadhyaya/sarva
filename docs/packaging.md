@@ -1018,6 +1018,43 @@ Verified by reverting and watching the new test fail with the literal
 old bug's own shape: the raw `RuntimeError` propagating out of the ASGI
 call. 1 new test, 848 → 849 Python tests.
 
+### The *initial* frame read had no timeout either — the one gap left after every downstream `/ws/chat` wait had already been bounded
+
+A much later hardening sweep, specifically checking this endpoint's own
+hang-prevention discipline against itself, found the one remaining
+unbounded wait: `payload = await websocket.receive_json()`, the very
+first line of the handler right after `accept()`. Both the confirmation-
+reply read (`ws_confirm`, above) and every tool call (`AgentLoop`'s own
+`_TOOL_TIMEOUT_SECONDS` in `agent/loop.py`) had already been bounded
+against a party that never responds — but the initial message frame
+itself, which every one of *those* fixes implicitly assumes already
+arrived, was never given the same treatment.
+
+Confirmed live driving the real ASGI app directly (the same
+scope/receive/send technique the send-side-disconnect fix above uses):
+a session that completes the WebSocket handshake and then never sends
+anything left the handler blocked on `receive_json()` indefinitely — no
+recovery short of the underlying TCP connection actually dropping. This
+isn't a contrived input; an idle browser tab, a proxy that accepts the
+upgrade but stalls the body, or a client that hangs before its own
+`onopen` handler runs (`apps/desktop/src/App.tsx`'s WebSocket client
+sends its first frame synchronously from `onopen`, using a message the
+user already typed before the socket even opened — so nothing legitimate
+is ever waiting on a human at this specific point, unlike the
+confirmation-reply wait) all produce this shape.
+
+Fixed with the same tool already used for both the tool-call and
+confirmation-reply cases: `asyncio.wait_for(websocket.receive_json(),
+timeout=_INITIAL_FRAME_TIMEOUT_SECONDS)`, a new, deliberately short
+30-second constant — short because, unlike `_CONFIRM_TIMEOUT_SECONDS`'s
+300 seconds, nothing legitimate here is waiting on a person to read a
+prompt and click a button. A timeout resolves to the same clean
+`state_changed` + `run_done` failure-frame pair every other early
+failure on this endpoint already produces, not a crash and not a silent
+drop. Verified by reverting and watching the new test hang past a 20-second
+wall-clock deadline instead of completing — the literal old bug's own
+shape — before re-applying. 1 new test, 913 Python tests total.
+
 ## First-run guided setup — a real gap between what was promised and what shipped
 
 T4's own definition of done, and the README's own quickstart text, have

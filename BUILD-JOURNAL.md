@@ -21751,3 +21751,46 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+---
+
+## Round 266: `/ws/chat`'s initial frame read had no timeout either
+
+Continuing the module-by-module hardening sweep (rounds 262-265 came
+back clean on `providers/registry.py`, `distill.py`, `mcp_client.py`,
+`config.py`), this round's target was `server/app.py` -- and turned up
+a real, live-confirmed hang.
+
+`ws_chat`'s very first read on a new connection, `payload = await
+websocket.receive_json()`, had no timeout. Every OTHER blocking wait on
+this same endpoint had already been bounded across several earlier
+rounds' worth of hardening: the confirmation-reply read
+(`_CONFIRM_TIMEOUT_SECONDS`, 300s) and every tool call
+(`_TOOL_TIMEOUT_SECONDS` in `agent/loop.py`) -- but the initial message
+frame itself, which both of those fixes implicitly assume already
+arrived, was missed.
+
+**Verified live** driving the real ASGI app directly (scope/receive/send):
+a session that completes the WebSocket handshake and then never sends
+anything left the handler blocked on `receive_json()` indefinitely.
+Not contrived -- an idle browser tab, a stalling proxy, or a client
+that hangs before its own `onopen` fires all produce this shape, and
+nothing legitimate is waiting on a human at this exact point (the
+desktop client sends its first frame synchronously from `onopen`,
+unlike the confirmation-reply wait which genuinely does wait on a
+person).
+
+**Fixed** with the same tool already used for the other two cases:
+`asyncio.wait_for(..., timeout=_INITIAL_FRAME_TIMEOUT_SECONDS)`, a new
+30-second constant -- deliberately short, since nothing here waits on a
+human. A timeout now resolves to the same clean `state_changed` +
+`run_done` failure-frame pair every other early failure on this
+endpoint already produces.
+
+**Verified with a genuine revert-and-check**: reverted the fix, watched
+the new test hang past a 20-second wall-clock deadline (no `timeout`
+binary on this machine -- used `perl -e 'alarm N; exec @ARGV'` instead)
+instead of completing, restored it. 1 new test, 914 selected. `ruff
+check`/`ruff format --check` both clean.
+
+**Next:** continuing the hardening sweep, module by module.

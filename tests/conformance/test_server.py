@@ -1069,6 +1069,37 @@ def test_websocket_with_a_non_object_json_frame_fails_cleanly_not_a_bare_disconn
     assert events[-1]["state"] == "failed"
 
 
+def test_websocket_a_client_that_never_sends_anything_times_out_instead_of_hanging_forever(
+    monkeypatch,
+):
+    # A real bug found by a fresh-eyes sweep of this file's own hang-
+    # prevention discipline: ws_confirm's reply read and every tool call
+    # are both bounded against a client that never replies, but the very
+    # FIRST read on this socket -- the initial {"message": ...} frame
+    # ws_chat waits for right after accept() -- had no timeout at all.
+    # Confirmed live with a raw ASGI session that completes the
+    # handshake and then never sends anything: the handler stayed
+    # blocked on receive_json() indefinitely, with no recovery short of
+    # the underlying TCP connection actually dropping.
+    import sarva.server.app as app_module
+
+    monkeypatch.setattr(app_module, "_INITIAL_FRAME_TIMEOUT_SECONDS", 0.2)
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        # Deliberately never send anything.
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert "timed out" in state_changed["detail"]
+    assert events[-1]["state"] == "failed"
+
+
 def test_websocket_with_a_non_string_session_fails_cleanly_not_a_bare_disconnect(monkeypatch):
     # A real bug found by actually sending {"session": 123}:
     # SessionStore._sanitize()'s regex match raises a plain TypeError
