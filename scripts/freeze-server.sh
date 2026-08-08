@@ -75,12 +75,41 @@ cd "$REPO_ROOT"
 # PyInstaller can't treat a compiled binary as an analyzable script at
 # all). The wrapper is a real .py file on every platform, sidestepping
 # the difference entirely.
+# A real bug found by a fresh-eyes sweep, prompted by asking whether
+# this session's own new `sarva[image]` extra (torch + diffusers +
+# transformers, several hundred MB installed) could bloat the ONE
+# frozen artifact this whole one-click desktop promise depends on --
+# confirmed live, not theorized: running this exact freeze from a real
+# venv that happened to have sarva[foundry]/sarva[image] installed
+# (this repo's own CI test job runs `uv sync --all-packages
+# --all-extras --group dev`, an entirely natural venv for a developer
+# to also freeze from) produced a 239MB sidecar, versus this script's
+# own documented prep step (`uv sync --all-packages --group dev`, no
+# `--all-extras`) which never installs them at all. PyInstaller has no
+# concept of "this package is an optional runtime extra" -- it bundles
+# whatever's importable in the freezing venv, so the shipped sidecar's
+# size silently depended on which venv happened to freeze it, not on
+# anything declared here. These are genuinely optional, CLI-only power
+# -user capabilities (local foundry checkpoints, local image
+# generation, local Whisper transcription) that every real caller
+# already handles being absent gracefully (`sarva doctor`, `Foundry
+# Provider.__init__`, `ImageGenerationTool`'s own OpenAI fallback) --
+# excluding them here makes the one-click sidecar's size deterministic
+# regardless of the freezing venv, rather than relying on a developer
+# remembering not to freeze from an --all-extras venv.
 "$VENV_BIN/pyinstaller$EXE_SUFFIX" --onefile --name sarva-server \
   --distpath "$NATIVE_ROOT/build/freeze/dist" \
   --workpath "$NATIVE_ROOT/build/freeze/work" \
   --specpath "$NATIVE_ROOT/build/freeze" \
   --add-data "$NATIVE_ROOT/core/sarva/providers/data${ADD_DATA_SEP}sarva/providers/data" \
   --add-data "$NATIVE_ROOT/core/sarva/server/static${ADD_DATA_SEP}sarva/server/static" \
+  --exclude-module torch \
+  --exclude-module diffusers \
+  --exclude-module transformers \
+  --exclude-module accelerate \
+  --exclude-module sentencepiece \
+  --exclude-module faster_whisper \
+  --exclude-module ctranslate2 \
   --noconfirm \
   "$NATIVE_ROOT/scripts/_freeze_entrypoint.py"
 

@@ -1226,6 +1226,39 @@ also has no Windows machine to verify runtime behavior on, only CI's
 `windows-latest` `cargo check` job, which confirms the code compiles
 correctly for the target, not that it behaves correctly at runtime.
 
+**`scripts/freeze-server.sh`'s one shipped artifact silently depended
+on which venv happened to freeze it — a real, live-confirmed size
+regression, not a hypothetical one.** A fresh-eyes sweep of this
+session's own new `sarva[image]` extra (torch + diffusers +
+transformers, several hundred MB installed) asked whether it could
+bloat the ONE frozen binary the whole one-click desktop promise
+depends on. Confirmed live: running the real freeze from a venv that
+happened to have `sarva[foundry]`/`sarva[image]` installed (this
+repo's own CI test job runs `uv sync --all-packages --all-extras
+--group dev` — an entirely natural venv for a developer to also freeze
+from) produced a 239MB sidecar; this script's own documented prep step
+(`uv sync --all-packages --group dev`, deliberately no `--all-extras`)
+never installs them at all. PyInstaller has no concept of "this
+package is an optional runtime extra" — it bundles whatever's
+importable in the freezing venv, so the shipped sidecar's size
+depended entirely on which venv happened to freeze it, never anything
+declared in this script. Fixed with explicit `--exclude-module` flags
+(`torch`, `diffusers`, `transformers`, `accelerate`, `sentencepiece`,
+`faster_whisper`, `ctranslate2`) — these are genuinely optional,
+CLI-only power-user capabilities (local foundry checkpoints, local
+image generation, local Whisper transcription) that every real caller
+already handles being absent gracefully (`sarva doctor`,
+`FoundryProvider.__init__`, `ImageGenerationTool`'s own OpenAI
+fallback), so excluding them makes the sidecar's size deterministic
+regardless of the freezing venv, rather than relying on a developer
+remembering not to freeze from an `--all-extras` one. **Verified with a
+real freeze-and-run, not just a smaller number:** 239MB → 39MB, then a
+real `serve` from the excluded-module binary confirmed `/health`,
+`/models`, and `/doctor` all still respond correctly — `/doctor`
+specifically confirmed reporting all three now-excluded capabilities
+as cleanly "not installed" via the exact same graceful-degradation
+path a real end user's install would hit, not a crash.
+
 **A real bug found by actually checking what a `log::info!`/`log::warn!`
 call does with no logger registered** (a standalone `log`-crate repro,
 not just reading the plugin's source): it's a genuine silent no-op —

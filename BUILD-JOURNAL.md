@@ -21427,3 +21427,72 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The one-click desktop app's own frozen sidecar silently depended on which venv happened to freeze it -- a real, live-confirmed 239MB -> 39MB size regression, not a hypothetical one
+
+Round 246. Continuing the general hardening sweep, extended into a
+part of the build pipeline CI itself explicitly documents it does NOT
+exercise (the desktop CI job only creates a placeholder sidecar binary
+to satisfy Tauri's build-script path check, then runs `cargo check` --
+its own comment says so directly: "this job checks compile
+correctness, not that the sidecar itself works"). Asked whether this
+session's own new `sarva[image]` extra (torch + diffusers +
+transformers, several hundred MB installed) could bloat the one frozen
+artifact the whole one-click desktop promise depends on, since nothing
+in this repo had actually run the real freeze process since these
+heavy optional extras (`sarva[foundry]`, now also `sarva[image]`) were
+added.
+
+**Confirmed live, not theorized:** ran the real `scripts/freeze-
+server.sh` against a venv that happened to have `sarva[foundry]`/
+`sarva[image]` installed -- this repo's own CI test job runs `uv sync
+--all-packages --all-extras --group dev`, an entirely natural venv for
+a developer to also freeze from -- and got a 239MB sidecar binary
+(`hook-transformers.py` and `torch/_inductor/codecache.py` both
+visibly processed in PyInstaller's own build log). The script's own
+documented prep step (its error message: "run 'uv sync --all-packages
+--group dev' first," deliberately no `--all-extras`) never installs
+these at all, so the DOCUMENTED release path was never actually
+exposed to this -- but PyInstaller has no concept of "this package is
+an optional runtime extra": it bundles whatever's importable in the
+freezing venv, so the shipped sidecar's real size silently depended on
+which venv happened to freeze it, never on anything declared in the
+script itself. A real footgun, not a shipped-and-broken bug, but a
+genuine, easy-to-hit one given CI's OWN test venv setup is exactly the
+trap.
+
+**Fixed** with explicit `--exclude-module` flags (`torch`, `diffusers`,
+`transformers`, `accelerate`, `sentencepiece`, `faster_whisper`,
+`ctranslate2`) added to the PyInstaller invocation. These are
+genuinely optional, CLI-only power-user capabilities (local foundry
+checkpoints, local image generation, local Whisper transcription) that
+every real caller already handles being absent gracefully (`sarva
+doctor`, `FoundryProvider.__init__`, `ImageGenerationTool`'s own
+OpenAI fallback) -- excluding them makes the sidecar's size
+deterministic regardless of the freezing venv, rather than relying on
+a developer remembering not to freeze from an `--all-extras` one.
+
+**Verified with a real freeze-and-run, the same discipline this
+project's own original T4 sidecar entry established ("the actual
+one-click path, not just the freeze"):** re-froze with the exclusions
+in place -- 239MB -> 39MB, PyInstaller's own analysis dropped from 393
+processed entries to 47. Then ran the real excluded-module binary as a
+standalone `serve` process and confirmed `/health`, `/models`, and
+`/doctor` all still respond correctly over real HTTP -- `/doctor`
+specifically confirmed reporting all three now-excluded capabilities
+("Foundry," "Speech-to-text," "Image generation") as cleanly "not
+installed," the exact same graceful-degradation path a real end user's
+default install would hit, not a crash. All local build artifacts
+(`build/`, `apps/desktop/src-tauri/bin/`) cleaned up afterward --
+correctly gitignored, never meant to be committed.
+
+`docs/packaging.md`'s desktop-app section gained a new subsection with
+the full before/after numbers. No Python/TypeScript files changed;
+`bash -n` confirmed the modified script's own syntax is still clean.
+
+**Next:** continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
