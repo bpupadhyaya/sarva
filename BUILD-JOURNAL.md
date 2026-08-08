@@ -21203,3 +21203,68 @@ honest-gap writeup above.
 **One item remains** on the completeness-audit backlog: image
 generation, same author direction (open-source/free by default, paid
 provider APIs opt-in only).
+
+
+## `ImageGenerationTool` shipped: closes the completeness-audit backlog -- correctly-licensed local model by default, verified end to end with a real generation, not just mocked
+
+Round 242. Closed the third and final completeness-audit backlog item
+(round 46's "image generation"), same author direction as the previous
+two: open-source/freely-available by default, paid APIs an explicit
+opt-in only for a user who already has one.
+
+`generate_image` (`core/sarva/agent/tools.py`) generates a PNG from a
+prompt via `black-forest-labs/FLUX.1-schnell`, through the new optional
+`sarva[image]` extra (`torch`/`diffusers`/`transformers`/`accelerate`,
+all Apache/BSD-licensed, the same "commodity substrate" tier
+`sarva[foundry]` already draws). **The license check specifically
+mattered and wasn't skipped:** the first, more name-recognized
+candidates (Stability AI's SD-Turbo/SDXL-Turbo) turned out to require a
+paid membership for commercial use above a revenue threshold -- checked
+directly against their real license pages via WebFetch, not assumed.
+FLUX.1-schnell is confirmed genuinely Apache-2.0, no threshold, no
+membership, the same way this round now demands.
+
+**Verified with a real, live generation -- a step further than round
+241's `RunCodeTool` could go, and worth naming as the difference:**
+`pip install`d `diffusers`/`transformers`/`accelerate` into this dev
+venv (bootstrapping `pip` first via `ensurepip`, since neither `uv` nor
+`pip` was available by default) and ran the ACTUAL `FluxPipeline.
+from_pretrained` / `pipe(prompt=..., num_inference_steps=...)` /
+`.images[0].save()` call chain for real, end to end, against
+`katuni4ka/tiny-random-flux` -- a public, few-megabyte FLUX test
+fixture with random weights standing in for the real ~24GB production
+checkpoint, which wasn't practical to download live here. Confirmed a
+real 32x32 PNG round-tripped through the exact tool code that will run
+in production, just against a smaller checkpoint. A dedicated
+`@pytest.mark.live` test runs this identical real round-trip end to
+end (with `pytest.importorskip("diffusers")` so CI's default `-m 'not
+live'` run never needs the extra just to collect the file).
+
+If `sarva[image]` isn't installed but `OPENAI_API_KEY` is already
+configured, falls back to the paid OpenAI Images API instead --
+verified with a mocked client asserting the real request shape
+(`prompt`, `model="dall-e-3"`, `response_format="b64_json"`) and a
+real decoded-bytes round-trip to disk, plus a dedicated test for the
+"neither path available" honest error and one for a clean OpenAI
+failure surfaced as a tool error rather than a raw exception.
+`destructive=True` by default, matching `WriteFileTool`'s own
+reasoning (a real file write, can overwrite an existing one) plus a
+real monetary cost on the paid fallback.
+
+5 new tests (4 run by default, 1 live -- 901 -> 905 selected by
+default, 909 -> 914 total collected). `ruff check`/`ruff format
+--check` both clean. `docs/agent-loop.md` gained an `ImageGenerationTool`
+section. `core/pyproject.toml` gained the `image` extra, with an
+honest note distinguishing what was live-confirmed required
+(`transformers`) from what's included defensively but not confirmed
+against the tiny test fixture (`sentencepiece`/`protobuf`, needed by
+T5-family tokenizers generally, not isolated-tested here).
+
+**All three completeness-audit backlog items are now closed** (rounds
+240-242: `WebSearchTool`, `RunCodeTool`, `ImageGenerationTool`), all on
+the same author-given principle: open-source/freely-available tools by
+default, purchased APIs as an explicit additional option only for
+users who already have one. The three infra-blocked items remain
+deferred (Tauri `csp: null`, RL harness sandboxing, inference
+batching); the quantization/`Budget` NaN-validation gap has three
+confirmed-but-unreachable instances tracked together.

@@ -8,6 +8,8 @@ to gate on confirmation. This keeps the security policy in one place: an
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import os
 import shutil
 import signal
@@ -24,7 +26,7 @@ import httpx
 
 from sarva.agent.events import AgentResult
 from sarva.agent.subagents import DelegateTool
-from sarva.atomic_write import atomic_write_text
+from sarva.atomic_write import atomic_write_bytes, atomic_write_text
 from sarva.config import get_env
 from sarva.memory.longterm import (
     DEFAULT_LONGTERM_MEMORY_DIR,
@@ -71,6 +73,20 @@ _CODE_EXEC_IMAGES = {"python": "python:3.12-slim", "bash": "bash:5"}
 _CODE_EXEC_TIMEOUT_SECONDS = 30
 _MAX_CODE_OUTPUT_BYTES = 200_000
 _CONTAINER_RUNTIME_PROBE_TIMEOUT_SECONDS = 5.0
+
+# black-forest-labs/FLUX.1-schnell: confirmed Apache-2.0 (genuinely free
+# for personal AND commercial use, unlike several other popular
+# open-weight image models -- checked directly against the model's own
+# license file, not assumed from name recognition; e.g. Stability AI's
+# own SD-Turbo/SDXL-Turbo require a paid membership for commercial use
+# above a threshold, so they're the paid-tier shape this tool's local
+# path deliberately avoids as its DEFAULT). 4-step distilled generation
+# keeps local inference plausible without a GPU, though still slow on
+# CPU alone -- honestly not fast, but genuinely free with no account.
+_IMAGE_GEN_MODEL = "black-forest-labs/FLUX.1-schnell"
+_IMAGE_GEN_STEPS = 4
+_IMAGE_GEN_TIMEOUT_SECONDS = 600
+_OPENAI_IMAGE_MODEL = "dall-e-3"
 
 
 class ToolContext:
@@ -1056,6 +1072,207 @@ class WebSearchTool:
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text="\n".join(lines))])
 
 
+class ImageGenerationTool:
+    """Destructive=True, matching `WriteFileTool` -- this tool writes a
+    real file to `path`, which can overwrite an existing one, and (via
+    its optional paid fallback) can incur a real monetary cost, both
+    real reasons the loop's confirm-gate should ask first.
+
+    Free by default: a local, open-weight diffusion model
+    (`black-forest-labs/FLUX.1-schnell`, genuinely Apache-2.0 -- see
+    `_IMAGE_GEN_MODEL`'s own comment for why that license check
+    specifically mattered here), matching design doc §2's "free tier
+    must truly be free" principle the same way `WebSearchTool` already
+    applies it. Requires the optional `sarva[image]` extra (torch +
+    diffusers + transformers, all Apache/BSD-licensed commodity
+    substrate, not vendored model code) -- NOT part of the default
+    install, since the model itself is large and the free tier stays
+    genuinely zero-cost only if this one heavy capability needs an
+    explicit opt-in the way `sarva[foundry]`/`sarva[audio]` already do.
+
+    If `sarva[image]` isn't installed but `OPENAI_API_KEY` is already
+    configured (the same key already used for chat), falls back to the
+    paid OpenAI Images API instead -- a real, explicit "additional
+    option, only if you already have it" path per the author's own
+    direction. Never preferred over the free local model when that IS
+    installed; only reached when the free path genuinely isn't
+    available."""
+
+    spec = ToolSpec(
+        name="generate_image",
+        description=(
+            "Generate an image from a text prompt and save it as a PNG file "
+            "relative to the working directory. Free by default (a local, "
+            "open-weight model -- requires the optional sarva[image] install, "
+            "and can be slow without a GPU); falls back to the paid OpenAI "
+            "Images API if sarva[image] isn't installed but OPENAI_API_KEY is "
+            "configured."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "path": {"type": "string"},
+            },
+            "required": ["prompt", "path"],
+            "additionalProperties": False,
+        },
+        destructive=True,
+    )
+
+    def __init__(self) -> None:
+        self._pipeline: Any = None
+        # Guards BOTH the lazy pipeline load AND every actual generation
+        # call -- deliberately coarser than RememberTool's own
+        # double-checked-locking pattern above (which only locks the
+        # narrow first-use window): a diffusion pipeline is not
+        # documented as safe for concurrent `__call__`s from multiple
+        # threads on one instance, and typical hardware this runs on
+        # (one GPU, or CPU alone) can't usefully run two generations in
+        # parallel anyway, so serializing every local call is the
+        # correct behavior here, not just an easy simplification.
+        self._pipeline_lock = threading.Lock()
+
+    def _generate_locally(self, prompt: str) -> bytes:
+        with self._pipeline_lock:
+            if self._pipeline is None:
+                import torch
+                from diffusers import FluxPipeline
+
+                # cuda > mps (Apple Silicon) > cpu -- confirmed live in
+                # this dev environment that FluxPipeline loads and runs
+                # correctly on `cpu` (verified against a tiny public
+                # test fixture, katuni4ka/tiny-random-flux, since no
+                # multi-GB download of the real model was practical
+                # here -- see docs/agent-loop.md for the full honest
+                # scope of what is and isn't live-verified).
+                device = (
+                    "cuda"
+                    if torch.cuda.is_available()
+                    else "mps"
+                    if torch.backends.mps.is_available()
+                    else "cpu"
+                )
+                dtype = torch.bfloat16 if device != "cpu" else torch.float32
+                pipeline = FluxPipeline.from_pretrained(_IMAGE_GEN_MODEL, torch_dtype=dtype)
+                self._pipeline = pipeline.to(device)
+            result = self._pipeline(
+                prompt=prompt,
+                num_inference_steps=_IMAGE_GEN_STEPS,
+                guidance_scale=0.0,
+            )
+            buf = io.BytesIO()
+            result.images[0].save(buf, format="PNG")
+            return buf.getvalue()
+
+    async def _generate_via_openai(self, prompt: str, api_key: str) -> bytes:
+        import openai
+
+        client = openai.AsyncOpenAI(api_key=api_key)
+        response = await client.images.generate(
+            prompt=prompt,
+            model=_OPENAI_IMAGE_MODEL,
+            size="1024x1024",
+            response_format="b64_json",
+            n=1,
+        )
+        return base64.b64decode(response.data[0].b64_json)
+
+    def _save(self, path: Path, data: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(path, data)
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        prompt = args["prompt"]
+        if not prompt.strip():
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text="prompt must not be empty")],
+                is_error=True,
+            )
+        path = _within_workdir(ctx.workdir, args["path"])
+
+        try:
+            import diffusers  # noqa: F401
+
+            local_available = True
+        except ImportError:
+            local_available = False
+
+        if local_available:
+            try:
+                # A real, documented limitation, not silently assumed
+                # away: unlike RunShellTool's subprocess (which a real
+                # OS signal can actually terminate), `asyncio.wait_for`
+                # timing out here only stops AWAITING the thread --
+                # Python has no supported API to forcibly kill a running
+                # thread, so a genuinely hung/slow generation keeps
+                # running to completion in the background rather than
+                # truly stopping. Harmless to the event loop itself
+                # (the work is already off it, on a thread-pool worker),
+                # but the timeout below bounds how long THIS call waits,
+                # not how long the underlying inference actually runs.
+                data = await asyncio.wait_for(
+                    asyncio.to_thread(self._generate_locally, prompt),
+                    timeout=_IMAGE_GEN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                return ToolResultBlock(
+                    tool_call_id="",
+                    content=[
+                        TextBlock(
+                            text=f"image generation timed out after "
+                            f"{_IMAGE_GEN_TIMEOUT_SECONDS}s (local generation can be "
+                            "slow without a GPU)"
+                        )
+                    ],
+                    is_error=True,
+                )
+            except Exception as e:
+                # Broad by necessity, the same reasoning
+                # FoundryProvider.__init__'s own broad except around
+                # load_checkpoint_bundle() already documents: model
+                # loading/inference can fail in many library-specific
+                # ways (OOM, a corrupted download cache, an
+                # incompatible torch build) that don't share one common
+                # exception type -- reported as a clean tool error
+                # rather than propagating a raw library traceback.
+                return ToolResultBlock(
+                    tool_call_id="",
+                    content=[TextBlock(text=f"local image generation failed: {e}")],
+                    is_error=True,
+                )
+        else:
+            openai_key = get_env("OPENAI_API_KEY")
+            if not openai_key:
+                return ToolResultBlock(
+                    tool_call_id="",
+                    content=[
+                        TextBlock(
+                            text="generate_image needs either the optional sarva[image] "
+                            "extra installed (free, local, no API key -- see docs) or a "
+                            "configured OPENAI_API_KEY (paid, via `sarva config set "
+                            "--openai-api-key` or the OPENAI_API_KEY env var) -- neither "
+                            "was found."
+                        )
+                    ],
+                    is_error=True,
+                )
+            try:
+                import openai as openai_module
+
+                data = await self._generate_via_openai(prompt, openai_key)
+            except openai_module.APIError as e:
+                return ToolResultBlock(
+                    tool_call_id="",
+                    content=[TextBlock(text=f"OpenAI image generation failed: {e}")],
+                    is_error=True,
+                )
+
+        await asyncio.to_thread(self._save, path, data)
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text=f"image saved to {path}")])
+
+
 class RememberTool:
     """Non-destructive: appends to the memory store, never overwrites or
     deletes anything a user or the model already saved.
@@ -1430,6 +1647,7 @@ BUILTIN_TOOLS: list[Tool] = [
     RunCodeTool(),
     WebFetchTool(),
     WebSearchTool(),
+    ImageGenerationTool(),
     RememberTool(),
     RecallMemoryTool(),
     NoteTool(),

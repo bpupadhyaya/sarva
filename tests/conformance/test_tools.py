@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -13,6 +15,7 @@ import pytest
 import sarva.agent.tools as tools_module
 from sarva.agent.tools import (
     EditFileTool,
+    ImageGenerationTool,
     NoteTool,
     ReadFileTool,
     RecallMemoryTool,
@@ -1143,6 +1146,133 @@ async def test_web_search_live(ctx, monkeypatch):
     result = await tool.run({"query": "python programming language"}, ctx)
     assert not result.is_error
     assert "python.org" in result.content[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_generate_image_rejects_an_empty_prompt(ctx):
+    tool = ImageGenerationTool()
+    result = await tool.run({"prompt": "   ", "path": "out.png"}, ctx)
+    assert result.is_error
+    assert "must not be empty" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_generate_image_reports_a_clear_error_when_neither_path_is_available(
+    ctx, monkeypatch
+):
+    # sys.modules[name] = None is the standard way to simulate "this
+    # package genuinely isn't installed" for an `import` statement
+    # inside the code under test, without actually uninstalling it from
+    # this dev environment (diffusers IS installed here, for the live
+    # test below) -- Python re-raises ImportError for any subsequent
+    # `import diffusers` once its sys.modules entry is None.
+    monkeypatch.setitem(sys.modules, "diffusers", None)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    tool = ImageGenerationTool()
+    result = await tool.run({"prompt": "a cat", "path": "cat.png"}, ctx)
+
+    assert result.is_error
+    assert "sarva[image]" in result.content[0].text
+    assert "OPENAI_API_KEY" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_generate_image_falls_back_to_openai_when_local_is_unavailable(ctx, monkeypatch):
+    # The explicit, opt-in paid path -- only reachable here because the
+    # free local path is simulated unavailable AND a key is configured,
+    # never preferred over the free path when it works.
+    monkeypatch.setitem(sys.modules, "diffusers", None)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+
+    fake_png_bytes = b"\x89PNG\r\n\x1a\nnot a real png but real bytes"
+    fake_b64 = base64.b64encode(fake_png_bytes).decode()
+    captured = {}
+
+    class _FakeImageData:
+        b64_json = fake_b64
+
+    class _FakeResponse:
+        data = [_FakeImageData()]
+
+    class _FakeImages:
+        async def generate(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeResponse()
+
+    class _FakeClient:
+        def __init__(self, api_key=None):
+            captured["api_key"] = api_key
+            self.images = _FakeImages()
+
+    import openai
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", _FakeClient)
+
+    tool = ImageGenerationTool()
+    result = await tool.run({"prompt": "a cat wearing a hat", "path": "cat.png"}, ctx)
+
+    assert not result.is_error
+    assert captured["api_key"] == "sk-test-key"
+    assert captured["prompt"] == "a cat wearing a hat"
+    assert captured["model"] == tools_module._OPENAI_IMAGE_MODEL
+    saved_path = Path(ctx.workdir) / "cat.png"
+    assert saved_path.read_bytes() == fake_png_bytes
+
+
+@pytest.mark.asyncio
+async def test_generate_image_reports_an_openai_failure_as_a_tool_error(ctx, monkeypatch):
+    monkeypatch.setitem(sys.modules, "diffusers", None)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+
+    class _FakeImages:
+        async def generate(self, **kwargs):
+            import openai
+
+            raise openai.APIConnectionError(
+                message="connection failed",
+                request=httpx.Request("POST", "https://api.openai.com/v1/images/generations"),
+            )
+
+    class _FakeClient:
+        def __init__(self, api_key=None):
+            self.images = _FakeImages()
+
+    import openai
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", _FakeClient)
+
+    tool = ImageGenerationTool()
+    result = await tool.run({"prompt": "a cat", "path": "cat.png"}, ctx)
+
+    assert result.is_error
+    assert "OpenAI image generation failed" in result.content[0].text
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_generate_image_uses_the_local_model_end_to_end(ctx, monkeypatch):
+    """Requires network access (to fetch the test fixture from the HF
+    Hub) and the optional sarva[image] extra -- skipped by default (see
+    pyproject `-m 'not live'`). Uses a tiny public FLUX test fixture
+    (katuni4ka/tiny-random-flux, a few MB, random weights) in place of
+    the real production model (black-forest-labs/FLUX.1-schnell,
+    ~24GB) so this test is actually runnable in a real CI/dev
+    environment rather than only theoretically possible -- the tool
+    code exercised is identical either way, only the checkpoint
+    differs."""
+    pytest.importorskip("diffusers")
+    monkeypatch.setattr(tools_module, "_IMAGE_GEN_MODEL", "katuni4ka/tiny-random-flux")
+
+    tool = ImageGenerationTool()
+    result = await asyncio.wait_for(
+        tool.run({"prompt": "a red circle", "path": "generated/out.png"}, ctx), timeout=120
+    )
+
+    assert not result.is_error
+    saved_path = Path(ctx.workdir) / "generated" / "out.png"
+    assert saved_path.exists()
+    assert saved_path.stat().st_size > 0
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,23 @@ foundry = ["sarva-foundry"]
 # so this stays a lightweight extra, not a second heavy ML stack next to
 # sarva[foundry].
 audio = ["faster-whisper>=1.0"]
+# Local text-to-image generation (see sarva/agent/tools.py's
+# ImageGenerationTool). A genuinely heavy extra -- torch + diffusers +
+# transformers, the same "no black boxes for the model itself, commodity
+# substrate for the numerical/inference backend" line sarva[foundry]
+# already draws -- kept out of the hard dependency list for the same
+# reason: most Sarva installs never generate images and shouldn't be
+# forced to pull in a multi-GB stack. `transformers` is confirmed live
+# as a real, required import (FluxPipeline.from_pretrained raises
+# ModuleNotFoundError without it, tested directly against a tiny public
+# FLUX test fixture, not assumed from docs). `sentencepiece`/`protobuf`
+# are included defensively for the T5 tokenizer FLUX.1-schnell's real
+# weights use -- NOT confirmed strictly required against the tiny test
+# fixture (its own fast tokenizer loaded fine without them), so this is
+# an honest "commonly needed by this tokenizer family, not verified
+# against the actual production model" inclusion, not a live-confirmed
+# one like the others.
+image = ["torch>=2.5", "diffusers>=0.30", "transformers>=4.44", "accelerate>=0.30", "sentencepiece>=0.2", "protobuf>=4.25"]
 
 [project.scripts]
 sarva = "sarva.cli:app"

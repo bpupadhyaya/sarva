@@ -207,18 +207,19 @@ class Tool(Protocol):
     async def run(self, args: dict, ctx: ToolContext) -> ToolResultBlock: ...
 ```
 
-`BUILTIN_TOOLS` ships twelve: `ReadFileTool`, `WriteFileTool`,
+`BUILTIN_TOOLS` ships thirteen: `ReadFileTool`, `WriteFileTool`,
 `EditFileTool` (a targeted find-and-replace edit, distinct from
 `WriteFileTool`'s always-rewrite-the-whole-file contract — see the
 design doc's own §3.5 "file read/write/edit" line, the last of that
 trio to get built), `RunShellTool`, `RunCodeTool` (below), `WebFetchTool`,
-`WebSearchTool` (below), `RememberTool`, `RecallMemoryTool`
-(session-scoped semantic recall), `NoteTool`, `SearchNotesTool`
-(durable, cross-session markdown notes — see the memory chapter for all
-four), and `DelegateTool` (subagent fan-out — see below). MCP-backed
-tools (see the MCP chapter) implement the exact same `Tool` protocol,
-which is why the loop never needs to know or care whether a given tool
-call is local Python or a round trip to a subprocess speaking MCP.
+`WebSearchTool` (below), `ImageGenerationTool` (below), `RememberTool`,
+`RecallMemoryTool` (session-scoped semantic recall), `NoteTool`,
+`SearchNotesTool` (durable, cross-session markdown notes — see the
+memory chapter for all four), and `DelegateTool` (subagent fan-out —
+see below). MCP-backed tools (see the MCP chapter) implement the exact
+same `Tool` protocol, which is why the loop never needs to know or
+care whether a given tool call is local Python or a round trip to a
+subprocess speaking MCP.
 
 ### `RunCodeTool`: genuine sandbox isolation via Docker/Podman, no unsandboxed fallback ever
 
@@ -340,6 +341,53 @@ fixed hosts this tool itself chooses, never a caller/model-supplied
 URL — the threat model SSRF guards against (steering a fetch at an
 internal address) doesn't apply to a destination the code picks
 itself, unlike `web_fetch`'s `url` argument.
+
+### `ImageGenerationTool`: local open-weight generation by default, correctly-licensed this time, paid OpenAI only as an already-configured fallback
+
+Closed the third and final completeness-audit backlog item (round
+46's "image generation"), same author direction as `RunCodeTool` and
+`WebSearchTool`: open-source, freely available by default.
+
+`generate_image` writes a PNG from a text prompt using
+`black-forest-labs/FLUX.1-schnell` via the optional `sarva[image]`
+extra (`torch` + `diffusers` + `transformers` + `accelerate`, all
+Apache/BSD-licensed commodity substrate — the identical "no black
+boxes for the model, commodity substrate for the numerical backend"
+line `sarva[foundry]` already draws). **The license check specifically
+mattered here, and wasn't skipped:** several other popular open-weight
+image models looked at first (Stability AI's SD-Turbo/SDXL-Turbo)
+require a paid membership for commercial use above a revenue
+threshold — checked directly against their real license pages, not
+assumed from name recognition, before picking FLUX.1-schnell instead,
+confirmed genuinely Apache-2.0 ("can be used for personal, scientific,
+and commercial purposes," no threshold, no membership).
+
+Like `RunCodeTool`, this is a genuinely heavy extra (`sarva[image]`
+is *not* part of the default install) — but unlike `RunCodeTool`, this
+one **was verified end to end with a real, live model load and
+generation**, not just mocked command construction: `FluxPipeline.
+from_pretrained` / the actual `pipe(prompt=..., num_inference_steps=...)`
+call / `.images[0].save()` were all run for real against
+`katuni4ka/tiny-random-flux`, a public few-megabyte FLUX test fixture
+with random weights, standing in for the real ~24GB production
+checkpoint (downloading that live wasn't practical in this
+environment, but the *code path* exercised — model class, call
+signature, output handling — is identical either way, only the
+checkpoint differs). A dedicated `@pytest.mark.live` test runs this
+exact real round-trip; `pytest.importorskip("diffusers")` inside it
+keeps CI's default (`-m 'not live'`) run from ever needing the extra
+installed just to *collect* the test file.
+
+If `sarva[image]` isn't installed but `OPENAI_API_KEY` is already
+configured (the same key already used for chat), falls back to the
+paid OpenAI Images API instead — verified with a mocked client
+asserting the real request shape (`prompt`, `model="dall-e-3"`,
+`response_format="b64_json"`), not just that *some* fallback fired.
+Never preferred over the free local model when it's installed; only
+reached when the free path genuinely isn't available. `destructive=True`
+by default, the same reasoning as `WriteFileTool` (a real file write
+that can overwrite an existing one) plus a real monetary cost on the
+paid fallback path.
 
 `EditFileTool` mirrors a well-proven, simple contract — the same one
 this project's own coding assistant tool uses to edit its own source
