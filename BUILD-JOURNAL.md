@@ -21651,3 +21651,50 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `TrainerConfig.lr` -- `grad_clip`'s own sibling field in the exact same config -- was left unvalidated, a genuine silent full-training no-op at lr=0.0
+
+Round 259. Continuing the general hardening sweep, applying a pattern
+match this session had already seen pay off four separate times in
+`run_ablation` (`record_every` -> `batch_size` -> `seeds` -> `steps`,
+each round finding one more unvalidated sibling parameter the previous
+rounds' identical fix hadn't reached): `TrainerConfig.grad_clip` was
+validated several dozen rounds back (its own docstring: "more severe
+than any sibling config-validation fix elsewhere in this package"),
+but `lr` -- its own sibling field in the exact same `__post_init__` --
+was never touched by that fix.
+
+**Verified live before deciding it needed fixing, not assumed from the
+pattern match alone:** `torch.optim.AdamW` itself already rejects a
+negative or NaN `lr` at construction time (`ValueError: Invalid
+learning rate: ...`, confirmed directly against the real PyTorch
+optimizer) -- so those two shapes were already effectively caught,
+just without a message naming this project's own config field.
+`lr=0.0` is the real, unguarded gap: PyTorch accepts it without
+complaint. Confirmed live with a real model and five real `train_step`
+calls: identical loss every single step, zero parameters changed at
+all -- a genuine, silent, full-training no-op, the same severity class
+already fixed for `grad_clip=0.0`.
+
+**Fixed** identically to `grad_clip`'s own fix: `lr` must be a finite
+positive number. **Verified with a genuine revert-and-check**:
+reverted the new check, watched the new test fail with `DID NOT RAISE
+ValueError`, restored it. A second, dedicated test
+(`test_lr_zero_is_confirmed_a_real_silent_no_op_before_the_config_rejects_it`)
+keeps the live "flat loss, zero parameter change" proof itself under
+regression, not just the validation that now prevents it -- exploiting
+that `TrainerConfig` is a plain, non-frozen dataclass to construct a
+valid config then mutate `.lr` afterward, bypassing `__post_init__`
+(which only runs at construction time) without needing any lower-level
+trick.
+
+2 new tests, 909 -> 911 selected by default, `ruff check`/`ruff format
+--check` both clean. `docs/foundry/training.md` gained a matching
+subsection right after `grad_clip`'s own.
+
+**Next:** continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

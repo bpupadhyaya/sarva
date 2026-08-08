@@ -91,6 +91,25 @@ class TrainerConfig:
             raise ValueError(
                 f"grad_clip must be a finite positive number or None, got {self.grad_clip}"
             )
+        # A real bug found by a fresh-eyes sweep, the identical shape
+        # already found four separate times for run_ablation.py's own
+        # sibling parameters (record_every, batch_size, seeds, steps) --
+        # `lr`, `grad_clip`'s own sibling field in this exact config,
+        # was left unvalidated by that fix. `torch.optim.AdamW` itself
+        # already rejects a negative or NaN `lr` at construction time
+        # (confirmed live: `ValueError: Invalid learning rate: ...`), so
+        # those two shapes are already caught, just not with a message
+        # naming this project's own config field. `lr=0.0` is the real,
+        # unguarded gap: PyTorch accepts it without complaint, and it's
+        # a genuine, silent full-training no-op, not merely slow
+        # learning -- confirmed live with a real model and five real
+        # `train_step` calls: identical loss every step, zero parameters
+        # changed at all. The same severity class already fixed for
+        # `grad_clip=0.0` (an identical "wastes real compute for the
+        # rest of the run with no error or signal" shape) and
+        # `dpo_loss`'s own `beta<=0` check.
+        if not math.isfinite(self.lr) or self.lr <= 0:
+            raise ValueError(f"lr must be a finite positive number, got {self.lr}")
 
 
 class Trainer:

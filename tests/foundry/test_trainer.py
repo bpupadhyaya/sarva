@@ -66,6 +66,53 @@ def test_trainer_config_rejects_a_non_finite_or_non_positive_grad_clip():
     TrainerConfig(grad_clip=None)  # still allowed: "no clipping"
 
 
+def test_trainer_config_rejects_a_non_finite_or_non_positive_lr():
+    # A real bug found by a fresh-eyes sweep, the identical shape
+    # already found four separate times for run_ablation.py's own
+    # sibling parameters (record_every, batch_size, seeds, steps) --
+    # `lr`, grad_clip's own sibling field in this exact config, was
+    # left unvalidated by that fix. torch.optim.AdamW itself already
+    # rejects a negative or NaN lr at construction time, so those two
+    # shapes were already caught (just not with a message naming this
+    # project's own config field) -- but lr=0.0 is the real, unguarded
+    # gap: PyTorch accepts it without complaint, and it's a genuine,
+    # silent full-training no-op. Confirmed live with a real model and
+    # five real train_step calls: identical loss every step, zero
+    # parameters changed at all -- the same severity class already
+    # fixed for grad_clip=0.0.
+    with pytest.raises(ValueError, match="lr"):
+        TrainerConfig(lr=0.0)
+    with pytest.raises(ValueError, match="lr"):
+        TrainerConfig(lr=-0.1)
+    with pytest.raises(ValueError, match="lr"):
+        TrainerConfig(lr=float("nan"))
+    TrainerConfig(lr=3e-4)  # still allowed: an ordinary, ok learning rate
+
+
+def test_lr_zero_is_confirmed_a_real_silent_no_op_before_the_config_rejects_it():
+    # The decisive live proof behind the fix above, kept as its own
+    # regression test rather than only living in a docstring/journal
+    # claim: TrainerConfig is a plain (non-frozen) dataclass, so
+    # constructing a valid config then mutating `.lr` afterward bypasses
+    # `__post_init__` (which only runs at construction time) without
+    # needing any lower-level trick -- proving what lr=0.0 actually DOES
+    # to real training, not just that a fresh construction now rejects it.
+    config = TrainerConfig(lr=3e-4)
+    config.lr = 0.0
+
+    model_config = _config()
+    trainer = Trainer(_seeded_model(model_config), config)
+    x, y = _fixed_batch(model_config)
+    before = {n: p.clone() for n, p in trainer.model.named_parameters()}
+
+    losses = [trainer.train_step(x, y) for _ in range(5)]
+
+    assert len(set(losses)) == 1, f"loss should be perfectly flat with lr=0.0, got {losses}"
+    assert all(torch.equal(before[n], p) for n, p in trainer.model.named_parameters()), (
+        "no parameter should change at all with lr=0.0"
+    )
+
+
 def test_checkpoint_resume_is_bit_identical_to_uninterrupted_training(tmp_path):
     config = _config()
     x, y = _fixed_batch(config)

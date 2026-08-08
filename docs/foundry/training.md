@@ -170,6 +170,29 @@ fail with the literal old bug's own shape: `DID NOT RAISE ValueError`
 for a negative, zero, and NaN `grad_clip`. 1 new test, 876 → 877
 Python tests.
 
+**`TrainerConfig.lr` -- `grad_clip`'s own sibling field in the exact
+same config -- was left unvalidated by that fix.** A much later
+fresh-eyes sweep applied the identical "sibling parameter this exact
+bug-hunting lens hasn't reached yet" pattern already found four
+separate times in `run_ablation` (`record_every`, `batch_size`,
+`seeds`, `steps`) to `TrainerConfig` itself. `torch.optim.AdamW`
+already rejects a negative or NaN `lr` at construction time with its
+own `ValueError: Invalid learning rate: ...` -- confirmed live, so
+those two shapes were already caught, just not with a message naming
+this project's own config field. `lr=0.0` is the real, unguarded gap:
+PyTorch accepts it without complaint, and it's a genuine, silent
+full-training no-op -- confirmed live with a real model and five real
+`train_step` calls: identical loss every single step, zero parameters
+changed at all, the same severity class already fixed for
+`grad_clip=0.0`. Fixed identically: `lr` must be a finite positive
+number. Verified by reverting and watching the new test fail with the
+literal old bug's own shape (`DID NOT RAISE ValueError`); a second,
+dedicated test bypasses the now-fixed validation (mutating `.lr` after
+construction, since `TrainerConfig` is a plain, non-frozen dataclass)
+to keep the live "flat loss, zero parameter change" proof itself under
+regression, not just the validation that now prevents it. 2 new tests,
+909 → 911 Python tests.
+
 ## The learning-rate schedule: warmup, then cosine decay
 
 `WarmupCosineSchedule` replaces what was originally a flat learning
