@@ -21543,3 +21543,48 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The three tools shipped this session had no runnable examples -- `web_fetch` earned its own dedicated example when it shipped, `web_search`/`run_code`/`generate_image` never got theirs
+
+Round 249. Continuing the general hardening sweep. `examples/
+05_web_fetch.py` is a dedicated, real-model-required example
+demonstrating exactly one built-in tool end to end ("this is the one
+that shows the whole stack working together," its own docstring
+says) -- a real, established pattern for a tool significant enough to
+deserve its own runnable demonstration. Checking `examples/` against
+the three tools shipped this session (rounds 240-242) found none of
+them got the same treatment: `web_search`, `run_code`, and
+`generate_image` were all real, substantial, user-facing capabilities
+with zero runnable examples, unlike `web_fetch`.
+
+**Fixed** with three new examples, `20_web_search.py`, `21_run_code.py`,
+`22_generate_image.py`, mirroring `05_web_fetch.py`'s exact structure
+(a real `AgentLoop` against a real Anthropic model, `always_allow`
+since a real interactive session prompts for confirmation instead,
+`ANTHROPIC_API_KEY`-gated with a clean early exit if unset). Each
+example's own docstring names its specific real-world requirement
+honestly: `20_web_search.py` needs nothing beyond the model key (free,
+keyless DuckDuckGo default); `21_run_code.py` also needs Docker/Podman
+installed and running, and documents that the tool itself returns a
+clean error rather than crashing if neither is reachable;
+`22_generate_image.py` needs either `sarva[image]` installed or an
+`OPENAI_API_KEY` fallback, with the identical honest-error framing.
+
+**Verified what's actually verifiable in this environment:** no real
+`ANTHROPIC_API_KEY` is configured here, so the full live model-driven
+run (the same limitation `05_web_fetch.py`'s own original author would
+have had without a key) couldn't be exercised end to end -- but the
+construction logic every example shares (`Registry.load`, `Router`,
+`AgentLoop(...)` with the real tool wired in) was verified directly,
+confirming no import or wiring errors, for all three new examples.
+Named honestly rather than silently claimed as fully live-tested.
+`ruff check`/`ruff format --check` both clean (examples/ is part of
+CI's own lint scope). Full Python test suite unaffected (908 tests,
+unchanged -- these are runnable scripts, not part of test collection).
+
+**Next:** continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.
