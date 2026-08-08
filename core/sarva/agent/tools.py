@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import subprocess
 import threading
+import uuid
 from collections.abc import Awaitable, Callable
 from html.parser import HTMLParser
 from pathlib import Path
@@ -59,6 +61,16 @@ _MAX_SHELL_OUTPUT_BYTES = 1_000_000
 
 _MAX_SEARCH_RESULTS = 5
 _SEARCH_TIMEOUT_SECONDS = 15.0
+
+# Official, minimal, freely-available images -- no private registry, no
+# paid tier. `bash:5` (not `debian:*-slim`) because it's the one
+# official image that ships a real `/bin/bash` with nothing else to
+# choose between; `python:3.12-slim` matches this project's own minimum
+# supported Python version (core/pyproject.toml's `requires-python`).
+_CODE_EXEC_IMAGES = {"python": "python:3.12-slim", "bash": "bash:5"}
+_CODE_EXEC_TIMEOUT_SECONDS = 30
+_MAX_CODE_OUTPUT_BYTES = 200_000
+_CONTAINER_RUNTIME_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 class ToolContext:
@@ -511,6 +523,233 @@ class RunShellTool:
             tool_call_id="",
             content=[TextBlock(text=text)],
             is_error=proc.returncode != 0,
+        )
+
+
+async def _find_container_runtime() -> str | None:
+    """Returns the absolute path to a real, working container runtime
+    binary (`docker` preferred, `podman` as a free, open-source
+    fallback), or `None` if neither is genuinely usable right now.
+
+    Checked with a real, short-timeout `<binary> info` call, not just
+    `shutil.which` -- a binary can be installed with its daemon not
+    running (Docker Desktop quit, an entirely ordinary state on a
+    laptop, not a contrived one), which `which` alone can't distinguish
+    from "usable this instant." `run_code` below must never silently
+    fall back to running code unsandboxed if the daemon merely looks
+    installed but isn't actually reachable -- the same "reject, don't
+    guess" discipline this project already applies to malformed
+    on-disk state elsewhere."""
+    for binary in ("docker", "podman"):
+        path = shutil.which(binary)
+        if path is None:
+            continue
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                path, "info", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            returncode = await asyncio.wait_for(
+                proc.wait(), timeout=_CONTAINER_RUNTIME_PROBE_TIMEOUT_SECONDS
+            )
+        except (TimeoutError, OSError):
+            continue
+        if returncode == 0:
+            return path
+    return None
+
+
+async def _kill_container(runtime: str, name: str, proc: asyncio.subprocess.Process) -> None:
+    """Stops the actual container the daemon is running, not just the
+    local `docker run`/`podman run` CLI client process `proc` refers to.
+
+    `docker run` (no `-d`) is a thin client that blocks in the
+    foreground attached to a container the DAEMON actually owns and
+    runs -- killing the client process, the same `_kill_process_group`
+    pattern `RunShellTool` above uses for its own direct child process,
+    does not stop the container itself (this is Docker's own documented
+    client/daemon split, not a Sarva-specific quirk). Left unaddressed,
+    a timed-out `run_code` call would leave the real container running
+    orphaned on the daemon, `--network none`-isolated but still
+    consuming the CPU/memory/pids quota it was given, for as long as
+    whatever code it's running keeps going -- the exact "don't leave an
+    unwanted side effect running unattended" gap `RunShellTool`'s own
+    timeout fix (see its own docstring above) already exists to close,
+    one layer deeper here because the process doing the actual work
+    isn't the one this code can `os.killpg` directly.
+    `<runtime> kill <name>` is best-effort (the container may have
+    already exited on its own between the timeout firing and this
+    call); the client process is killed either way, matching
+    `_kill_process_group`'s own "kill unconditionally, then wait"
+    shape."""
+    killer = await asyncio.create_subprocess_exec(
+        runtime, "kill", name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        await asyncio.wait_for(killer.wait(), timeout=_CONTAINER_RUNTIME_PROBE_TIMEOUT_SECONDS)
+    except TimeoutError:
+        pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
+
+
+class RunCodeTool:
+    """Destructive by default, the same conservative default
+    `RunShellTool` uses -- despite real isolation (`--network none`,
+    read-only root filesystem, dropped Linux capabilities, resource
+    limits, no host filesystem mount), a container escape is a real,
+    if rare, residual risk class, and this project's own RL training
+    harness (`sarva_foundry.train.rl_environment`) has already found
+    repeated, real bypasses of a DIFFERENT, weaker execution boundary --
+    "isolated" is treated here as a real mitigation, never assumed to be
+    an absolute guarantee. The loop's confirm-gate (the same one that
+    already protects `RunShellTool`) is the actual safety net, not this
+    tool's isolation alone.
+
+    No unsandboxed fallback exists anywhere in this class: if no
+    container runtime is genuinely reachable, `run` returns a clear,
+    honest error rather than ever running the given code directly on
+    the host -- the entire point of this tool over `RunShellTool` is
+    the isolation guarantee, so silently downgrading to "just run it"
+    on a missing dependency would be worse than refusing outright.
+    """
+
+    spec = ToolSpec(
+        name="run_code",
+        description=(
+            "Execute a code snippet in an isolated, network-disabled sandbox "
+            "container. Requires Docker or Podman (both free, open source) to be "
+            "installed and running -- returns a clear error if neither is "
+            "reachable, never falls back to running code unsandboxed. Supports "
+            "'python' and 'bash'. The container has no access to the host "
+            "filesystem, this run's own working directory, or the network. "
+            f"Output is truncated at {_MAX_CODE_OUTPUT_BYTES:,} bytes."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "language": {"type": "string", "enum": sorted(_CODE_EXEC_IMAGES)},
+                "code": {"type": "string"},
+            },
+            "required": ["language", "code"],
+            "additionalProperties": False,
+        },
+        destructive=True,
+    )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        language = args["language"]
+        code = args["code"]
+        if language not in _CODE_EXEC_IMAGES:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[
+                    TextBlock(
+                        text=f"unsupported language {language!r} -- supported: "
+                        f"{', '.join(sorted(_CODE_EXEC_IMAGES))}"
+                    )
+                ],
+                is_error=True,
+            )
+        runtime = await _find_container_runtime()
+        if runtime is None:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[
+                    TextBlock(
+                        text="run_code requires a real, running container runtime for "
+                        "genuine sandbox isolation -- neither Docker (docker.com) nor "
+                        "Podman (podman.io) was found reachable. Install and start one "
+                        "(both free and open source) to enable this tool; it never runs "
+                        "code unsandboxed as a fallback."
+                    )
+                ],
+                is_error=True,
+            )
+        image = _CODE_EXEC_IMAGES[language]
+        interpreter = (
+            ["python3", "-u", "-c", code] if language == "python" else ["bash", "-c", code]
+        )
+        # A random, unique name (not the auto-generated one `docker run`
+        # would otherwise pick) so `_kill_container` above can target
+        # exactly this container on timeout, never a sibling from a
+        # concurrent run_code call.
+        container_name = f"sarva-run-code-{uuid.uuid4().hex}"
+        cmd = [
+            runtime,
+            "run",
+            "--rm",
+            "--name",
+            container_name,
+            "--network",
+            "none",
+            "--memory",
+            "256m",
+            "--memory-swap",
+            "256m",
+            "--cpus",
+            "1",
+            "--pids-limit",
+            "128",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,size=64m",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            image,
+            *interpreter,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+        # Deadline-based, matching RunShellTool's own already-fixed
+        # "the read timeout and the wait timeout must share one overall
+        # budget, not each get their own fresh one" pattern above.
+        deadline = asyncio.get_running_loop().time() + _CODE_EXEC_TIMEOUT_SECONDS
+        try:
+            output, truncated = await asyncio.wait_for(
+                _read_stream_bounded(proc.stdout, _MAX_CODE_OUTPUT_BYTES),
+                timeout=_CODE_EXEC_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            await _kill_container(runtime, container_name, proc)
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[
+                    TextBlock(
+                        text=f"code timed out after {_CODE_EXEC_TIMEOUT_SECONDS}s and was killed"
+                    )
+                ],
+                is_error=True,
+            )
+        if truncated:
+            await _kill_container(runtime, container_name, proc)
+        else:
+            try:
+                await asyncio.wait_for(
+                    proc.wait(), timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+                )
+            except TimeoutError:
+                await _kill_container(runtime, container_name, proc)
+                return ToolResultBlock(
+                    tool_call_id="",
+                    content=[
+                        TextBlock(
+                            text=f"code timed out after {_CODE_EXEC_TIMEOUT_SECONDS}s "
+                            "and was killed"
+                        )
+                    ],
+                    is_error=True,
+                )
+        text = output.decode(errors="replace")
+        if truncated:
+            text += f"\n\n[truncated to {_MAX_CODE_OUTPUT_BYTES:,} bytes and killed]"
+        return ToolResultBlock(
+            tool_call_id="", content=[TextBlock(text=text)], is_error=proc.returncode != 0
         )
 
 
@@ -1188,6 +1427,7 @@ BUILTIN_TOOLS: list[Tool] = [
     WriteFileTool(),
     EditFileTool(),
     RunShellTool(),
+    RunCodeTool(),
     WebFetchTool(),
     WebSearchTool(),
     RememberTool(),

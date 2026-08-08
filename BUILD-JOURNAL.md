@@ -21137,3 +21137,69 @@ quantization/`Budget` NaN-validation gap has three confirmed-but-
 unreachable instances tracked together. Round 186's own CI run (commit
 `9c20905`) remains stuck in an isolated GitHub-side anomaly, unrelated
 to the code.
+
+
+## `RunCodeTool` shipped: real Docker/Podman sandbox isolation, no unsandboxed fallback ever -- honestly flagged as not live-verified in this environment
+
+Round 241. Closed the second of the three completeness-audit backlog
+items (round 46's "a code-execution sandbox tool"), same author
+direction as `WebSearchTool` (round 240): open-source, freely available
+tooling by default.
+
+`run_code` (`core/sarva/agent/tools.py`) executes a `python`/`bash`
+snippet inside a locked-down container: `--network none`, `--read-only`
+root filesystem with a small `tmpfs` `/tmp`, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, and hard memory/CPU/pid limits, via
+whichever of Docker or Podman is actually installed and running.
+`_find_container_runtime` checks with a real `<binary> info` call, not
+just `shutil.which` -- a binary can be on `PATH` with its daemon not
+running (Docker Desktop quit, an ordinary laptop state). **No
+unsandboxed fallback exists anywhere**: if neither runtime is
+reachable, the tool returns a clear, honest error rather than ever
+running code directly on the host. `destructive=True` by default, the
+same conservative choice as `RunShellTool` -- this project's own RL
+harness has already found repeated real bypasses of a different, weaker
+execution boundary, so "isolated" is treated as a mitigation, not an
+absolute guarantee; the loop's existing confirm-gate is the actual
+safety net.
+
+**A real, non-obvious correctness bug caught before shipping, not
+after:** `docker run` (no `-d`) is a thin client attached to a
+container the *daemon* owns -- killing the client process on timeout
+(the `os.killpg` shape `RunShellTool` uses for its own direct child)
+does NOT stop the container itself, leaving it running orphaned on the
+daemon indefinitely. Fixed with `_kill_container`, issuing a real
+`<runtime> kill <container-name>` (a random per-call name) before
+killing the client. **Verified with a genuine revert-and-check**:
+temporarily reverted `_kill_container` to a naive client-only
+`proc.kill()`, ran the new timeout regression test, watched it fail
+with exactly the predicted shape (zero `kill` commands issued, 0 == 1
+assertion failure) -- then restored the real fix and confirmed the
+test passes again. (A self-inflicted near-miss during this same
+revert-check: a stray `git checkout -- <file>` meant to look at the
+diff instead discarded the uncommitted `RunCodeTool` work entirely --
+caught immediately via `git status`/`grep` showing the class gone, and
+redone from the same content rather than lost.)
+
+**Honestly scoped, the same discipline as round 205's `uv.lock` gap:**
+neither Docker nor Podman is installed in this dev environment, and the
+CI job that runs this suite (`core`, `macos-latest`) doesn't have
+Docker preinstalled either. What IS verified: every isolation flag via
+mocking `asyncio.create_subprocess_exec` and asserting the real argv,
+the "no runtime available" error path against this environment's own
+real, unmocked absence of Docker/Podman, the timeout-kills-the-container
+fix (via the revert-check above), and output truncation. What is NOT
+verified: genuine end-to-end container execution -- actually running
+code inside a real container and confirming its isolation from the
+inside. Flagged for a maintainer with a real Docker install to verify
+before this tool's isolation should be fully trusted in production.
+
+8 new Python tests, all run by default (901 -> 909 total collected;
+893 -> 901 run by default, 8 deselected unchanged since none are
+marked `live`). `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md` gained a `RunCodeTool` section with the full
+honest-gap writeup above.
+
+**One item remains** on the completeness-audit backlog: image
+generation, same author direction (open-source/free by default, paid
+provider APIs opt-in only).

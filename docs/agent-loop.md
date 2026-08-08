@@ -207,18 +207,83 @@ class Tool(Protocol):
     async def run(self, args: dict, ctx: ToolContext) -> ToolResultBlock: ...
 ```
 
-`BUILTIN_TOOLS` ships eleven: `ReadFileTool`, `WriteFileTool`,
+`BUILTIN_TOOLS` ships twelve: `ReadFileTool`, `WriteFileTool`,
 `EditFileTool` (a targeted find-and-replace edit, distinct from
 `WriteFileTool`'s always-rewrite-the-whole-file contract — see the
 design doc's own §3.5 "file read/write/edit" line, the last of that
-trio to get built), `RunShellTool`, `WebFetchTool`, `WebSearchTool`
-(below), `RememberTool`, `RecallMemoryTool` (session-scoped semantic
-recall), `NoteTool`, `SearchNotesTool` (durable, cross-session markdown
-notes — see the memory chapter for all four), and `DelegateTool`
-(subagent fan-out — see below). MCP-backed tools (see the MCP chapter)
-implement the exact same `Tool` protocol, which is why the loop never
-needs to know or care whether a given tool call is local Python or a
-round trip to a subprocess speaking MCP.
+trio to get built), `RunShellTool`, `RunCodeTool` (below), `WebFetchTool`,
+`WebSearchTool` (below), `RememberTool`, `RecallMemoryTool`
+(session-scoped semantic recall), `NoteTool`, `SearchNotesTool`
+(durable, cross-session markdown notes — see the memory chapter for all
+four), and `DelegateTool` (subagent fan-out — see below). MCP-backed
+tools (see the MCP chapter) implement the exact same `Tool` protocol,
+which is why the loop never needs to know or care whether a given tool
+call is local Python or a round trip to a subprocess speaking MCP.
+
+### `RunCodeTool`: genuine sandbox isolation via Docker/Podman, no unsandboxed fallback ever
+
+Closed the second of the three completeness-audit backlog items (round
+46's "a code-execution sandbox tool"), on the same author direction as
+`WebSearchTool` above: open-source, freely available tooling by
+default. `run_code` executes a `python` or `bash` snippet inside a
+locked-down container — `--network none` (no network access at all,
+inside the sandbox), `--read-only` root filesystem with only a small
+`tmpfs` scratch `/tmp`, `--cap-drop ALL` (every Linux capability
+dropped), `--security-opt no-new-privileges`, and hard memory/CPU/pid
+limits — using whichever of Docker or Podman is actually installed and
+running (checked with a real `<binary> info` call, not just `which`,
+since a binary can be on `PATH` with its daemon not running). No host
+directory is ever mounted into the container, including this run's own
+working directory — the container cannot see or modify anything on the
+host.
+
+**No unsandboxed fallback exists anywhere in this tool.** If neither
+Docker nor Podman is reachable, `run_code` returns a clear, honest
+error rather than ever running the code directly on the host — the
+entire reason this tool exists alongside `RunShellTool` is the
+isolation guarantee, so silently downgrading to "just run it" on a
+missing dependency would defeat its own purpose. Still `destructive=True`
+by default, the same conservative choice as `RunShellTool`: real
+isolation substantially reduces the blast radius of a bad or malicious
+snippet, but this project's own RL training harness
+(`sarva_foundry.train.rl_environment`) has already found repeated, real
+bypasses of a *different*, weaker execution boundary — "isolated" is
+treated as a real mitigation here, never assumed to be an absolute
+guarantee, so the loop's existing confirm-gate stays the actual safety
+net.
+
+**A real, non-obvious correctness point, caught before shipping:**
+`docker run` (with no `-d`) is a thin client attached to a container
+the *daemon* actually owns and runs — killing that client process on
+timeout, the same `os.killpg` pattern `RunShellTool` uses for its own
+direct child process, does **not** stop the container itself. Left
+unfixed, a timed-out `run_code` call would leave the real container
+running orphaned on the daemon indefinitely. Fixed with `_kill_container`,
+which issues a real `docker kill <container-name>` (a random, per-call
+name, so a timeout can never target a sibling call's container) before
+killing the client process — verified with a genuine revert-and-check:
+temporarily reverting `_kill_container` to a naive client-only
+`proc.kill()` made the new regression test fail with exactly the
+predicted shape (no `kill` command ever issued), confirming the test
+catches the real bug, before re-applying the fix.
+
+**Honestly scoped, not silently assumed correct:** neither Docker nor
+Podman is installed in the environment this tool was built and tested
+in, and the CI job that runs this test suite (`core`, `macos-latest`)
+does not have Docker preinstalled either — so while the command
+construction (every isolation flag above), the "no runtime available"
+error path, and the timeout/truncation/kill logic are all verified —
+the command construction via mocking `asyncio.create_subprocess_exec`
+and asserting on the real argv, the "no runtime" path against this
+environment's own real, unmocked absence of Docker/Podman — genuine
+end-to-end container execution (actually running code inside a real
+container and confirming its isolation from the inside) has **not**
+been verified live. This is a named, honest gap, not swept under the
+"tests pass" claim — the same discipline this project already applies
+to `uv.lock` regeneration (round 205) and Windows-specific runtime
+behavior (the desktop app's sidecar shutdown path): flagged for a
+maintainer with a real Docker install to verify before this tool's
+isolation should be fully trusted in production.
 
 ### `WebSearchTool`: free by default, a paid index only ever an explicit opt-in
 

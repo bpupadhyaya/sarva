@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from sarva.agent.tools import (
     ReadFileTool,
     RecallMemoryTool,
     RememberTool,
+    RunCodeTool,
     RunShellTool,
     SearchNotesTool,
     ToolContext,
@@ -552,6 +554,230 @@ async def test_run_shell_kills_the_whole_pipeline_not_just_the_shell(ctx, monkey
     )
 
     assert result.is_error is True
+
+
+class _FakeStdout:
+    """A minimal async stand-in for `asyncio.StreamReader` -- only
+    `_read_stream_bounded`'s own `await stream.read(n)` call needs to
+    work against it."""
+
+    def __init__(self, chunks: list[bytes] | None = None, hang: bool = False):
+        self._chunks = list(chunks or [])
+        self._hang = hang
+
+    async def read(self, n: int) -> bytes:
+        if self._hang:
+            await asyncio.sleep(3600)
+        if self._chunks:
+            return self._chunks.pop(0)
+        return b""
+
+
+class _FakeProc:
+    def __init__(self, stdout: _FakeStdout, returncode: int = 0, wait_hangs: bool = False):
+        self.stdout = stdout
+        self.returncode = returncode
+        self._wait_hangs = wait_hangs
+        self.killed = False
+
+    async def wait(self) -> int:
+        if self._wait_hangs:
+            await asyncio.sleep(3600)
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self._wait_hangs = False  # a real SIGKILL makes a hung wait() return
+
+
+@pytest.mark.asyncio
+async def test_run_code_rejects_an_unsupported_language(ctx):
+    tool = RunCodeTool()
+    result = await tool.run({"language": "ruby", "code": "puts 1"}, ctx)
+    assert result.is_error
+    assert "unsupported language" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_run_code_returns_a_clear_error_when_no_container_runtime_is_available(ctx):
+    # Deliberately NOT mocked: this dev environment genuinely has
+    # neither Docker nor Podman installed, so this exercises the real
+    # `_find_container_runtime` path against real reality, the same way
+    # test_web_fetch_blocks_loopback_addresses needs no mocking to test
+    # a real, always-true local condition. The decisive property this
+    # tool exists for: no unsandboxed fallback, ever -- confirmed here
+    # by asserting the tool refuses rather than silently running the
+    # code directly on the host.
+    tool = RunCodeTool()
+    result = await tool.run({"language": "python", "code": "print('should never run')"}, ctx)
+    assert result.is_error
+    assert "container runtime" in result.content[0].text
+    assert "Docker" in result.content[0].text
+    assert "Podman" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_find_container_runtime_distinguishes_installed_from_actually_reachable(monkeypatch):
+    # A real, meaningful distinction this project's own "reject, don't
+    # guess" discipline cares about: a binary can be on PATH with its
+    # daemon not running (Docker Desktop quit -- an ordinary laptop
+    # state, not contrived), which `shutil.which` alone can't tell apart
+    # from "usable right now." Simulated here since no real Docker
+    # install exists in this environment to genuinely stop and restart.
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/usr/bin/{name}" if name == "docker" else None
+    )
+
+    async def fake_exec(*cmd, **kwargs):
+        assert cmd[:2] == ("/usr/bin/docker", "info")
+        return _FakeProc(_FakeStdout(), returncode=1)  # daemon unreachable
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    runtime = await tools_module._find_container_runtime()
+    assert runtime is None
+
+
+@pytest.mark.asyncio
+async def test_run_code_invokes_docker_with_a_locked_down_isolation_flag_set(ctx, monkeypatch):
+    # The decisive security properties this tool exists to guarantee --
+    # verified here as the exact argv passed to `docker run`, since no
+    # real Docker daemon is available in this environment to run the
+    # container and inspect its real isolation from the inside.
+    monkeypatch.setattr(tools_module, "_find_container_runtime", _fake_find_runtime)
+    captured = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(_FakeStdout([b"hello from sandbox\n"]), returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    tool = RunCodeTool()
+    result = await tool.run({"language": "python", "code": "print('hello from sandbox')"}, ctx)
+
+    assert not result.is_error
+    assert "hello from sandbox" in result.content[0].text
+    cmd = captured["cmd"]
+    assert cmd[0] == "/usr/bin/docker"
+    assert cmd[1] == "run"
+    assert "--rm" in cmd
+    assert "--network" in cmd and cmd[cmd.index("--network") + 1] == "none"
+    assert "--read-only" in cmd
+    assert "--cap-drop" in cmd and cmd[cmd.index("--cap-drop") + 1] == "ALL"
+    assert "--security-opt" in cmd and "no-new-privileges" in cmd
+    assert "--pids-limit" in cmd
+    assert "python:3.12-slim" in cmd
+    # No host bind-mount flag anywhere in the invocation -- the whole
+    # point of the isolation this tool promises is that the container
+    # can't see ctx.workdir or any other host directory. (`--tmpfs
+    # /tmp:...` is a container-internal tmpfs, not a host mount, so it's
+    # deliberately not flagged here.)
+    assert ctx.workdir not in cmd
+    assert "-v" not in cmd
+    assert "--volume" not in cmd
+    assert "--mount" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_run_code_uses_bash_for_the_bash_language(ctx, monkeypatch):
+    monkeypatch.setattr(tools_module, "_find_container_runtime", _fake_find_runtime)
+    captured = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(_FakeStdout([b"hi\n"]), returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    tool = RunCodeTool()
+    result = await tool.run({"language": "bash", "code": "echo hi"}, ctx)
+
+    assert not result.is_error
+    assert "bash:5" in captured["cmd"]
+    assert captured["cmd"][-3:] == ("bash", "-c", "echo hi")
+
+
+@pytest.mark.asyncio
+async def test_run_code_reports_a_non_zero_exit_as_an_error(ctx, monkeypatch):
+    monkeypatch.setattr(tools_module, "_find_container_runtime", _fake_find_runtime)
+
+    async def fake_exec(*cmd, **kwargs):
+        return _FakeProc(_FakeStdout([b"boom\n"]), returncode=1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    tool = RunCodeTool()
+    result = await tool.run({"language": "python", "code": "raise SystemExit(1)"}, ctx)
+
+    assert result.is_error
+    assert "boom" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_run_code_kills_the_real_container_not_just_the_client_on_timeout(ctx, monkeypatch):
+    # The decisive fix `_kill_container` exists for: `docker run` is a
+    # thin client attached to a container the DAEMON owns -- killing
+    # the client process alone (the `_kill_process_group` shape
+    # RunShellTool's own direct child process uses) leaves the real
+    # container running orphaned. Verified here as a real `docker kill
+    # <container_name>` call being issued, targeting the exact name
+    # generated for this invocation.
+    monkeypatch.setattr(tools_module, "_find_container_runtime", _fake_find_runtime)
+    monkeypatch.setattr(tools_module, "_CODE_EXEC_TIMEOUT_SECONDS", 0.05)
+    calls = []
+    run_proc = _FakeProc(_FakeStdout(hang=True), wait_hangs=True)
+
+    async def fake_exec(*cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "kill":
+            return _FakeProc(_FakeStdout(), returncode=0)
+        return run_proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    tool = RunCodeTool()
+    result = await asyncio.wait_for(
+        tool.run({"language": "python", "code": "while True: pass"}, ctx), timeout=10
+    )
+
+    assert result.is_error
+    assert "timed out" in result.content[0].text
+    kill_calls = [c for c in calls if c[1] == "kill"]
+    assert len(kill_calls) == 1
+    run_cmd = calls[0]
+    container_name = run_cmd[run_cmd.index("--name") + 1]
+    assert kill_calls[0][2] == container_name
+    assert run_proc.killed  # the client process itself was also killed
+
+
+@pytest.mark.asyncio
+async def test_run_code_truncates_output_and_kills_the_container(ctx, monkeypatch):
+    monkeypatch.setattr(tools_module, "_find_container_runtime", _fake_find_runtime)
+    monkeypatch.setattr(tools_module, "_MAX_CODE_OUTPUT_BYTES", 10)
+    calls = []
+    run_proc = _FakeProc(_FakeStdout([b"x" * 65536] * 3))
+
+    async def fake_exec(*cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "kill":
+            return _FakeProc(_FakeStdout(), returncode=0)
+        return run_proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    tool = RunCodeTool()
+    result = await asyncio.wait_for(
+        tool.run({"language": "python", "code": "print('x' * 10**9)"}, ctx), timeout=10
+    )
+
+    assert not result.is_error  # truncation itself isn't a failure, matching RunShellTool
+    assert "[truncated to 10 bytes and killed]" in result.content[0].text
+    assert any(c[1] == "kill" for c in calls)
+
+
+async def _fake_find_runtime() -> str:
+    return "/usr/bin/docker"
 
 
 @pytest.mark.asyncio
