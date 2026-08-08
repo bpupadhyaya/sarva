@@ -20,6 +20,7 @@ from sarva.agent.tools import (
     SearchNotesTool,
     ToolContext,
     WebFetchTool,
+    WebSearchTool,
     WriteFileTool,
 )
 from sarva.memory.longterm import LongTermMemoryStore
@@ -757,6 +758,165 @@ async def test_web_fetch_live_follows_a_real_redirect_to_a_public_site(ctx):
     result = await tool.run({"url": "http://github.com"}, ctx)
     assert not result.is_error
     assert len(result.content[0].text) > 0
+
+
+_DDG_RESULTS_HTML = """
+<div class="result results_links results_links_deep web-result">
+  <div class="links_main links_deep result__body">
+    <h2 class="result__title">
+      <a rel="nofollow" class="result__a"
+         href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&amp;rut=abc">
+        Example <b>Title</b>
+      </a>
+    </h2>
+    <a class="result__snippet"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage">
+      A snippet with <b>bold</b> text.
+    </a>
+  </div>
+</div>
+<div class="result results_links results_links_deep web-result">
+  <div class="links_main links_deep result__body">
+    <h2 class="result__title">
+      <a rel="nofollow" class="result__a"
+         href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fother.com%2F&amp;rut=xyz">
+        Second Result
+      </a>
+    </h2>
+    <a class="result__snippet"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fother.com%2F">
+      Second snippet.
+    </a>
+  </div>
+</div>
+"""
+
+
+@pytest.mark.asyncio
+async def test_web_search_rejects_empty_query(ctx, monkeypatch):
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    tool = WebSearchTool()
+    result = await tool.run({"query": "   "}, ctx)
+    assert result.is_error
+    assert "must not be empty" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_web_search_uses_the_free_duckduckgo_default_and_decodes_redirect_urls(
+    ctx, monkeypatch
+):
+    # The free-by-default path -- confirmed by NOT setting BRAVE_API_KEY,
+    # matching this project's own "free tier must truly be free" design
+    # principle (§2). Also proves the redirect-decoding fix: DuckDuckGo's
+    # HTML results never link to a result directly, only to a same-site
+    # `/l/?uddg=<encoded-target>` redirect -- a caller getting back that
+    # internal redirect URL instead of the real target would be a real,
+    # confusing regression the model reading this tool's output would
+    # have no way to detect on its own.
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+
+    captured_request = {}
+
+    def handler(request):
+        captured_request["request"] = request
+        return httpx.Response(200, text=_DDG_RESULTS_HTML)
+
+    monkeypatch.setattr(tools_module, "_search_transport", lambda: httpx.MockTransport(handler))
+
+    tool = WebSearchTool()
+    result = await tool.run({"query": "example query"}, ctx)
+
+    assert not result.is_error
+    text = result.content[0].text
+    assert "Example Title" in text
+    assert "https://example.com/page" in text
+    assert "duckduckgo.com/l/" not in text  # the internal redirect must never leak through
+    assert "Second Result" in text
+    assert "https://other.com/" in text
+    assert b"example+query" in captured_request["request"].content or (
+        "example query" in captured_request["request"].url.query.decode()
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_search_uses_brave_when_an_api_key_is_configured(ctx, monkeypatch):
+    # The explicit, opt-in upgrade path -- only reachable when a caller
+    # has already saved their own BRAVE_API_KEY, never a requirement.
+    monkeypatch.setenv("BRAVE_API_KEY", "test-brave-key")
+
+    captured_request = {}
+
+    def handler(request):
+        captured_request["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "web": {
+                    "results": [
+                        {
+                            "title": "Brave Result",
+                            "url": "https://brave-result.example/",
+                            "description": "A Brave snippet.",
+                        }
+                    ]
+                }
+            },
+        )
+
+    monkeypatch.setattr(tools_module, "_search_transport", lambda: httpx.MockTransport(handler))
+
+    tool = WebSearchTool()
+    result = await tool.run({"query": "brave query"}, ctx)
+
+    assert not result.is_error
+    text = result.content[0].text
+    assert "Brave Result" in text
+    assert "https://brave-result.example/" in text
+    assert "A Brave snippet." in text
+    assert captured_request["request"].headers["x-subscription-token"] == "test-brave-key"
+
+
+@pytest.mark.asyncio
+async def test_web_search_reports_no_results_found(ctx, monkeypatch):
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+
+    def handler(request):
+        return httpx.Response(200, text="<html><body>no results here</body></html>")
+
+    monkeypatch.setattr(tools_module, "_search_transport", lambda: httpx.MockTransport(handler))
+
+    tool = WebSearchTool()
+    result = await tool.run({"query": "a query with truly nothing"}, ctx)
+
+    assert not result.is_error
+    assert "no results found" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_web_search_reports_a_network_failure_as_a_tool_error_not_a_crash(ctx, monkeypatch):
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+
+    def handler(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr(tools_module, "_search_transport", lambda: httpx.MockTransport(handler))
+
+    tool = WebSearchTool()
+    result = await tool.run({"query": "anything"}, ctx)
+
+    assert result.is_error
+    assert "search failed" in result.content[0].text
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_web_search_live(ctx, monkeypatch):
+    """Requires network access — skipped by default (see pyproject `-m 'not live'`)."""
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    tool = WebSearchTool()
+    result = await tool.run({"query": "python programming language"}, ctx)
+    assert not result.is_error
+    assert "python.org" in result.content[0].text.lower()
 
 
 @pytest.mark.asyncio

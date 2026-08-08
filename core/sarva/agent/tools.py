@@ -13,15 +13,17 @@ import signal
 import subprocess
 import threading
 from collections.abc import Awaitable, Callable
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 
 from sarva.agent.events import AgentResult
 from sarva.agent.subagents import DelegateTool
 from sarva.atomic_write import atomic_write_text
+from sarva.config import get_env
 from sarva.memory.longterm import (
     DEFAULT_LONGTERM_MEMORY_DIR,
     LongTermMemoryError,
@@ -54,6 +56,9 @@ _SHELL_TIMEOUT_SECONDS = 60
 # still incur the full memory spike before ever throwing the excess
 # away.
 _MAX_SHELL_OUTPUT_BYTES = 1_000_000
+
+_MAX_SEARCH_RESULTS = 5
+_SEARCH_TIMEOUT_SECONDS = 15.0
 
 
 class ToolContext:
@@ -613,6 +618,205 @@ class WebFetchTool:
             )
 
 
+def _decode_ddg_redirect(href: str) -> str:
+    """DuckDuckGo's own HTML results page never links to a result directly
+    -- every `href` points at a same-site redirect endpoint
+    (`//duckduckgo.com/l/?uddg=<url-encoded-target>&rut=...`) that wraps
+    the real target URL as a query parameter. Decoded here so a caller
+    (and the model reading this tool's output) sees the actual site a
+    result points to, not an internal DDG redirect link it would have to
+    resolve itself."""
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urlparse(href)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path == "/l/":
+        real = parse_qs(parsed.query).get("uddg", [None])[0]
+        if real:
+            return unquote(real)
+    return href
+
+
+class _DuckDuckGoResultParser(HTMLParser):
+    """Extracts (title, url, snippet) triples from `html.duckduckgo.com`'s
+    own no-JS HTML results page -- the same page duckduckgo.com/html/
+    serves to any browser with JavaScript disabled, not a private or
+    undocumented endpoint. Parsed with the stdlib `html.parser`, not a
+    regex against HTML (regex can't correctly handle nested tags/
+    attribute-quoting edge cases) and not a new third-party HTML-parsing
+    dependency -- this project's own from-scratch-first bias, applied to
+    a case narrow enough that hand-writing it is genuinely simpler than
+    auditing a general-purpose library for something this small.
+
+    Each real result is a `<h2 class="result__title"><a
+    class="result__a" href="...">Title</a></h2>` followed later by a
+    sibling `<a class="result__snippet">Snippet text</a>` -- title and
+    snippet aren't nested in one tag, so a result is only finalized once
+    its snippet's closing tag arrives, not its title's."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[dict[str, str]] = []
+        self._in_title = False
+        self._in_snippet = False
+        self._title = ""
+        self._url = ""
+        self._snippet = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        classes = (dict(attrs).get("class") or "").split()
+        if "result__a" in classes:
+            self._in_title = True
+            self._title = ""
+            self._url = dict(attrs).get("href") or ""
+        elif "result__snippet" in classes:
+            self._in_snippet = True
+            self._snippet = ""
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title += data
+        elif self._in_snippet:
+            self._snippet += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a":
+            return
+        if self._in_title:
+            self._in_title = False
+        elif self._in_snippet:
+            self._in_snippet = False
+            if self._title.strip() and self._url:
+                self.results.append(
+                    {
+                        "title": self._title.strip(),
+                        "url": _decode_ddg_redirect(self._url),
+                        "snippet": self._snippet.strip(),
+                    }
+                )
+            self._title = self._url = self._snippet = ""
+
+
+def _search_transport() -> httpx.AsyncBaseTransport | None:
+    """The transport `WebSearchTool` sends requests through -- `None`
+    (httpx's own real default) in production. Tests monkeypatch this to
+    an `httpx.MockTransport` instead of hitting a real network endpoint,
+    the same substitution pattern `WebFetchTool`'s own `ssrf_safe_transport`
+    already uses. Not SSRF-guarded like `WebFetchTool`: both search
+    endpoints below are fixed, hardcoded hosts this tool itself chooses,
+    never a caller/model-supplied URL -- the threat model SSRF guards
+    against (an attacker steering a fetch at an internal address) doesn't
+    apply to a destination this code picks itself."""
+    return None
+
+
+async def _duckduckgo_search(query: str) -> list[dict[str, str]]:
+    """The free, keyless default -- no API key, no signup, matching this
+    project's own "free tier must truly be free" design principle.
+    `html.duckduckgo.com/html/` is DuckDuckGo's own no-JS results page;
+    a plain browser User-Agent is sent because DuckDuckGo (like most
+    search frontends) serves a different, script-only page to requests
+    that look like an empty/unknown client rather than to a genuine
+    scripted absence of a UA."""
+    async with httpx.AsyncClient(
+        timeout=_SEARCH_TIMEOUT_SECONDS, transport=_search_transport()
+    ) as client:
+        resp = await client.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; sarva-agent/1.0)"},
+        )
+        resp.raise_for_status()
+    parser = _DuckDuckGoResultParser()
+    parser.feed(resp.text)
+    return parser.results[:_MAX_SEARCH_RESULTS]
+
+
+async def _brave_search(query: str, api_key: str) -> list[dict[str, str]]:
+    """The optional, explicitly opt-in paid path -- only ever used when a
+    user has already configured their own `BRAVE_API_KEY` (env or
+    `sarva config set`), never a requirement. A real, higher-quality
+    index for a user who wants one; the free DuckDuckGo path above stays
+    fully functional with zero configuration for everyone else."""
+    async with httpx.AsyncClient(
+        timeout=_SEARCH_TIMEOUT_SECONDS, transport=_search_transport()
+    ) as client:
+        resp = await client.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": query, "count": _MAX_SEARCH_RESULTS},
+            headers={"Accept": "application/json", "X-Subscription-Token": api_key},
+        )
+        resp.raise_for_status()
+    web_results = resp.json().get("web", {}).get("results", [])
+    return [
+        {
+            "title": r.get("title", ""),
+            "url": r.get("url", ""),
+            "snippet": r.get("description", ""),
+        }
+        for r in web_results[:_MAX_SEARCH_RESULTS]
+    ]
+
+
+class WebSearchTool:
+    """Non-destructive: read-only network access, no state changed.
+
+    Free by default: DuckDuckGo's own keyless HTML search endpoint, no
+    API key or signup required (design doc §2's "free tier must truly be
+    free" principle, applied to tools the same way it's already applied
+    to the provider layer). If a Brave Search API key is configured, that
+    higher-quality paid index is used instead -- always an explicit
+    upgrade a user opts into by saving their own key, never a
+    requirement to search the web at all.
+    """
+
+    spec = ToolSpec(
+        name="web_search",
+        description="Search the web for a query and return the top "
+        f"{_MAX_SEARCH_RESULTS} results (title, URL, snippet). Free by "
+        "default (DuckDuckGo, no API key needed); uses a configured "
+        "BRAVE_API_KEY instead if one is set.",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        destructive=False,
+    )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResultBlock:
+        query = args["query"]
+        if not query.strip():
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text="query must not be empty")],
+                is_error=True,
+            )
+        brave_key = get_env("BRAVE_API_KEY")
+        try:
+            results = (
+                await _brave_search(query, brave_key)
+                if brave_key
+                else await _duckduckgo_search(query)
+            )
+        except httpx.HTTPError as e:
+            return ToolResultBlock(
+                tool_call_id="",
+                content=[TextBlock(text=f"search failed: {e}")],
+                is_error=True,
+            )
+        if not results:
+            return ToolResultBlock(
+                tool_call_id="", content=[TextBlock(text=f"no results found for {query!r}")]
+            )
+        lines = [
+            f"{i}. {r['title']}\n   {r['url']}\n   {r['snippet']}" for i, r in enumerate(results, 1)
+        ]
+        return ToolResultBlock(tool_call_id="", content=[TextBlock(text="\n".join(lines))])
+
+
 class RememberTool:
     """Non-destructive: appends to the memory store, never overwrites or
     deletes anything a user or the model already saved.
@@ -985,6 +1189,7 @@ BUILTIN_TOOLS: list[Tool] = [
     EditFileTool(),
     RunShellTool(),
     WebFetchTool(),
+    WebSearchTool(),
     RememberTool(),
     RecallMemoryTool(),
     NoteTool(),

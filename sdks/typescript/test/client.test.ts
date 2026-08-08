@@ -104,6 +104,29 @@ describe("SarvaClient REST methods", () => {
     );
   });
 
+  it("saveConfig() accepts brave_api_key -- typed, mirroring the server's own optional tool-key field", async () => {
+    // brave_api_key is deliberately not a provider key (it doesn't
+    // select which model answers -- it only upgrades the web_search
+    // tool from its free DuckDuckGo default to the paid Brave index),
+    // added to SaveConfigRequest alongside the provider-key fields
+    // above. Same decisive property as the google_api_key test: an
+    // explicit SaveConfigRequest-typed object literal containing
+    // brave_api_key must type-check under `tsc --strict`.
+    const fetchImpl = fakeFetch(200, []);
+    const client = new SarvaClient({ baseUrl: "http://example.com", fetchImpl });
+    const req: SaveConfigRequest = { brave_api_key: "brave-real-test" };
+
+    await client.saveConfig(req);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://example.com/config",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ brave_api_key: "brave-real-test" }),
+      }),
+    );
+  });
+
   it("models() hits GET /models and returns the parsed list", async () => {
     const modelsBody = [{ id: "mock", display_name: "Mock", available: true }];
     const fetchImpl = fakeFetch(200, modelsBody);

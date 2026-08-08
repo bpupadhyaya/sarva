@@ -21066,3 +21066,74 @@ stuck in an isolated GitHub-side anomaly, unrelated to the code;
 round 205's own run (commit `0f56c72`) completed cleanly across all
 8 jobs, confirming that anomaly was scoped to the one run, not
 systemic.
+
+
+## `WebSearchTool` shipped: free by default, matching the "free tier must truly be free" principle applied to tools
+
+Round 240. Closed the first of the three completeness-audit backlog
+items carried since round 46 as "needing a real external-dependency/
+scope decision, flagged for a check-in rather than guessed at" -- a
+code-execution sandbox tool, a web-search tool, and image generation.
+Asked the author directly rather than guessing: the answer was "Sarva
+should only use open source freely available tools, can provide option
+for purchased api if user already has those, just as additional
+option" -- the design doc's own §2 principle, applied to tools exactly
+the way it already governs the provider layer.
+
+`web_search` (`core/sarva/agent/tools.py`) queries
+`html.duckduckgo.com/html/` by default -- DuckDuckGo's own no-JS
+results page, no API key or signup required -- and parses results with
+a small, hand-written `html.parser.HTMLParser` subclass (`_DuckDuckGo
+ResultParser`), not a regex against HTML and not a new third-party
+HTML-parsing dependency. **Verified against the real endpoint before
+shipping, not just a canned fixture:** a live query for "python
+programming language" correctly returned `python.org` and Wikipedia's
+Python article, and the real page's `result__a`/`result__snippet`
+class names matched this parser's assumptions exactly. DuckDuckGo's
+results never link to a target directly -- every `href` is a same-site
+redirect (`//duckduckgo.com/l/?uddg=<encoded-target>`) -- decoded by
+`_decode_ddg_redirect` so a caller sees the real destination, not an
+internal redirect link.
+
+If `BRAVE_API_KEY` is configured (env var, `sarva config set
+--brave-api-key`, or the server's `POST /config`), the tool switches to
+the paid Brave Search API instead -- always an explicit upgrade a user
+opts into, never a requirement. `BRAVE_API_KEY` is deliberately *not*
+added to `sarva.config.KNOWN_KEYS` (that list is specifically "which
+provider answers"; this key doesn't) -- wired through as its own field
+instead, end to end: `sarva config set/show/unset --brave-api-key` on
+the CLI, `SaveConfigRequest.brave_api_key` on the server's `POST
+/config` route, and the TypeScript SDK's own mirror of that same type
+-- matching design principle §5 ("no feature exists only in one
+skin"), the same discipline the `google_api_key` propagation bug
+several rounds back exists to enforce.
+
+**Verified with the same rigor as the last two packaging-accuracy
+fixes:** offline tests cover empty-query rejection, DuckDuckGo result
+parsing + redirect decoding (via `httpx.MockTransport`, the same
+substitution pattern `WebFetchTool`'s tests already use), the Brave
+path when a key is configured, a no-results response, and a network
+failure surfacing as a clean tool error rather than a crash -- plus a
+`@pytest.mark.live` test against the real DuckDuckGo endpoint. Server
+and CLI each got their own dedicated `brave_api_key` round-trip test
+(set -> show -> unset), and the TypeScript SDK got the same
+type-checks-under-`tsc --strict` regression test `google_api_key` has.
+8 new Python tests (893 -> 901 total; 886 -> 893 run by default, one
+of the eight marked `live`), 1 new TypeScript SDK test (21 -> 22).
+`ruff check`/`ruff format --check` and `npm run build`/`npm test` both
+clean.
+
+`docs/agent-loop.md` gained a new `WebSearchTool` section explaining
+the free-by-default design decision inline with the tool roster;
+`docs/packaging.md`'s CLI reference gained `--brave-api-key` alongside
+the other `config set`/`unset` flags.
+
+**Next:** two items remain on the completeness-audit backlog -- a
+code-execution sandbox tool and image generation -- both scoped by the
+same author direction (open-source/free by default, paid APIs as an
+explicit opt-in only). The three infra-blocked items remain deferred
+(Tauri `csp: null`, RL harness sandboxing, inference batching); the
+quantization/`Budget` NaN-validation gap has three confirmed-but-
+unreachable instances tracked together. Round 186's own CI run (commit
+`9c20905`) remains stuck in an isolated GitHub-side anomaly, unrelated
+to the code.

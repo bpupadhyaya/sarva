@@ -865,6 +865,12 @@ def config_set(
     openai_api_key: str | None = typer.Option(None, "--openai-api-key"),
     gemini_api_key: str | None = typer.Option(None, "--gemini-api-key"),
     google_api_key: str | None = typer.Option(None, "--google-api-key"),
+    brave_api_key: str | None = typer.Option(
+        None,
+        "--brave-api-key",
+        help="Optional: upgrades web_search from the free, keyless DuckDuckGo "
+        "default to the paid Brave Search index. Never required.",
+    ),
 ) -> None:
     """Save one or more provider API keys to ~/.sarva/config.json (owner-only
     permissions -- see `sarva.config`'s own docstring). This is the CLI's
@@ -889,12 +895,14 @@ def config_set(
         "OPENAI_API_KEY": openai_api_key,
         "GEMINI_API_KEY": gemini_api_key,
         "GOOGLE_API_KEY": google_api_key,
+        "BRAVE_API_KEY": brave_api_key,
     }
     non_empty = {k: v for k, v in values.items() if v}
     if not non_empty:
         console.print(
             "[yellow]nothing to save -- pass at least one of --anthropic-api-key / "
-            "--openai-api-key / --gemini-api-key / --google-api-key[/yellow]"
+            "--openai-api-key / --gemini-api-key / --google-api-key / "
+            "--brave-api-key[/yellow]"
         )
         raise typer.Exit(1)
     try:
@@ -946,6 +954,17 @@ def config_show() -> None:
             console.print(f"{name:20s} [green]set[/green] (environment variable)")
         else:
             console.print(f"{name:20s} [green]set[/green] (saved config file)")
+    # Not a provider key (deliberately not in KNOWN_KEYS -- it doesn't
+    # select which model answers), so printed as its own line rather than
+    # folded into the loop above: an optional upgrade for `web_search`
+    # from the free, keyless DuckDuckGo default to the paid Brave index.
+    brave_effective = get_env("BRAVE_API_KEY")
+    if not brave_effective:
+        console.print("BRAVE_API_KEY          [dim]not set (web_search uses free DuckDuckGo)[/dim]")
+    elif os.environ.get("BRAVE_API_KEY") is not None:
+        console.print("BRAVE_API_KEY          [green]set[/green] (environment variable)")
+    else:
+        console.print("BRAVE_API_KEY          [green]set[/green] (saved config file)")
 
 
 @config_app.command("unset")
@@ -954,6 +973,7 @@ def config_unset(
     openai_api_key: bool = typer.Option(False, "--openai-api-key"),
     gemini_api_key: bool = typer.Option(False, "--gemini-api-key"),
     google_api_key: bool = typer.Option(False, "--google-api-key"),
+    brave_api_key: bool = typer.Option(False, "--brave-api-key"),
 ) -> None:
     """Remove one or more provider API keys from ~/.sarva/config.json --
     `set`'s missing counterpart. A real environment variable of the same
@@ -967,12 +987,14 @@ def config_unset(
         "OPENAI_API_KEY": openai_api_key,
         "GEMINI_API_KEY": gemini_api_key,
         "GOOGLE_API_KEY": google_api_key,
+        "BRAVE_API_KEY": brave_api_key,
     }
     names = [name for name, wanted in requested.items() if wanted]
     if not names:
         console.print(
             "[yellow]nothing to remove -- pass at least one of --anthropic-api-key / "
-            "--openai-api-key / --gemini-api-key / --google-api-key[/yellow]"
+            "--openai-api-key / --gemini-api-key / --google-api-key / "
+            "--brave-api-key[/yellow]"
         )
         raise typer.Exit(1)
     try:

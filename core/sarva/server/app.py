@@ -213,6 +213,7 @@ def create_app() -> FastAPI:
             "OPENAI_API_KEY": req.openai_api_key,
             "GEMINI_API_KEY": req.gemini_api_key,
             "GOOGLE_API_KEY": req.google_api_key,
+            "BRAVE_API_KEY": req.brave_api_key,
         }
         non_empty = {k: v for k, v in values.items() if v}
         if non_empty:

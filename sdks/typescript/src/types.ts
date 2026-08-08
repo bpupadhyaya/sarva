@@ -85,6 +85,11 @@ export interface SaveConfigRequest {
   // unsafe cast that defeats the SDK's purpose as a type-safe mirror
   // of the real API.
   google_api_key?: string | null;
+  // Not a provider key -- doesn't select which model answers. An
+  // optional upgrade for the `web_search` tool (core/sarva/agent/tools.py)
+  // from its free, keyless DuckDuckGo default to the paid Brave Search
+  // index; unset, web_search keeps working with zero configuration.
+  brave_api_key?: string | null;
 }
 
 // ---------- Content blocks (partial -- see module docstring) ----------

@@ -1458,6 +1458,27 @@ def test_post_config_persists_a_google_api_key(tmp_path, monkeypatch):
     assert saved_check["ok"] is True
 
 
+def test_post_config_persists_a_brave_api_key(tmp_path, monkeypatch):
+    # BRAVE_API_KEY is deliberately not a provider key (not in
+    # sarva.config.KNOWN_KEYS -- it doesn't select which model answers,
+    # only whether web_search upgrades from its free DuckDuckGo default
+    # to the paid Brave index), so it's saved via the same generic
+    # save_config() mechanism but never shows up as a /doctor check --
+    # only the four provider keys do.
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    import sarva.config as config_module
+
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+
+    client = _client()
+    resp = client.post("/config", json={"brave_api_key": "brave-server-test"})
+    assert resp.status_code == 200
+
+    saved = config_module.load_config()
+    assert saved == {"BRAVE_API_KEY": "brave-server-test"}
+    assert not any("brave" in c["name"].lower() for c in resp.json())
+
+
 def test_post_config_with_no_keys_does_not_write_a_file(tmp_path, monkeypatch):
     import sarva.config as config_module
 

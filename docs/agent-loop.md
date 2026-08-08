@@ -207,18 +207,74 @@ class Tool(Protocol):
     async def run(self, args: dict, ctx: ToolContext) -> ToolResultBlock: ...
 ```
 
-`BUILTIN_TOOLS` ships ten: `ReadFileTool`, `WriteFileTool`,
+`BUILTIN_TOOLS` ships eleven: `ReadFileTool`, `WriteFileTool`,
 `EditFileTool` (a targeted find-and-replace edit, distinct from
 `WriteFileTool`'s always-rewrite-the-whole-file contract — see the
 design doc's own §3.5 "file read/write/edit" line, the last of that
-trio to get built), `RunShellTool`, `WebFetchTool`, `RememberTool`,
-`RecallMemoryTool` (session-scoped semantic recall), `NoteTool`,
-`SearchNotesTool` (durable, cross-session markdown notes — see the
-memory chapter for all four), and `DelegateTool` (subagent fan-out —
-see below). MCP-backed tools (see the MCP chapter) implement the exact
-same `Tool` protocol, which is why the loop never needs to know or
-care whether a given tool call is local Python or a round trip to a
-subprocess speaking MCP.
+trio to get built), `RunShellTool`, `WebFetchTool`, `WebSearchTool`
+(below), `RememberTool`, `RecallMemoryTool` (session-scoped semantic
+recall), `NoteTool`, `SearchNotesTool` (durable, cross-session markdown
+notes — see the memory chapter for all four), and `DelegateTool`
+(subagent fan-out — see below). MCP-backed tools (see the MCP chapter)
+implement the exact same `Tool` protocol, which is why the loop never
+needs to know or care whether a given tool call is local Python or a
+round trip to a subprocess speaking MCP.
+
+### `WebSearchTool`: free by default, a paid index only ever an explicit opt-in
+
+Closed one of the three items the completeness-audit backlog had
+carried since round 46 as "needing a real external-dependency/scope
+decision, flagged for a check-in rather than guessed at" — a
+code-execution sandbox tool, a web-search tool, and image generation.
+The author's own direction, once asked: Sarva "should only use open
+source freely available tools, can provide option for purchased api if
+user already has those, just as additional option" — the design doc's
+own §2 "free tier must truly be free" principle, applied to tools
+exactly the way it already governs the provider layer (a bundled local
+model works with zero API cost; BYO-key unlocks frontier quality, never
+the other way around).
+
+`web_search` follows the identical shape. With no configuration at
+all, it queries `html.duckduckgo.com/html/` — DuckDuckGo's own
+no-JavaScript results page, the same one a browser with JavaScript
+disabled is served — and parses real results (title, URL, snippet) out
+of the HTML with a small, hand-written `html.parser.HTMLParser`
+subclass, not a new third-party HTML-parsing dependency or a regex
+against HTML (regex can't correctly handle nested tags). Confirmed live
+against the real endpoint before shipping, not just against a canned
+fixture: a real query for "python programming language" returns
+`python.org` and Wikipedia's Python article among the top results, and
+the class names (`result__a`, `result__snippet`) this parser depends on
+matched the real page exactly.
+
+DuckDuckGo's results page never links to a result directly — every
+`href` is a same-site redirect
+(`//duckduckgo.com/l/?uddg=<url-encoded-target>&rut=...`) wrapping the
+real target as a query parameter. `_decode_ddg_redirect` unwraps that
+before returning results, so a caller (and the model reading this
+tool's output) sees the actual destination a result points to, not an
+internal DuckDuckGo redirect endpoint it would have to resolve itself
+— confirmed with a dedicated test asserting `duckduckgo.com/l/` never
+appears in a real result's URL.
+
+If a user has already configured `BRAVE_API_KEY` (env var, or `sarva
+config set --brave-api-key` / the desktop app's config screen), the
+tool switches to the paid Brave Search API instead — a real, generally
+higher-quality index, but always an explicit upgrade a user opts into
+by saving their own key, never a requirement to search the web at all.
+`BRAVE_API_KEY` is deliberately *not* added to
+`sarva.config.KNOWN_KEYS`: that list is specifically "which provider
+answers," and this key doesn't select a model — it's printed as its
+own separate line in `sarva config show` instead, and accepted as its
+own field on the server's `POST /config` route and its TypeScript SDK
+mirror, so every skin (CLI, server, SDK) can reach it, matching design
+principle §5 ("no feature exists only in one skin").
+
+Not SSRF-guarded the way `WebFetchTool` is: both search endpoints are
+fixed hosts this tool itself chooses, never a caller/model-supplied
+URL — the threat model SSRF guards against (steering a fetch at an
+internal address) doesn't apply to a destination the code picks
+itself, unlike `web_fetch`'s `url` argument.
 
 `EditFileTool` mirrors a well-proven, simple contract — the same one
 this project's own coding assistant tool uses to edit its own source

@@ -1069,7 +1069,13 @@ def test_sessions_list_with_one_corrupted_file_still_lists_the_good_ones(monkeyp
 
 def _isolate_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+    for var in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "BRAVE_API_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -1153,6 +1159,35 @@ def test_config_set_google_api_key_writes_and_config_show_reflects_it(monkeypatc
 
     final_show = runner.invoke(app, ["config", "show"])
     lines = [line for line in final_show.stdout.splitlines() if "GOOGLE_API_KEY" in line]
+    assert len(lines) == 1
+    assert "not set" in lines[0]
+
+
+def test_config_set_brave_api_key_writes_and_config_show_reflects_it(monkeypatch, tmp_path):
+    # BRAVE_API_KEY is deliberately not in sarva.config.KNOWN_KEYS (it
+    # doesn't select which model answers, only whether web_search
+    # upgrades from its free DuckDuckGo default to the paid Brave
+    # index), so config_show prints it as its own separate line rather
+    # than from the KNOWN_KEYS loop -- confirmed here rather than
+    # assumed from reading the source.
+    _isolate_config(monkeypatch, tmp_path)
+
+    set_result = runner.invoke(app, ["config", "set", "--brave-api-key", "brave-real-test"])
+    assert set_result.exit_code == 0
+    assert "BRAVE_API_KEY" in set_result.stdout
+    assert "brave-real-test" not in set_result.stdout
+
+    show_result = runner.invoke(app, ["config", "show"])
+    assert "BRAVE_API_KEY" in show_result.stdout
+    assert "saved config file" in show_result.stdout
+    assert "brave-real-test" not in show_result.stdout
+
+    unset_result = runner.invoke(app, ["config", "unset", "--brave-api-key"])
+    assert unset_result.exit_code == 0
+    assert "BRAVE_API_KEY" in unset_result.stdout
+
+    final_show = runner.invoke(app, ["config", "show"])
+    lines = [line for line in final_show.stdout.splitlines() if "BRAVE_API_KEY" in line]
     assert len(lines) == 1
     assert "not set" in lines[0]
 

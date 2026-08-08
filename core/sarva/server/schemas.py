@@ -53,6 +53,15 @@ class SaveConfigRequest(BaseModel):
     openai_api_key: str | None = None
     gemini_api_key: str | None = None
     google_api_key: str | None = None
+    # Not a provider key -- `sarva.config.KNOWN_KEYS`/`run_diagnostics`
+    # deliberately never lists this one, since it doesn't select which
+    # model answers. An optional upgrade for `WebSearchTool` (sarva.agent.
+    # tools): unset, the tool already works for free via DuckDuckGo; set,
+    # it switches to the paid Brave Search index instead. Accepted here
+    # for the same reason the four provider keys are: `save_config` is
+    # generic, but this route's own explicit allowlist is what actually
+    # decides which caller-supplied fields get persisted.
+    brave_api_key: str | None = None
 
 
 class DoctorCheckOut(BaseModel):

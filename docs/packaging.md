@@ -107,14 +107,20 @@ at all until it was noticed missing while poking at the CLI's own
   `ValueError` per entry and reporting `NAME  (corrupt or unreadable)`
   instead of aborting, so one bad file can't take the rest of the
   listing down with it.
-- **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...] [--google-api-key ...]`**
-  / **`config show`** / **`config unset [--anthropic-api-key] [--openai-api-key] [--gemini-api-key] [--google-api-key]`**
+- **`config set [--anthropic-api-key ...] [--openai-api-key ...] [--gemini-api-key ...] [--google-api-key ...] [--brave-api-key ...]`**
+  / **`config show`** / **`config unset [--anthropic-api-key] [--openai-api-key] [--gemini-api-key] [--google-api-key] [--brave-api-key]`**
   — manage provider API keys in `~/.sarva/config.json` from the command
   line. `sarva.config.save_config`/`get_env` have backed the desktop
   app's first-run screen (`POST /config`) since it shipped, but a
   CLI-only user with no desktop app had no way to reach the same
   persistence at all — another instance of the "fully built,
   unreachable by a real user" shape this project keeps finding.
+  `--brave-api-key` is the odd one out on purpose: not a provider key
+  (`sarva.config.KNOWN_KEYS` deliberately excludes it — it doesn't
+  select which model answers), it's an optional upgrade for the
+  `web_search` tool from its free, keyless DuckDuckGo default to the
+  paid Brave Search index. See the agent-loop chapter's `WebSearchTool`
+  section for why free is the default, not the exception.
   `show` never prints an actual key value, only whether one is set and
   which source won (a real environment variable always beats a saved
   file). `set` reuses `save_config` directly, so it inherits the exact
