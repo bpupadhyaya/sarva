@@ -21496,3 +21496,50 @@ infra-blocked items remain deferred (Tauri `csp: null`, RL harness
 sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## `sarva[image]` was the one optional extra that never got the "verify it resolves from a real wheel install" treatment its own siblings already have
+
+Round 247. Continuing the general hardening sweep, applying the same
+"what does CI explicitly say it doesn't verify" lens that found round
+246's sidecar-size regression -- this time pointed at CI's own `core`
+job instead of the desktop one. Its "Verify installable wheels" step
+already exists specifically because `uv run` (every other check in
+that job) uses this repo's own dev workspace venv directly, which
+"never actually proves the published package METADATA is correct" --
+its own comment says so. That step already installs `sarva[foundry]`'s
+and `sarva[audio]`'s real underlying dependencies into a genuinely
+clean `/tmp` venv (built from the real wheel, not the dev workspace)
+and imports through them, closing exactly this gap for those two
+extras.
+
+`sarva[image]` (this session's own round 242 addition) never got the
+same treatment -- simply never added when the extra shipped, not a
+regression in existing coverage, but a real, concrete gap in a
+now-three-extra pattern where only two of the three were actually
+verified against a real wheel install.
+
+**Fixed** by adding the identical check: `uv pip install --python
+/tmp/sarva-clean-venv/bin/python torch diffusers transformers
+accelerate sentencepiece protobuf` followed by `from sarva.agent.tools
+import ImageGenerationTool` against the clean venv. Confirmed the
+import itself resolves correctly first, directly in this dev
+environment's own venv (which already has these packages installed
+from round 242's own verification work) -- `uv` itself isn't available
+in this environment to fully replicate the clean-venv install step
+end to end, so that specific `uv pip install` invocation is verified
+by syntax/precedent (identical shape to the `faster-whisper` line
+right above it, just multiple package names) rather than a live run,
+named honestly rather than silently assumed identical. `uv`'s own
+cache (already warm from this same job's `--all-extras` sync at the
+very top of the job) should make this cheap in real CI, not a fresh
+multi-hundred-MB download.
+
+No Python/TypeScript files changed -- pure CI workflow YAML; validated
+with a real `yaml.safe_load` parse before committing.
+
+**Next:** continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

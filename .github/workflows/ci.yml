@@ -81,6 +81,17 @@ jobs:
           /tmp/sarva-clean-venv/bin/python -c "from sarva.providers.foundry_provider import FoundryProvider; from sarva_foundry.model import DecoderOnlyTransformer; print('foundry extra imports cleanly from a clean wheel install')"
           uv pip install --python /tmp/sarva-clean-venv/bin/python faster-whisper
           /tmp/sarva-clean-venv/bin/python -c "from sarva.audio import transcribe; print('audio extra imports cleanly from a clean wheel install')"
+          # A real, concrete gap found by a fresh-eyes sweep: sarva[image]
+          # (ImageGenerationTool's own torch/diffusers/transformers/
+          # accelerate/sentencepiece/protobuf stack) got the identical
+          # "genuinely optional, verify it resolves from a real wheel
+          # install, not just the dev workspace" treatment as foundry/audio
+          # above -- everywhere else -- except here, where it was simply
+          # never added when the extra shipped. `uv`'s own cache (already
+          # warm from this same job's `--all-extras` sync at the top) makes
+          # this cheap, not a fresh multi-hundred-MB download.
+          uv pip install --python /tmp/sarva-clean-venv/bin/python torch diffusers transformers accelerate sentencepiece protobuf
+          /tmp/sarva-clean-venv/bin/python -c "from sarva.agent.tools import ImageGenerationTool; print('image extra imports cleanly from a clean wheel install')"
 
   windows-audio:
     # Real verification for the Windows TTS branch of sarva.audio --
