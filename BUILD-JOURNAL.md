@@ -21319,3 +21319,52 @@ The three infra-blocked items remain deferred (Tauri `csp: null`, RL
 harness sandboxing, inference batching); the quantization/`Budget`
 NaN-validation gap has three confirmed-but-unreachable instances
 tracked together.
+
+
+## The desktop app's own independent `AgentEvent` mirror had drifted from the real wire format -- missing `spend` entirely, caught by chasing down a stale docstring
+
+Round 244. Returned to the general hardening-sweep pattern now that
+the completeness-audit backlog (240-242) and its own doctor-check gap
+(243) are both closed. A fresh-eyes sweep of `apps/desktop/src/`, a
+part of the codebase this session's tool-shipping work hadn't touched.
+
+`events.ts`'s own docstring said "kept minimal and local to this app
+for now -- a proper sdks/typescript/ package... can factor this out
+once a second consumer needs it" -- but that package already exists
+(built and used extensively this session for SaveConfigRequest's own
+`brave_api_key` field). Chasing down whether that comment was actually
+still true surfaced a real, separate drift bug: this app's own
+independent `AgentEvent` mirror -- never reconciled against the SDK's
+already-more-accurate copy -- was missing the `spend: Spend` field on
+its `run_done` variant entirely, even though `sarva.agent.events.
+RunDoneEvent` (the real Pydantic model serialized over the wire) has
+required it since budget tracking shipped. The identical shape as the
+SDK's own previously-fixed `google_api_key` bug (TypeScript actively
+rejecting real data the server provides), just in the OTHER app that
+also hand-mirrors this wire format and had never been checked against
+the SDK's own, later, more careful copy.
+
+**Fixed, deliberately scoped to the type fix alone:** added the
+missing `spend: Spend` field (a new local `Spend` interface matching
+`sarva.agent.events.Spend`'s field names exactly) and corrected the
+stale docstring to name the SDK's existence honestly. Actually wiring
+this app to depend on `sdks/typescript/` (removing the duplicate
+mirror) is named as a real, separate, still-open follow-up, not
+silently done alongside this fix. `npm run build`/`npm test` both
+clean (32 tests, unchanged -- this app's own tests construct `run_done`
+events as loosely-typed `unknown`, so the stricter type needed no test
+changes); confirmed the compiled `dist/` output is byte-identical
+(same content-hashed filenames) before concluding `core/sarva/server/
+static/` needed no re-sync -- a pure type-level fix, zero runtime
+behavior change.
+
+`docs/packaging.md` gained a new subsection continuing the
+`SaveConfigRequest`/TypeScript-SDK-drift narrative. No Python files
+changed; full Python suite unaffected.
+
+**Next:** with feature work and its own doctor-check gap both closed,
+continuing the general hardening-sweep pattern. The three
+infra-blocked items remain deferred (Tauri `csp: null`, RL harness
+sandboxing, inference batching); the quantization/`Budget`
+NaN-validation gap has three confirmed-but-unreachable instances
+tracked together.

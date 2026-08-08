@@ -255,6 +255,42 @@ Verified by reverting the type change (with the new type-checking
 — `tsc` rejecting the literal `google_api_key` property — instead of
 silently passing at runtime the way it would have under the old,
 type-blind `test` script. 1 new test, 19 → 20 TypeScript SDK tests.
+
+### The desktop app's OWN independent `AgentEvent` mirror had drifted too — missing `spend` entirely, and never reconciled against the SDK that superseded it
+
+A much later fresh-eyes sweep, prompted by that same file's own stale
+docstring ("a proper `sdks/typescript/` package... can factor this out
+once a second consumer needs it" — written before that package existed,
+never revisited after it shipped): `apps/desktop/src/events.ts` is a
+SECOND, independent hand-written mirror of `sarva.agent.events.
+AgentEvent`, older than the standalone SDK's own copy and never
+reconciled against it once the SDK's own `SaveConfigRequest` fix above
+raised the bar for what "a real, checked mirror" means here. Confirmed
+by reading `sarva.agent.events.RunDoneEvent` directly: its `spend:
+Spend` field has been required since budget tracking shipped, sent on
+every real `run_done` frame over `/ws/chat` — but this app's own local
+`AgentEvent` type never declared it, silently blocking any future
+code in this app from reading real spend/cost data the server already
+sends on every completed run, the identical "TypeScript actively
+rejects real data the server provides" shape the SDK's own
+`google_api_key` bug had, just in the OTHER app that also hand-mirrors
+this wire format.
+
+Fixed by adding the missing `spend: Spend` field (a new local `Spend`
+interface, field names matching `sarva.agent.events.Spend` exactly) and
+correcting the stale docstring to name the SDK's existence honestly
+rather than describe a "someday" that already happened. Deliberately
+scoped to the type fix alone — actually wiring this app to depend on
+`sdks/typescript/` (removing the duplicate mirror entirely) is a real,
+separate, still-open follow-up worth doing later, not silently done
+here alongside an unrelated fix. `npm run build`/`npm test` both clean
+(32 tests, unchanged — this app's own tests construct `run_done` events
+as loosely-typed `unknown`, so the stricter type doesn't require
+touching any of them); the compiled `dist/` output is byte-identical
+(same content-hashed filenames), confirming this is a pure type-level
+fix with zero runtime behavior change, so `core/sarva/server/static/`
+needed no re-sync.
+
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
 - **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text
