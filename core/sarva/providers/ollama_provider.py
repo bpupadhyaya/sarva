@@ -347,6 +347,30 @@ class OllamaProvider:
                             retryable=True,
                         )
                         return
+                    if not isinstance(chunk, dict):
+                        # A real bug found by a fresh-eyes sweep, a sibling
+                        # gap to the JSONDecodeError branch just above: a
+                        # line can be perfectly valid JSON and still not be
+                        # an object -- a bare number, string, or array is
+                        # valid JSON that `json.loads` happily returns, just
+                        # never a shape this protocol actually produces.
+                        # `chunk.get(...)` a few lines below then raised an
+                        # uncaught `AttributeError: 'int' object has no
+                        # attribute 'get'` instead of the same clean
+                        # StreamErrorEvent the neighboring JSONDecodeError
+                        # branch already produces for the immediately
+                        # adjacent "this line isn't usable" case. Confirmed
+                        # live with a mocked transport streaming a bare `42`
+                        # NDJSON line between two ordinary chunks.
+                        yield StreamErrorEvent(
+                            code="provider",
+                            detail=(
+                                "malformed streaming response from Ollama: expected a JSON "
+                                f"object, got {type(chunk).__name__}"
+                            ),
+                            retryable=True,
+                        )
+                        return
                     # A real bug found by a fresh-eyes sweep, one shape the
                     # neighboring JSONDecodeError branch above doesn't
                     # cover: Ollama's real wire protocol has a third line

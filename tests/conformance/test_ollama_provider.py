@@ -281,6 +281,27 @@ async def test_generate_yields_a_clean_stream_error_on_a_malformed_ndjson_line()
 
 
 @pytest.mark.asyncio
+async def test_generate_yields_a_clean_stream_error_on_a_non_object_json_line():
+    # A real bug found by a fresh-eyes sweep, a sibling gap to the
+    # malformed-NDJSON-line test above: a line can be perfectly valid
+    # JSON and still not be an object -- a bare number is valid JSON
+    # `json.loads` happily parses, just never a shape this protocol
+    # actually produces. `chunk.get(...)` a few lines below the parse
+    # then raised an uncaught `AttributeError: 'int' object has no
+    # attribute 'get'` instead of the same clean StreamErrorEvent the
+    # neighboring JSONDecodeError branch already produces for the
+    # immediately adjacent "this line isn't usable" case.
+    body = b'{"message": {"content": "Hel"}, "done": false}\n' + b"42\n"
+
+    events = [e async for e in _provider(body).generate(_req())]
+
+    assert events[0] == TextDeltaEvent(text="Hel")
+    assert isinstance(events[-1], StreamErrorEvent)
+    assert events[-1].retryable is True
+    assert "malformed streaming response" in events[-1].detail
+
+
+@pytest.mark.asyncio
 async def test_generate_yields_a_clean_stream_error_on_a_mid_stream_error_chunk():
     # A real bug found by a fresh-eyes sweep, one line shape the
     # neighboring malformed-NDJSON-line test above doesn't cover:

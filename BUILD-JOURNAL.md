@@ -21841,3 +21841,38 @@ past its deadline), restored it. 1 new test, 915 selected. `ruff
 check`/`ruff format --check` both clean. `docs/multimodal.md` extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 281: `OllamaProvider.generate()`'s NDJSON loop crashed on a valid-JSON, non-dict line -- the fourth real shape in the same streaming loop
+
+Continuing the module-by-module hardening sweep, `ollama_provider.py`
+already had an unusually dense history of found-and-fixed streaming-
+loop bugs (malformed NDJSON, a mid-stream `{"error": ...}` chunk,
+missing stop_sequences/max_tokens translation, dropped thinking field,
+missing done_reason mapping, hardcoded-zero token usage). A fresh-eyes
+sweep found one more: `json.loads(line)` succeeding doesn't guarantee
+`chunk` is a dict -- a bare number is valid JSON too, just never a
+shape this protocol actually produces, and the neighboring
+`JSONDecodeError` branch only fires on a parse *failure*, not a
+parse-succeeds-wrong-type.
+
+**Verified live** with `httpx.MockTransport`: one ordinary content
+chunk followed by a bare `42\n` NDJSON line produced an uncaught
+`AttributeError: 'int' object has no attribute 'get'` propagating
+straight out of the async generator -- the identical "raw exception
+instead of the documented StreamErrorEvent" shape the malformed-NDJSON
+fix already exists to prevent, reached through a line that parses
+successfully instead of one that doesn't.
+
+**Fixed** with an `isinstance(chunk, dict)` check right after the
+parse, before either `chunk.get(...)` call that follows it -- same
+`StreamErrorEvent`, same `retryable=True`, same detail-message prefix
+as the sibling JSONDecodeError branch.
+
+**Verified with a genuine revert-and-check**: reverted the fix, watched
+the new test fail with the literal old bug's own shape (the raw
+`AttributeError`), restored it. 1 new test, 916 selected. `ruff
+check`/`ruff format --check` both clean. `docs/providers.md` extended.
+
+**Next:** continuing the hardening sweep, module by module.

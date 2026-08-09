@@ -355,6 +355,37 @@ Verified by reverting and watching the new test fail with the literal
 old bug's own shape — a `DoneEvent` where a `StreamErrorEvent` was
 expected. 1 new test, 853 → 854 Python tests.
 
+### A fourth real line shape, one step earlier than the other three — a line can be perfectly valid JSON and still not be the object shape this loop assumes
+
+A much later hardening sweep, re-examining this exact streaming loop's
+own error-handling history for one more variant, found the one case
+still missing: `json.loads(line)` succeeding is not the same guarantee
+as `chunk` being a `dict`. Valid JSON includes bare numbers, strings,
+booleans, and arrays too — none of them a shape this protocol actually
+produces, but all of them things `json.loads` parses without raising,
+so the neighboring `JSONDecodeError` branch (which only fires on a
+parse *failure*) never sees them. The very next line, `chunk.get(...)`,
+assumes a dict unconditionally.
+
+Confirmed live with `httpx.MockTransport` streaming one ordinary
+content chunk followed by a bare `42` as its own NDJSON line: the
+result was an uncaught `AttributeError: 'int' object has no attribute
+'get'` propagating straight out of the async generator — the identical
+"a raw Python exception instead of the documented `StreamErrorEvent`"
+shape the malformed-NDJSON-line fix above exists to prevent, just
+reached through a line that parses successfully instead of one that
+doesn't.
+
+Fixed with an `isinstance(chunk, dict)` check immediately after the
+parse, before either of the two `chunk.get(...)` calls that follow it
+(the error-chunk check above, and the ordinary `message`/`done` reads
+further down) — same `StreamErrorEvent`, same `retryable=True`, same
+"malformed streaming response from Ollama" detail prefix as the
+JSONDecodeError branch, so a caller catching one already catches both.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape — the raw `AttributeError` — before re-applying. 1
+new test, 915 → 916 Python tests.
+
 ### A malformed Anthropic SDK response had the identical gap — found by reasoning through the SDK's own exception hierarchy, no API key needed
 
 `AnthropicProvider.generate()`'s three `except` clauses
