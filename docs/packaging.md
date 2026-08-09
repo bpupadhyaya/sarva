@@ -420,6 +420,43 @@ renders its bracket-laden text literally. Verified by reverting and
 watching all four new tests fail with the exact swallowed values
 reproducing themselves. 4 new tests, 716 → 720 Python tests.
 
+**`sarva eval` could still crash outright with a raw traceback, not just
+mangled text — one layer beneath every escaping fix above.** `runtime.
+build_router()` already skips an individually-corrupted foundry
+checkpoint bundle during candidate discovery rather than crashing the
+whole router (a much earlier fix — `discover_checkpoint_bundles()` only
+checks that a bundle's three files *exist*, never that `config.json` is
+actually valid). `build_providers()`, the sibling function that
+constructs the REAL provider objects, has an analogous gap `build_
+router()`'s own fix never propagated to: `FoundryProvider.__init__`
+already skips an individually-corrupted bundle too (recording it in
+`broken_bundles`), but if *every* discovered bundle fails to load, the
+constructor itself raises `ValueError` — "zero out of N loaded" is a
+real, separate failure mode its per-bundle handling can't paper over,
+and `build_providers()` had no error handling around this constructor
+call at all.
+
+Confirmed live through the real CLI, not a synthetic repro: `sarva eval`
+with `SARVA_FOUNDRY_CHECKPOINTS` pointing at a directory of only
+corrupted bundles crashed with a raw `ValueError` traceback.
+`eval_cmd`/`_eval()` has no `try`/`except` of its own around `build_
+providers()` at all — unlike `/chat`, `/ws/chat`, and `sarva chat`/`run`,
+which turn out to catch this specific failure only *by accident*: each
+already wraps its whole session-scoped block in a broad `except
+ValueError` that was added for a completely unrelated concern (invalid
+session names), and that broad catch happens to also swallow this one.
+Relying on that coincidence rather than fixing the actual choke point
+would have left `sarva eval` (and any future caller with no session-name
+`ValueError` handler of its own to accidentally lean on) genuinely
+exposed.
+
+Fixed at the single real choke point, `build_providers()` itself,
+matching `build_router()`'s own posture: one totally-broken checkpoints
+directory shouldn't take down every OTHER provider, or every caller of
+`build_providers()` at all. Verified by reverting and watching the new
+test fail with the exact `ValueError` reproducing itself. 1 new test,
+917 → 918 Python tests.
+
 ## The server: `sarva.server.app`
 
 Two different endpoints for two different needs, and the module's own

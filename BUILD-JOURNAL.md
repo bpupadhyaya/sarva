@@ -21907,3 +21907,40 @@ watched both new tests fail with the literal old bug's own shape
 `docs/packaging.md` extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 305: `sarva eval` could crash with a raw traceback if every foundry checkpoint bundle was corrupted -- build_providers()'s own sibling gap to an already-fixed build_router() bug
+
+Continuing the module-by-module hardening sweep, re-read `runtime.py`
+fully and traced `build_providers()`'s foundry branch against
+`build_router()`'s own already-fixed candidate-discovery pass (which
+skips an individually-corrupted checkpoint bundle rather than crashing
+the whole router). `FoundryProvider.__init__` itself already skips a
+single bad bundle too (recording it in `broken_bundles`), but raises
+`ValueError` if *every* discovered bundle fails to load -- a real,
+separate failure mode its own per-bundle handling can't paper over --
+and `build_providers()` had no error handling around that constructor
+call at all.
+
+**Confirmed live through the real CLI**: `sarva eval` with
+`SARVA_FOUNDRY_CHECKPOINTS` pointing at a directory of only corrupted
+bundles crashed with a raw `ValueError` traceback. Checked every real
+caller first: `/chat`, `/ws/chat`, and `sarva chat`/`run` all happen to
+catch this already, but only *by accident* -- each wraps its whole
+session-scoped block in a broad `except ValueError` originally added
+for an unrelated concern (invalid session names) that happens to also
+swallow this. `eval_cmd`/`_eval()` has no such handler at all, so it's
+genuinely, not just theoretically, exposed.
+
+**Fixed** at the single real choke point, `build_providers()` itself,
+matching `build_router()`'s own posture -- one totally-broken
+checkpoints directory shouldn't take down every OTHER provider or every
+caller.
+
+**Verified with a genuine revert-and-check**: reverted the fix, watched
+the new test fail with the exact `ValueError` reproducing itself,
+restored it. 1 new test, 918 selected. `ruff check`/`ruff format
+--check` both clean. `docs/packaging.md` extended.
+
+**Next:** continuing the hardening sweep, module by module.

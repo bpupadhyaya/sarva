@@ -434,5 +434,31 @@ def build_providers() -> dict[str, Any]:
         from sarva.providers.foundry_provider import FoundryProvider, discover_checkpoint_bundles
 
         if discover_checkpoint_bundles(fdir):
-            providers["foundry"] = FoundryProvider(fdir)
+            # A real bug found by a fresh-eyes sweep, one layer beyond
+            # FoundryProvider.__init__'s own per-bundle try/except (which
+            # already skips an individually-corrupted bundle and records
+            # it in broken_bundles): if EVERY discovered bundle fails to
+            # load, the constructor itself raises ValueError -- "zero out
+            # of N loaded" is a real, separate failure mode its per-bundle
+            # handling can't paper over. discover_checkpoint_bundles only
+            # checks that the three bundle files *exist*, never that
+            # config.json/model.pt are actually valid, so this is reachable
+            # any time a bundle got corrupted after being discovered --
+            # the identical "corrupted on-disk state" threat model already
+            # closed for build_router()'s own candidate-discovery pass one
+            # call away from this one. Confirmed live: `sarva eval` with
+            # SARVA_FOUNDRY_CHECKPOINTS pointing at a directory of only
+            # corrupted bundles crashed with a raw ValueError traceback --
+            # eval_cmd/`_eval()` has no try/except of its own around
+            # build_providers() at all, unlike /chat, /ws/chat, and
+            # sarva chat/run, which happen to catch this only by accident
+            # (a broad `except ValueError` originally added for an
+            # unrelated concern, invalid session names). Fixed at this one
+            # real choke point, matching build_router()'s own posture: one
+            # bad checkpoints directory shouldn't take down every OTHER
+            # provider (or every caller of build_providers() at all).
+            try:
+                providers["foundry"] = FoundryProvider(fdir)
+            except ValueError:
+                pass
     return providers

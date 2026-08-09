@@ -110,6 +110,36 @@ def test_build_router_skips_a_corrupted_foundry_checkpoint_instead_of_crashing(
     assert "foundry/missing-key" not in router.available
 
 
+def test_build_providers_skips_a_foundry_dir_where_every_bundle_is_corrupted(monkeypatch, tmp_path):
+    # A real bug found by a fresh-eyes sweep, one layer beyond
+    # FoundryProvider.__init__'s own per-bundle try/except (which already
+    # skips an individually-corrupted bundle and records it in
+    # broken_bundles): if EVERY discovered bundle fails to load, the
+    # constructor itself raises ValueError -- "zero out of N loaded", a
+    # real, separate failure mode its per-bundle handling can't paper
+    # over. build_providers() had no error handling around this
+    # constructor call at all. Confirmed live through the real CLI:
+    # `sarva eval` with SARVA_FOUNDRY_CHECKPOINTS pointing at a directory
+    # of only corrupted bundles crashed with a raw ValueError traceback
+    # -- eval_cmd/_eval() has no try/except of its own around
+    # build_providers(), unlike /chat, /ws/chat, and sarva chat/run,
+    # which only happen to catch this by accident (a broad
+    # `except ValueError` originally added for an unrelated concern,
+    # invalid session names).
+    _clear_frontier_keys(monkeypatch)
+    monkeypatch.setenv("SARVA_FOUNDRY_CHECKPOINTS", str(tmp_path))
+    bad = tmp_path / "totally-broken"
+    bad.mkdir()
+    (bad / "config.json").write_text("not valid json at all")
+    (bad / "tokenizer.json").write_text("also not valid")
+    (bad / "model.pt").write_bytes(b"garbage")
+
+    providers = runtime.build_providers()  # must not raise
+
+    assert "foundry" not in providers
+    assert "mock" in providers
+
+
 def test_ollama_probe_is_cached_across_build_router_and_build_providers(monkeypatch):
     # A real bug found by actually running build_router() immediately
     # followed by build_providers() the way sarva.server.app's /chat and
