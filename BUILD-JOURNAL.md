@@ -21876,3 +21876,34 @@ the new test fail with the literal old bug's own shape (the raw
 check`/`ruff format --check` both clean. `docs/providers.md` extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 295: `speak`/`distill`'s own SUCCESS messages swallowed a bracketed --out filename -- the same Rich-markup gap already fixed for their error paths
+
+Continuing the module-by-module hardening sweep through `cli.py`,
+found a real, live-reachable sibling to a gap already documented and
+fixed for `speak`/`transcribe`'s ERROR paths: their SUCCESS messages
+(`"wrote N bytes to {out}"`, distill's `"Wrote N records to {out}"`)
+interpolate `--out` -- a free-text, user-typed path with no character
+restriction, unlike a session name -- directly into a Rich-markup
+`console.print(f"...")` with no `escape()` call.
+
+**Confirmed live**: `sarva speak "hi" --out "my[recording].wav"`
+printed `"wrote N bytes to my.wav"` -- Rich's markup parser silently
+swallowed the bracketed segment, misreporting the real filename
+actually written (the file on disk is correct; only the display
+message is wrong). `distill`'s identical success message had the same
+gap.
+
+**Fixed** with `escape(str(out))` at both call sites, matching every
+other user-controlled string already escaped elsewhere in this file
+(model ids, dynamic doctor/error text).
+
+**Verified with a genuine revert-and-check**: reverted both fixes,
+watched both new tests fail with the literal old bug's own shape
+(`my.wav` instead of `my[recording].wav`), restored them. 2 new tests,
+917 selected. `ruff check`/`ruff format --check` both clean.
+`docs/packaging.md` extended.
+
+**Next:** continuing the hardening sweep, module by module.

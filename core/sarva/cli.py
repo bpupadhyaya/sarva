@@ -795,7 +795,16 @@ async def _distill(prompts_file: Path, model: str, out: Path, system: str | None
         # short of re-running the whole distillation from scratch.
         _print_file_error("write", "output file", out, e)
         raise typer.Exit(1) from e
-    console.print(f"Wrote {len(records)} records to {out}")
+    # escape(): --out is a free-text, user-typed path with no character
+    # restriction (unlike a session name) -- the same "user-controlled
+    # string interpolated into a Rich-markup console.print" bug class
+    # already fixed for model ids and dynamic doctor/error text
+    # elsewhere in this file. Confirmed live: --out "my[recording].wav"
+    # printed as "wrote N bytes to my.wav" -- Rich's markup parser
+    # silently swallowed the bracketed segment, misreporting the actual
+    # filename written (the file on disk is unaffected; only this
+    # display message is wrong).
+    console.print(f"Wrote {len(records)} records to {escape(str(out))}")
 
 
 @sessions_app.command("list")
@@ -1030,7 +1039,12 @@ def speak(
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
     _write_bytes_or_exit(out, audio_bytes, "output file")
-    console.print(f"wrote {len(audio_bytes)} bytes to {out}")
+    # escape(): the same real bug as distill's identical success message
+    # just below in this file -- --out is a free-text, user-typed path
+    # with no character restriction, and Rich's markup parser silently
+    # swallows a bracketed segment (confirmed live: --out
+    # "my[recording].wav" printed as "wrote N bytes to my.wav").
+    console.print(f"wrote {len(audio_bytes)} bytes to {escape(str(out))}")
 
 
 @app.command()

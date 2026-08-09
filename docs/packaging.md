@@ -1416,6 +1416,23 @@ it. Verified live end to end, not just the test suite: a real
 `sarva speak "..."` output piped straight into a real
 `sarva transcribe`, real words back.
 
+**A much later fresh-eyes sweep found the identical gap one layer
+over, in `speak`'s and `distill`'s own SUCCESS messages, not their
+error paths** (which the paragraph above already covers): both echo
+`--out` -- a free-text, user-typed path with no character restriction,
+unlike a session name -- straight into a Rich-markup `console.print(f"...
+{out}")` with no `escape()` call at all. Confirmed live:
+`sarva speak "hi" --out "my[recording].wav"` printed `"wrote N bytes to
+my.wav"` -- the bracketed segment silently swallowed by Rich's markup
+parser, misreporting the real filename actually written (the file on
+disk is unaffected; only the display message is wrong). `distill`'s
+own `"Wrote N records to {out}"` had the identical gap. Both fixed with
+`escape(str(out))`, matching every other user-controlled string
+interpolated into a `console.print` call elsewhere in this file.
+Verified by reverting and watching both new tests fail with the
+literal old bug's own shape (`my.wav` instead of `my[recording].wav`)
+before re-applying. 2 new tests, 917 selected.
+
 **Both non-Windows TTS branches verified against real installed
 binaries, not just documented CLI shapes:** the `say` branch runs
 unconditionally on real macOS; the `espeak-ng` branch was verified too

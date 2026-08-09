@@ -719,6 +719,26 @@ def test_distill_writes_a_real_jsonl_file_from_mock_completions(monkeypatch, tmp
     assert "[mock] received: what is 2+2?" in records[0]["completion"]
 
 
+def test_distill_success_message_escapes_markup_in_the_out_path(monkeypatch, tmp_path):
+    # A real bug found by a fresh-eyes sweep, the same gap as speak's
+    # own identical success message: --out has no character restriction,
+    # and Rich's markup parser silently swallows a bracketed segment.
+    # Confirmed live: --out "out[draft].jsonl" printed as "Wrote N
+    # records to out.jsonl" -- a wrong filename report.
+    _clear_provider_env(monkeypatch)
+    prompts_file = tmp_path / "prompts.txt"
+    prompts_file.write_text("hi\n")
+    out_file = tmp_path / "out[draft].jsonl"
+
+    result = runner.invoke(
+        app, ["distill", str(prompts_file), "--model", "mock", "--out", str(out_file)]
+    )
+
+    assert result.exit_code == 0
+    assert out_file.exists()
+    assert "out[draft].jsonl" in result.stdout
+
+
 def test_distill_with_an_unwritable_out_path_fails_cleanly_not_a_traceback(monkeypatch, tmp_path):
     # A real bug found by actually running `sarva distill ... --out
     # /nonexistent-dir/out.jsonl`: save_jsonl()'s plain `path.open("w")`
@@ -1349,6 +1369,25 @@ def test_speak_writes_a_real_audio_file(tmp_path):
     # check the pieces rather than one exact string.
     assert f"wrote {out_path.stat().st_size} bytes to" in result.stdout
     assert out_path.name in result.stdout
+
+
+def test_speak_success_message_escapes_markup_in_the_out_path(tmp_path):
+    # A real bug found by a fresh-eyes sweep, the identical "user-
+    # controlled string interpolated into a Rich-markup console.print"
+    # gap already fixed for model ids and dynamic doctor/error text
+    # elsewhere in this file, just never applied to --out's own success
+    # message: --out has no character restriction (unlike a session
+    # name), and Rich's markup parser silently swallows a bracketed
+    # segment. Confirmed live: --out "my[recording].wav" printed as
+    # "wrote N bytes to my.wav" -- a wrong filename report, even though
+    # the real file on disk is written correctly at the real path.
+    out_path = tmp_path / "my[recording].wav"
+
+    result = runner.invoke(app, ["speak", "hello", "--out", str(out_path)])
+
+    assert result.exit_code == 0
+    assert out_path.exists()
+    assert "my[recording].wav" in result.stdout
 
 
 def test_speak_fails_cleanly_with_no_engine_available(tmp_path, monkeypatch):
