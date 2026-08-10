@@ -415,7 +415,23 @@ class AgentLoop:
         # blocking part" fix rather than making emit() do anything else
         # differently.
         def _append_transcript_line(line: str) -> None:
-            with transcript_path.open("a") as f:
+            # encoding="utf-8" explicit, not locale-default: a real,
+            # systemic gap already found and fixed at 9+ read-path call
+            # sites in this codebase (SessionStore.load, ReadFileTool,
+            # config.py, providers/registry.py, ...), just never checked
+            # on this WRITE path. `open(path, "a")` with no `encoding=`
+            # uses `locale.getpreferredencoding(False)`, not UTF-8 --
+            # genuinely locale-dependent on this project's own minimum
+            # Python (3.12), e.g. on musl-libc containers (Alpine),
+            # Windows without UTF-8 mode, or PYTHONCOERCECLOCALE=0.
+            # `emit()` runs this for EVERY event of EVERY real turn, and
+            # `event.model_dump_json()` routinely carries entirely
+            # ordinary non-ASCII text (a non-English user message, or
+            # just a model's own em-dash/curly-quote output) -- confirmed
+            # live: writing such a line via `open(path, "a",
+            # encoding="ascii")`, standing in for a genuinely non-UTF-8
+            # locale, raised UnicodeEncodeError.
+            with transcript_path.open("a", encoding="utf-8") as f:
                 f.write(line)
 
         async def emit(event: AgentEvent) -> AgentEvent:

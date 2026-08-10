@@ -445,6 +445,45 @@ async def test_transcript_is_replayable(run_root):
 
 
 @pytest.mark.asyncio
+async def test_transcript_append_passes_an_explicit_utf8_encoding_not_locale_default(
+    run_root, monkeypatch
+):
+    # A real bug found by a fresh-eyes sweep, the write-side sibling of
+    # the identical "no explicit encoding=, so locale.getpreferredencoding()
+    # decides" gap already found and fixed at 9+ read-path call sites in
+    # this codebase (SessionStore.load, ReadFileTool, config.py,
+    # providers/registry.py, ...): emit()'s own _append_transcript_line
+    # wrote every transcript line via transcript_path.open("a") with no
+    # encoding= at all -- genuinely locale-dependent on this project's
+    # own minimum Python (3.12), e.g. on musl-libc containers (Alpine),
+    # Windows without UTF-8 mode, or PYTHONCOERCECLOCALE=0. Confirmed
+    # live: writing a real non-ASCII line via
+    # `open(path, "a", encoding="ascii")` (standing in for a genuinely
+    # non-UTF-8 locale) raised UnicodeEncodeError for entirely ordinary
+    # text -- a non-English user message, or just a model's own
+    # em-dash/curly-quote output, not adversarial input. This spy
+    # directly pins the fix (explicit encoding="utf-8" on the append),
+    # rather than depending on the OS's actual locale to reproduce it.
+    real_open = Path.open
+
+    def spy_open(self, *args, **kwargs):
+        if self.name == "transcript.jsonl":
+            assert kwargs.get("encoding") == "utf-8", (
+                "transcript append must pass encoding='utf-8' explicitly, not rely on "
+                "locale.getpreferredencoding()"
+            )
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", spy_open)
+
+    provider = MockProvider(script=[ScriptedTurn(text="café Ω 日本語")])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+    events = [e async for e in loop.run("hello")]
+
+    assert any(e.type == "run_done" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_run_directories_are_pruned_beyond_the_retention_cap(run_root, monkeypatch):
     # A real bug found by actually running AgentLoop.run() in a loop the
     # way sarva.server.app's /chat and /ws/chat handlers do (a fresh

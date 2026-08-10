@@ -197,6 +197,45 @@ Verified by reverting and watching the new test fail with the literal
 old shape: 76 ticks landed instead of the expected ~203. 1 new test,
 818 → 819 Python tests.
 
+### `emit()`'s own file append never passed an explicit encoding either — the write-side sibling of a gap already fixed nine times on the read side
+
+A much later fresh-eyes sweep, applying the identical "no explicit
+`encoding=`, so `locale.getpreferredencoding(False)` decides" lens
+already found and fixed at nine separate *read*-path call sites across
+this codebase (`SessionStore.load`, `ReadFileTool`, `sarva.config`,
+`providers/registry.py`, ...), found the one *write*-path instance none
+of those earlier sweeps had reached: `_append_transcript_line`'s own
+`transcript_path.open("a")` — the same closure the `emit()` fix directly
+above already dispatches to a thread — never passed `encoding="utf-8"`
+either.
+
+Python's own documented behavior for `open()` in text mode with no
+`encoding=` is genuinely platform-dependent (`locale.getencoding()`
+decides), not automatically UTF-8 on this project's own minimum Python
+(3.12; that only changes with PEP 686 in 3.15) — a musl-libc container
+(Alpine), Windows without UTF-8 mode, or `PYTHONCOERCECLOCALE=0` are all
+realistic `sarva serve` deployment targets, not contrived ones.
+`emit()` runs this append for *every* event of *every* real turn, and
+`event.model_dump_json()` routinely carries entirely ordinary non-ASCII
+text — a non-English user message, or just a model's own em-dash/curly-
+quote output in an otherwise "English" response. Confirmed live:
+writing such a line via `open(path, "a", encoding="ascii")` — standing
+in for a genuinely non-UTF-8 locale — raised `UnicodeEncodeError`, which
+would have crashed `emit()` (and therefore the whole turn) mid-stream on
+such a deployment, for content no more exotic than a curly apostrophe.
+
+Fixed with the same one-line change as every one of the nine read-side
+fixes: `encoding="utf-8"` added explicitly to the `open()` call.
+Verified with a spy on `Path.open` (the same technique
+`test_load_passes_an_explicit_utf8_encoding_not_locale_default` already
+uses for `SessionStore.load`) rather than depending on the real OS
+locale to reproduce it — asserts `encoding="utf-8"` was actually passed
+for the `transcript.jsonl` append, driven through a genuine `AgentLoop.
+run()` call with real non-ASCII text in the scripted response.
+Verified by reverting and watching the new test fail with the literal
+old shape (no `encoding` kwarg reaching the spy at all). 1 new test,
+918 → 919 Python tests.
+
 ## Tool use: concurrent, typed, gated by one policy
 
 A `Tool` is a small, explicit contract:

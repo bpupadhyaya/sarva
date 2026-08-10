@@ -21944,3 +21944,41 @@ restored it. 1 new test, 918 selected. `ruff check`/`ruff format
 --check` both clean. `docs/packaging.md` extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 313: `emit()`'s own transcript append never passed an explicit encoding either -- the write-side sibling of a gap already fixed nine times on the read side
+
+Continuing the module-by-module hardening sweep, re-read `agent/loop.py`
+fully once more (still the most-touched file in this project) and
+found the one instance the "no explicit `encoding=`, so
+`locale.getpreferredencoding(False)` decides" lens -- already applied
+nine times across this codebase's various *read*-path call sites
+(`SessionStore.load`, `ReadFileTool`, `sarva.config`,
+`providers/registry.py`, ...) -- had never reached: `_append_transcript
+_line`'s own `transcript_path.open("a")`, the same closure `emit()`
+already dispatches to a thread for the event-loop-freeze fix documented
+right above it in this same file.
+
+**Confirmed live**: writing a real non-ASCII line (a curly apostrophe
+or em-dash, entirely ordinary output from any real model turn -- not
+just a non-English user message) via `open(path, "a",
+encoding="ascii")` -- standing in for a genuinely non-UTF-8 locale
+(musl-libc, Windows without UTF-8 mode, `PYTHONCOERCECLOCALE=0`) --
+raised `UnicodeEncodeError`. `emit()` runs this append for EVERY event
+of EVERY real turn, so this would have crashed mid-stream on such a
+deployment for content no more exotic than a curly quote.
+
+**Fixed** with the same one-line change as every one of the nine
+read-side fixes: `encoding="utf-8"` added explicitly to the `open()`
+call.
+
+**Verified with a genuine revert-and-check**: a `Path.open` spy (the
+same technique the existing `SessionStore.load` test already uses)
+driven through a real `AgentLoop.run()` call with real non-ASCII text
+in the scripted response -- reverted the fix, watched the new test
+fail with no `encoding` kwarg reaching the spy at all, restored it. 1
+new test, 919 selected. `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md` extended.
+
+**Next:** continuing the hardening sweep, module by module.
