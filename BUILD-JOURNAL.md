@@ -21982,3 +21982,48 @@ new test, 919 selected. `ruff check`/`ruff format --check` both clean.
 `docs/agent-loop.md` extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 314: a fourth, independent reward-hacking bypass in `evaluate_submission` -- the phase-boundary markers were fixed strings, unlike the completion sentinel sitting right next to them
+
+Continuing the module-by-module hardening sweep, gave `sarva_foundry.
+rl.environment` -- already the subject of three documented reward-
+hacking fixes (`sys.exit(0)`/`os._exit(0)` early exit, a plaintext-
+sentinel-in-a-readable-file read, a raw-fd race against the driver) --
+its own dedicated fresh-eyes re-read, applying the same "what else in
+this exact function hasn't been through this lens yet" comparison that
+found each of the prior three. `sentinel` (the completion proof) is
+generated fresh per call with `secrets.token_hex(16)` specifically so a
+submission can't guess or pre-embed it -- but `_PHASE1_END_MARKER` and
+`_PHASE1_ACK_MARKER`, the two strings the driver uses to detect the
+submitted_code/test_code boundary, were fixed, hardcoded module-level
+constants, never given the same treatment.
+
+**Confirmed live**: a submission whose real `add(a, b)` deliberately
+returns the wrong value, followed by a literal `__SARVA_PHASE1_END__`
+line and a second, correct `add` redefinition, scored `reward=1.0`. The
+driver detects "end of submitted_code" purely by comparing each stdin
+line's literal text against that fixed marker -- so embedding it inside
+submitted_code's own source makes the driver break out of phase 1 early,
+and everything after that embedded line (still attacker-controlled) gets
+read by the same `_stream.read()` call that's supposed to carry only
+`task.test_code`, executing together with the real test in the same
+namespace as fully-trusted "phase 2" content. The task's own assertions
+never actually exercised the submission's real, broken implementation.
+
+**Fixed** the same way the sentinel already is: both markers are now
+generated fresh per call with `secrets.token_hex`, and the driver source
+(previously a module-level constant with the markers baked in via
+f-string at import time) is now built per-call by `_build_driver_src()`.
+A submission has no fixed string to embed in advance.
+
+**Verified with a genuine revert-and-check**: reverted to the fixed
+markers, watched the new test fail with the exact predicted shape
+(`passed=True, reward=1.0` for a submission whose real implementation is
+wrong), restored the fix. 1 new test, 920 selected. `ruff check`/`ruff
+format --check` both clean. No existing docs/*.md narrative covers the
+RL environment harness, so none was extended (matching the "only extend
+a narrative that already exists" discipline).
+
+**Next:** continuing the hardening sweep, module by module.

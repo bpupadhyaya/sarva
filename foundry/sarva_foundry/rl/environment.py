@@ -97,38 +97,63 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
     proc.wait()
 
 
-_PHASE1_END_MARKER = "__SARVA_PHASE1_END__"
-_PHASE1_ACK_MARKER = "__SARVA_PHASE1_ACK__"
+# A real, fourth reward-hacking bypass found by a much later fresh-eyes
+# sweep, confirmed live the same way the first three were -- by actually
+# submitting the exploit and watching `reward=1.0` come back for a
+# submission that never implements the task at all: these two markers
+# used to be fixed, hardcoded strings, unlike the per-call-randomized
+# `sentinel` a few lines below in `evaluate_submission`. The driver
+# detects the submitted_code/test_code boundary by comparing each stdin
+# line against the *literal text* of `_PHASE1_END_MARKER` -- so a
+# submission that simply includes that exact line somewhere in its own
+# source (trivial to embed, e.g. inside a multi-line string or just as a
+# bogus statement followed by a line reassigning the name to avoid a
+# NameError) makes the driver break out of "phase 1" early. Everything
+# in submitted_code AFTER that embedded line is then read by the SAME
+# `_stream.read()` call that's supposed to carry only `task.test_code`
+# -- so it execs together with the real test, in the same namespace, as
+# fully-trusted "phase 2" content. Confirmed live: a submission whose
+# real `add(a, b)` returns a deliberately wrong value, followed by an
+# embedded `__SARVA_PHASE1_END__` line and a *second*, correct
+# definition of `add` smuggled into what the driver believes is
+# test-only territory, scored `reward=1.0` -- the task's own test never
+# actually exercised the submission's real (broken) implementation.
+# Fixed the same way the completion `sentinel` already guards against
+# guessing: both markers are now generated fresh per call with
+# `secrets.token_hex`, so a submission has no fixed string to embed in
+# advance -- it would have to correctly guess a 128-bit value it never
+# sees before the driver process is even spawned.
+def _build_driver_src(phase1_end_marker: str, phase1_ack_marker: str) -> str:
+    """The driver never touches disk and is passed to the interpreter as
+    a `-c` argument, not written to a script file `submitted_code`/
+    `task.test_code` could read via `__file__` -- see evaluate_
+    submission's own docstring for the exploit this closes. It reads
+    submitted_code from stdin up to `phase1_end_marker`, execs it,
+    acknowledges completion, THEN (and only then) reads task.test_code +
+    the sentinel print from whatever the caller sends next -- content
+    that, by construction, hasn't been written to the pipe yet while
+    submitted_code is running.
 
-# The driver never touches disk and is passed to the interpreter as a
-# `-c` argument, not written to a script file `submitted_code`/`task.
-# test_code` could read via `__file__` -- see evaluate_submission's own
-# docstring for the exploit this closes. It reads submitted_code from
-# stdin up to _PHASE1_END_MARKER, execs it, acknowledges completion,
-# THEN (and only then) reads task.test_code + the sentinel print from
-# whatever the caller sends next -- content that, by construction,
-# hasn't been written to the pipe yet while submitted_code is running.
-#
-# fd 0 is deliberately dup()'d away to a fresh fd and replaced with
-# os.devnull BEFORE submitted_code is ever exec'd -- see
-# evaluate_submission's own docstring for the raw-fd race this closes
-# (a background thread doing `os.read(0, ...)` directly, bypassing
-# Python's buffered `sys.stdin` entirely, used to win the race for
-# phase 2's content every time). All later reads go through the
-# duplicated fd instead of raw fd 0.
-#
-# The ACK print below is prefixed with its own leading "\n" -- see
-# evaluate_submission's own docstring for the real bug this closes: a
-# submission whose final stdout write has no trailing newline (an
-# entirely ordinary pattern -- `sys.stdout.write(...)`, `print(..., end
-# ="")`) leaves that fragment buffered, and evaluate_submission's
-# line-based reader (`for line in proc.stdout`) only yields a "line" at
-# the next "\n" -- so the unterminated fragment silently concatenates
-# with this print into one unrecognizable line, and the marker
-# comparison never matches. The leading "\n" guarantees the marker
-# always lands on its own, unambiguous line no matter what the
-# submission's own last write looked like.
-_DRIVER_SRC = f"""
+    fd 0 is deliberately dup()'d away to a fresh fd and replaced with
+    os.devnull BEFORE submitted_code is ever exec'd -- see evaluate_
+    submission's own docstring for the raw-fd race this closes (a
+    background thread doing `os.read(0, ...)` directly, bypassing
+    Python's buffered `sys.stdin` entirely, used to win the race for
+    phase 2's content every time). All later reads go through the
+    duplicated fd instead of raw fd 0.
+
+    The ACK print below is prefixed with its own leading "\\n" -- see
+    evaluate_submission's own docstring for the real bug this closes: a
+    submission whose final stdout write has no trailing newline (an
+    entirely ordinary pattern -- `sys.stdout.write(...)`, `print(...,
+    end="")`) leaves that fragment buffered, and evaluate_submission's
+    line-based reader (`for line in proc.stdout`) only yields a "line"
+    at the next "\\n" -- so the unterminated fragment silently
+    concatenates with this print into one unrecognizable line, and the
+    marker comparison never matches. The leading "\\n" guarantees the
+    marker always lands on its own, unambiguous line no matter what the
+    submission's own last write looked like."""
+    return f"""
 import os, sys
 _real_stdin_fd = os.dup(0)
 _devnull_fd = os.open(os.devnull, os.O_RDONLY)
@@ -138,11 +163,11 @@ _stream = os.fdopen(_real_stdin_fd, "r")
 _ns = {{}}
 _lines = []
 for _line in _stream:
-    if _line.rstrip(chr(10)) == {_PHASE1_END_MARKER!r}:
+    if _line.rstrip(chr(10)) == {phase1_end_marker!r}:
         break
     _lines.append(_line)
 exec(compile("".join(_lines), "<submission>", "exec"), _ns)
-print("\\n" + {_PHASE1_ACK_MARKER!r}, flush=True)
+print("\\n" + {phase1_ack_marker!r}, flush=True)
 exec(compile(_stream.read(), "<test>", "exec"), _ns)
 """
 
@@ -262,18 +287,21 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
     their final `sys.stdout.write` call included a trailing newline,
     scored `reward=0.0`/`timed_out=True` and `reward=1.0` respectively.
     Fixed by having the driver prefix its own ACK print with a leading
-    `"\\n"` (see `_DRIVER_SRC`'s own comment): this guarantees the
+    `"\\n"` (see `_build_driver_src`'s own docstring): this guarantees the
     marker always lands on its own, unambiguous line regardless of
     what the submission's last write looked like, without needing to
     change the reader side at all."""
     sentinel = f"__SARVA_TASK_COMPLETED_{secrets.token_hex(16)}__"
+    phase1_end_marker = f"__SARVA_PHASE1_END_{secrets.token_hex(16)}__"
+    phase1_ack_marker = f"__SARVA_PHASE1_ACK_{secrets.token_hex(16)}__"
+    driver_src = _build_driver_src(phase1_end_marker, phase1_ack_marker)
     popen_kwargs: dict[str, object] = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         if _IS_WINDOWS
         else {"start_new_session": True}
     )
     proc = subprocess.Popen(
-        [sys.executable, "-u", "-c", _DRIVER_SRC],
+        [sys.executable, "-u", "-c", driver_src],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -331,7 +359,7 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
 
     assert proc.stdin is not None
     try:
-        proc.stdin.write(f"{submitted_code}\n{_PHASE1_END_MARKER}\n")
+        proc.stdin.write(f"{submitted_code}\n{phase1_end_marker}\n")
         proc.stdin.flush()
     except (BrokenPipeError, OSError):
         pass  # process already died; the wait/timeout logic below reports it
@@ -347,7 +375,7 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
             break
         if line is None:
             break  # child exited before ever acknowledging phase 1
-        if line.rstrip("\n") == _PHASE1_ACK_MARKER:
+        if line.rstrip("\n") == phase1_ack_marker:
             ack_seen = True
             break
 

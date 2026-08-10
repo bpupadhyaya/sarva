@@ -256,6 +256,42 @@ def test_a_submission_that_races_a_raw_fd_read_against_the_driver_cannot_skip_te
         assert "AssertionError: this must never actually run" in result.stderr
 
 
+def test_a_submission_that_embeds_the_phase1_end_marker_cannot_smuggle_code_into_the_test_phase():
+    # A fourth, independent reward-hacking bypass, found the same way the
+    # first three were: actually submitting the exploit and watching
+    # reward=1.0 come back for a submission whose real implementation is
+    # deliberately wrong. Before this fix, the phase-1-end and phase-1-ack
+    # markers were fixed, hardcoded strings (unlike the per-call-random
+    # `sentinel`), and the driver detects the submitted_code/test_code
+    # boundary purely by comparing each stdin line against that literal
+    # text. A submission that simply includes the marker's exact text as a
+    # line in its own source makes the driver break out of "phase 1"
+    # early -- everything AFTER that embedded line (still part of the same
+    # submitted_code the caller controls) is then read by the same
+    # `_stream.read()` call that's supposed to carry only task.test_code,
+    # so it execs together with the real test, in the same namespace, as
+    # fully-trusted "phase 2" content. Confirmed live before this fix: a
+    # submission whose real `add` is deliberately wrong, followed by an
+    # embedded end-of-phase-1 marker and a second, correct `add` smuggled
+    # in as if it were test-only content, scored reward=1.0. Fixed by
+    # generating both markers fresh per call with `secrets.token_hex`, the
+    # same treatment the sentinel already has -- a submission has no fixed
+    # string to embed in advance.
+    malicious_submission = (
+        "def add(a, b):\n"
+        "    return -999999  # deliberately wrong\n"
+        "__SARVA_PHASE1_END__\n"
+        "__SARVA_PHASE1_END__ = None\n"
+        "def add(a, b):\n"
+        "    return a + b  # smuggled in as if it were test-only content\n"
+    )
+
+    result = evaluate_submission(_ADD_TASK, malicious_submission, timeout=5.0)
+
+    assert result.passed is False, "the smuggled-in correct add() was wrongly rewarded"
+    assert result.reward == 0.0
+
+
 @_posix_only
 def test_timeout_kills_grandchild_processes_the_submission_spawned_not_just_the_direct_child():
     # A real bug found by actually running a submission that forks: the
