@@ -8,6 +8,9 @@ unit test now."""
 
 from __future__ import annotations
 
+import math
+
+import pytest
 from sarva_foundry.train.reasoning import answer_reward, format_reward, reasoning_reward
 
 
@@ -290,3 +293,37 @@ def test_reasoning_reward_respects_custom_weights():
     completion = "<think>2+3=5</think>6"  # format-correct, answer-wrong
     reward = reasoning_reward(completion, "5", format_weight=1.0, answer_weight=0.0)
     assert reward == 1.0
+
+
+def test_reasoning_reward_rejects_a_negative_weight():
+    # A real bug found by a fresh-eyes sweep, the same severity class as
+    # dpo_loss's own beta fix: a negative weight inverts the training
+    # incentive rather than merely failing to improve it. Confirmed live
+    # before this fix: format_weight=0.3, answer_weight=-0.7 scored a
+    # genuinely correct completion (-0.4) LOWER than a genuinely wrong
+    # one (0.3).
+    correct = "<think>2+3=5</think>5"
+    wrong = "<think>2+3=5</think>6"
+    with pytest.raises(ValueError, match="must not be negative"):
+        reasoning_reward(correct, "5", format_weight=0.3, answer_weight=-0.7)
+    with pytest.raises(ValueError, match="must not be negative"):
+        reasoning_reward(wrong, "5", format_weight=-0.3, answer_weight=0.7)
+
+
+def test_reasoning_reward_rejects_a_nan_weight():
+    completion = "<think>2+3=5</think>5"
+    with pytest.raises(ValueError, match="must be finite"):
+        reasoning_reward(completion, "5", format_weight=math.nan, answer_weight=0.7)
+    with pytest.raises(ValueError, match="must be finite"):
+        reasoning_reward(completion, "5", format_weight=0.3, answer_weight=math.nan)
+
+
+def test_reasoning_reward_rejects_both_weights_being_zero():
+    # The identical "genuinely possible silent full-training no-op"
+    # shape already fixed for TrainerConfig.lr=0.0: every completion
+    # would score an identical 0.0 regardless of format or correctness.
+    # A single weight of 0.0 stays allowed -- test_reasoning_reward_
+    # respects_custom_weights above already exercises that on purpose.
+    completion = "<think>2+3=5</think>5"
+    with pytest.raises(ValueError, match="must not both be 0"):
+        reasoning_reward(completion, "5", format_weight=0.0, answer_weight=0.0)

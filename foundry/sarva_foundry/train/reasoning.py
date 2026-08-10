@@ -31,6 +31,7 @@ better than random noise to refine, not starting from nothing.
 
 from __future__ import annotations
 
+import math
 import re
 
 THINK_START = "<think>"
@@ -262,7 +263,41 @@ def reasoning_reward(
     wrong answer is worth less than a correct one, but format still
     contributes real, separate signal — a model that abandons the
     format entirely to chase easier reward would score strictly worse
-    than one that keeps it and is also correct."""
+    than one that keeps it and is also correct.
+
+    A real bug found by a fresh-eyes sweep, the same severity class as
+    `dpo_loss`'s own `beta` fix (`sarva_foundry.train.dpo`): neither
+    weight was ever validated. Confirmed live with real completions and
+    the real reward math: `format_weight=0.3, answer_weight=-0.7` scored
+    a genuinely correct completion LOWER (`-0.4`) than a genuinely wrong
+    one (`0.3`) -- the exact same "actively trains the policy away from
+    the goal, not merely fails to improve it" inversion `beta`'s own
+    negative-sign bug caused, reachable the identical way: a caller
+    deriving these weights programmatically, or a simple sign-flip typo
+    in a training script, not an adversarial input. A NaN weight is
+    degenerate the same way `beta=0` was: `nan * anything` is `nan`,
+    silently poisoning the combined reward with no error. Zero is
+    deliberately still allowed for either weight individually --
+    `format_weight=1.0, answer_weight=0.0` is a real, intentional use
+    this module's own test suite already exercises (isolating one
+    signal from the other) -- but BOTH weights being zero at once is
+    the identical "genuinely possible silent full-training no-op"
+    shape already fixed for `TrainerConfig.lr=0.0` elsewhere in this
+    package: every completion would score an identical `0.0` regardless
+    of format or correctness, advancing the step counter with zero real
+    training signal."""
+    if not math.isfinite(format_weight) or not math.isfinite(answer_weight):
+        raise ValueError(
+            f"format_weight/answer_weight must be finite, got "
+            f"format_weight={format_weight}, answer_weight={answer_weight}"
+        )
+    if format_weight < 0 or answer_weight < 0:
+        raise ValueError(
+            f"format_weight/answer_weight must not be negative, got "
+            f"format_weight={format_weight}, answer_weight={answer_weight}"
+        )
+    if format_weight == 0 and answer_weight == 0:
+        raise ValueError("format_weight and answer_weight must not both be 0")
     return format_weight * format_reward(completion_text) + answer_weight * answer_reward(
         completion_text, expected_answer
     )

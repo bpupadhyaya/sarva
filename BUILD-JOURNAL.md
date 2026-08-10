@@ -22027,3 +22027,39 @@ RL environment harness, so none was extended (matching the "only extend
 a narrative that already exists" discipline).
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 315: `reasoning_reward`'s own `format_weight`/`answer_weight` were unvalidated -- the identical severity class as `dpo_loss`'s already-fixed `beta`
+
+Continuing the module-by-module hardening sweep, gave `sarva_foundry.
+train.reasoning` its own dedicated fresh-eyes re-read despite it already
+carrying nine documented reward-hacking fixes in `format_reward`/
+`answer_reward` -- applying `dpo_loss`'s own already-fixed `beta`
+validation as the lens, since `reasoning_reward`'s two weight parameters
+are the identical shape (an unvalidated float multiplying a reward
+term) that bug already covered one file over.
+
+**Confirmed live**: `format_weight=0.3, answer_weight=-0.7` scored a
+genuinely correct completion (`-0.4`) LOWER than a genuinely wrong one
+(`0.3`) -- the same "actively trains the policy away from the goal, not
+merely fails to improve it" inversion `beta`'s own negative-sign bug
+caused, reachable the identical way (a caller deriving these weights
+programmatically, or a sign-flip typo in a training script). A NaN
+weight is degenerate the same way `beta=0` was, silently poisoning the
+combined reward. Zero is deliberately still allowed for either weight
+individually -- this module's own test suite already exercises
+`format_weight=1.0, answer_weight=0.0` intentionally -- but both being
+zero at once is the identical "silent full-training no-op" shape
+already fixed for `TrainerConfig.lr=0.0`.
+
+**Fixed** with the same finite/non-negative validation `dpo_loss`
+already has, plus the both-zero check.
+
+**Verified with a genuine revert-and-check**: reverted the validation,
+watched all three new tests fail with "DID NOT RAISE ValueError",
+restored it. 3 new tests, 923 selected. `ruff check`/`ruff format
+--check` both clean. No existing docs/*.md narrative covers reasoning-
+token training, so none was extended.
+
+**Next:** continuing the hardening sweep, module by module.
