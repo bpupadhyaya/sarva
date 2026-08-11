@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
@@ -880,14 +880,31 @@ def _decode_ddg_redirect(href: str) -> str:
     the real target URL as a query parameter. Decoded here so a caller
     (and the model reading this tool's output) sees the actual site a
     result points to, not an internal DDG redirect link it would have to
-    resolve itself."""
+    resolve itself.
+
+    A real bug found by a fresh-eyes sweep: `parse_qs` already fully
+    percent-decodes each query parameter's value as part of parsing it
+    (that's how `real` below recovers the real target URL's own `:`/`/`
+    at all) -- so the extra `unquote(real)` this used to end with was a
+    SECOND decode pass over an already-decoded string. Harmless for a
+    target URL with no percent-encoding of its own, but confirmed live
+    to corrupt an entirely ordinary one that does: a search result
+    pointing at `https://example.com/search?q=hello%20world` (a genuine
+    encoded space in the TARGET's own query string, not contrived --
+    any multi-word query embedded in a URL looks like this) decoded to
+    `https://example.com/search?q=hello world` instead -- the literal
+    space breaks the string's own validity as a URL, and a caller that
+    round-trips it back through `urlparse`/an HTTP client would send a
+    different request than the one DDG actually pointed at. `parse_qs`'s
+    own single decode already produces the correct, real target URL;
+    nothing further needs to happen to it."""
     if href.startswith("//"):
         href = "https:" + href
     parsed = urlparse(href)
     if parsed.netloc.endswith("duckduckgo.com") and parsed.path == "/l/":
         real = parse_qs(parsed.query).get("uddg", [None])[0]
         if real:
-            return unquote(real)
+            return real
     return href
 
 

@@ -373,6 +373,22 @@ internal DuckDuckGo redirect endpoint it would have to resolve itself
 — confirmed with a dedicated test asserting `duckduckgo.com/l/` never
 appears in a real result's URL.
 
+**A much later fresh-eyes sweep found `_decode_ddg_redirect` itself
+double-decoding the target URL.** `parse_qs` already fully
+percent-decodes each query parameter's value while parsing it — that's
+how the real target URL's own `:`/`/` characters get recovered from
+the wire's `uddg=` value in the first place — but the function used to
+call `unquote()` on that already-decoded string a second time.
+Harmless for a target URL with no percent-encoding of its own, but
+confirmed live to corrupt an entirely ordinary one that does: a search
+result pointing at `https://example.com/search?q=hello%20world` (a
+genuine encoded space in the *target's own* query string — an
+ordinary multi-word query embedded in a URL, not contrived) decoded to
+`https://example.com/search?q=hello world` instead, a string that's no
+longer valid, round-trippable URL syntax. Fixed by dropping the
+redundant `unquote()` call — `parse_qs`'s own single decode already
+produces the correct, real target URL.
+
 If a user has already configured `BRAVE_API_KEY` (env var, or `sarva
 config set --brave-api-key` / the desktop app's config screen), the
 tool switches to the paid Brave Search API instead — a real, generally

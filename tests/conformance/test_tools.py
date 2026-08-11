@@ -1030,6 +1030,26 @@ async def test_web_search_rejects_empty_query(ctx, monkeypatch):
     assert "must not be empty" in result.content[0].text
 
 
+def test_decode_ddg_redirect_does_not_double_decode_the_target_urls_own_encoding():
+    # A real bug found by a fresh-eyes sweep: parse_qs already fully
+    # percent-decodes each query parameter's value while parsing it --
+    # that's how the real target URL's own ":"/"/"  characters get
+    # recovered at all -- so the extra unquote() this function used to
+    # end with was a SECOND decode pass over an already-decoded string.
+    # Harmless for a target URL with no percent-encoding of its own, but
+    # confirmed live to corrupt an entirely ordinary one that does: a
+    # search result pointing at a URL whose own query string has a
+    # genuine encoded space (an entirely ordinary multi-word query
+    # embedded in a URL, not contrived) decoded to a URL with a literal
+    # space instead of "%20" -- no longer valid, round-trippable URL
+    # syntax.
+    target = "https://example.com/search?q=hello%20world"
+    from urllib.parse import quote
+
+    href = "//duckduckgo.com/l/?uddg=" + quote(target, safe="") + "&rut=abc"
+    assert tools_module._decode_ddg_redirect(href) == target
+
+
 @pytest.mark.asyncio
 async def test_web_search_uses_the_free_duckduckgo_default_and_decodes_redirect_urls(
     ctx, monkeypatch

@@ -22143,3 +22143,38 @@ clean. No existing docs/*.md narrative covers the BPE tokenizer, so
 none was extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 327: `_decode_ddg_redirect` double-decoded its own already-decoded target URL
+
+Continuing the module-by-module hardening sweep, gave `web_search`'s
+DuckDuckGo redirect-unwrapping helper its own dedicated fresh-eyes
+re-read. `parse_qs(parsed.query).get("uddg", [None])[0]` already fully
+percent-decodes the `uddg` parameter's value as part of parsing the
+query string -- that's the mechanism that recovers the real target
+URL's own `:`/`/` characters from the wire's percent-encoded form at
+all -- but the function then called `unquote()` on that already-decoded
+string a second time.
+
+**Confirmed live**: harmless for a target URL with no percent-encoding
+of its own, but a search result pointing at
+`https://example.com/search?q=hello%20world` (a genuine encoded space
+in the TARGET's own query string -- an entirely ordinary multi-word
+query embedded in a URL, not a contrived shape) decoded to
+`https://example.com/search?q=hello world` instead -- the literal
+space breaks the string's own validity as a URL, so a caller that
+round-trips it back through `urlparse`/an HTTP client sends a
+different request than the one DuckDuckGo actually pointed at.
+
+**Fixed** by dropping the redundant `unquote()` call -- `parse_qs`'s
+own single decode already produces the correct, real target URL.
+
+**Verified with a genuine revert-and-check**: reverted the fix,
+watched the new test fail with the exact predicted corrupted string
+(a literal space instead of `%20`), restored it. 1 new test, 926
+selected. `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md`'s existing `_decode_ddg_redirect` narrative
+extended.
+
+**Next:** continuing the hardening sweep, module by module.
