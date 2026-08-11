@@ -22268,3 +22268,59 @@ format --check` both clean. No existing docs/*.md narrative covers the
 CLI's own text-rendering loop, so none was extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 358: `sarva run`'s own MCP tool-name-collision rejection dumped a raw `ExceptionGroup` traceback -- confirmed live against the real, official `server-filesystem` MCP package
+
+Continuing the live-execution lens that found rounds 349/350, tested
+`--mcp-server` against a real, official, `npx`-launched MCP server
+(`@modelcontextprotocol/server-filesystem`, the exact server this
+project's own CLI help text and docs name as the example) instead of
+the fake stubs the existing test suite always used. Deliberately
+triggering the already-documented tool-name-collision rejection (that
+server exports `read_file`/`write_file`/`edit_file`, colliding with
+Sarva's own builtins) produced a full, raw, unhandled `ExceptionGroup`
+traceback instead of the clean exit-1 failure the code's own comments
+already claimed.
+
+**Confirmed live, traced to the exact mechanism**: both `raise typer.
+Exit(1)` calls in `_run()` fired while a real MCP `ClientSession` was
+still live on the `AsyncExitStack`. Exiting that stack via an
+exception forces `__aexit__` to throw it INTO the still-open session's
+own `__aexit__`, and the real `mcp` SDK's `ClientSession`/`stdio_
+client` use an internal anyio `TaskGroup`, which wraps ANY exception
+threaded through its own `__aexit__` into a raw `BaseExceptionGroup`.
+The existing collision test's own fake `connect_stdio_mcp_server` is a
+plain `@asynccontextmanager` with no TaskGroup at all, so it
+structurally could never reproduce this -- the identical "the test
+double can't represent the real failure mode" gap already found once
+this session for `MockProvider`'s own empty-text bug (round 350).
+
+**Fixed** by never raising `typer.Exit` while a session is still live:
+a collision or connection failure now only sets a flag and breaks out
+of the connection loop, so the `AsyncExitStack` block always exits
+NORMALLY first (every live session torn down via an ordinary,
+exception-free `__aexit__`) -- `typer.Exit(1)` is raised only after
+that block has already fully closed.
+
+**Verified with a genuine revert-and-check**, using a more faithful
+fake that keeps a real anyio `TaskGroup` with a live child task open
+around its own `yield` -- genuinely reproducing the exact wrapping
+mechanism without needing a real npx-launched subprocess in CI.
+**A real bug found writing that very test**: `CliRunner`'s own harness
+never prints a raw traceback to `stdout` regardless of the underlying
+exception type, so the first version of this test (checking `result.
+stdout` for "Traceback"/"ExceptionGroup") passed identically whether
+the fix was present or not -- caught by the revert-and-check itself,
+since the test didn't fail when it should have. Rewritten to check
+`result.exception` directly: a clean `SystemExit` after the fix,
+a raw `ExceptionGroup` before it -- genuinely decisive this time,
+reverted and confirmed failing with the exact predicted exception
+type, restored. Also verified against the real `server-filesystem`
+package directly, both before (raw traceback) and after (clean exit
+1, no traceback) the fix. 1 new test, 930 selected. `ruff check`/`ruff
+format --check` both clean. `docs/mcp.md`'s existing MCP-hardening
+narrative extended.
+
+**Next:** continuing the hardening sweep, module by module.

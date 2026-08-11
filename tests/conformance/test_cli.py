@@ -502,6 +502,95 @@ def test_run_rejects_an_mcp_tool_name_colliding_with_a_builtin(monkeypatch, tmp_
     assert "Traceback" not in result.stdout
 
 
+def test_run_rejects_a_colliding_mcp_tool_name_even_with_a_real_taskgroup_backed_session(
+    monkeypatch, tmp_path
+):
+    # A real bug found by actually connecting a real, official,
+    # unmodified MCP server (npx @modelcontextprotocol/server-filesystem,
+    # the exact server this command's own --mcp-server help text names as
+    # an example): the collision check above already prints its own clean
+    # red message and used to `raise typer.Exit(1)` -- but that raise
+    # happened while the real MCP `ClientSession` was still live on the
+    # `AsyncExitStack`. Exiting that stack via an exception forces
+    # `__aexit__` to throw it INTO the still-open session's own
+    # `__aexit__`, and `mcp`'s real `ClientSession`/`stdio_client` use an
+    # internal anyio TaskGroup, which wraps ANY exception threaded through
+    # its own `__aexit__` into a raw `BaseExceptionGroup` -- confirmed
+    # live, a real `sarva run` invocation dumped a full ugly traceback
+    # straight past this file's own "never a raw traceback" discipline.
+    # The test right above this one can't catch this: its own fake
+    # `connect_stdio_mcp_server` is a plain `@asynccontextmanager` with no
+    # TaskGroup at all -- the identical "the test double can't represent
+    # the real failure mode" gap already found once this session for
+    # `MockProvider`'s own empty-text bug. This fake is more faithful: it
+    # keeps a real anyio TaskGroup with a live child task open around its
+    # own `yield`, genuinely reproducing the exact wrapping mechanism
+    # without needing a real npx-launched subprocess or network access.
+    import anyio
+    import mcp.types as mcp_types
+
+    _clear_provider_env(monkeypatch)
+
+    class _FakeSession:
+        async def list_tools(self):
+            class _Result:
+                tools = [
+                    mcp_types.Tool(
+                        name="write_file",
+                        description="a remote MCP tool sharing sarva's own builtin name",
+                        inputSchema={"type": "object", "properties": {}},
+                    )
+                ]
+
+            return _Result()
+
+    @asynccontextmanager
+    async def fake_connect_stdio_mcp_server_with_taskgroup(command, args=None, env=None):
+        async with anyio.create_task_group() as tg:
+
+            async def _background():
+                try:
+                    await anyio.sleep_forever()
+                except anyio.get_cancelled_exc_class():
+                    raise
+
+            tg.start_soon(_background)
+            yield _FakeSession()
+            tg.cancel_scope.cancel()
+
+    monkeypatch.setattr(
+        cli_module, "connect_stdio_mcp_server", fake_connect_stdio_mcp_server_with_taskgroup
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "write something",
+            "--workdir",
+            str(tmp_path),
+            "--mcp-server",
+            "fake-cmd",
+            "--auto",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "write_file" in result.stdout
+    assert "collide" in result.stdout
+    # The decisive check: CliRunner's own harness never prints a raw
+    # traceback to stdout regardless of the underlying exception type (a
+    # real bug found writing this very test -- checking `result.stdout`
+    # alone here would have passed identically whether the real fix below
+    # was present or not, the exact "test passes for the wrong reason"
+    # shape this project's own revert-and-check discipline exists to
+    # catch). `result.exception` is the real signal: a clean exit surfaces
+    # as `SystemExit`; the bug this test targets surfaced as a raw
+    # `ExceptionGroup` wrapping the `Exit` instead.
+    assert isinstance(result.exception, SystemExit)
+    assert not isinstance(result.exception, BaseExceptionGroup)
+
+
 def test_run_with_an_unreachable_mcp_stdio_command_fails_cleanly_not_a_traceback(
     monkeypatch, tmp_path
 ):

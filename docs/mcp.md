@@ -187,6 +187,47 @@ common single-connection-failure case) is unwrapped so the real reason
 the user instead of anyio's own unhelpful `"unhandled errors in a
 TaskGroup (1 sub-exception)"` summary.
 
+**A much later fresh-eyes sweep found the collision check's own clean
+failure path had the identical problem, one layer deeper.** Confirmed
+live by actually connecting the real, official
+`@modelcontextprotocol/server-filesystem` package (the exact server
+this file's own CLI example names) and triggering the tool-name
+collision above: both `raise typer.Exit(1)` calls in `_run()` fired
+while the real MCP `ClientSession` was still live on the
+`AsyncExitStack` -- exiting that stack via an exception forces
+`__aexit__` to throw it INTO the still-open session's own `__aexit__`,
+and `mcp`'s real `ClientSession`/`stdio_client` use an internal anyio
+TaskGroup, which wraps ANY exception threaded through its own
+`__aexit__` into a raw `BaseExceptionGroup` -- the identical wrapping
+mechanism the connection-failure fix above already names for
+`connect_http_mcp_server`'s own network layer, just reached through the
+opposite direction (an exception thrown INTO a live session, not
+raised out of connecting one). The real command dumped a full,
+unhandled `ExceptionGroup` traceback straight past this file's own
+already-printed clean red message. The existing collision test's own
+fake `connect_stdio_mcp_server` is a plain `@asynccontextmanager` with
+no TaskGroup at all, so it structurally couldn't reproduce this -- the
+identical "the test double can't represent the real failure mode" gap
+already found once this session for `MockProvider`'s own empty-text
+bug.
+
+Fixed by never raising `typer.Exit` while a session is still live: a
+collision or connection failure now only sets a flag and breaks out of
+the server-connection loop, so the `AsyncExitStack` block always exits
+NORMALLY (every live session torn down via an ordinary, exception-free
+`__aexit__`) -- `typer.Exit(1)` is raised only after that block has
+already fully, cleanly closed. Verified with a more faithful fake that
+keeps a real anyio `TaskGroup` with a live child task open around its
+own `yield` (genuinely reproducing the wrapping mechanism without
+needing a real npx-launched subprocess), and against the real
+`server-filesystem` package directly. A real gap found writing that
+test: `CliRunner`'s own harness never prints a raw traceback to
+`stdout` regardless of the underlying exception type, so a
+stdout-only assertion would have passed identically whether the fix
+was present or not -- the decisive check is `result.exception`
+itself, a clean `SystemExit` after the fix versus a raw
+`ExceptionGroup` before it.
+
 `--mcp-header` (also repeatable, `"Name: Value"`) applies to every
 `http(s)://` `--mcp-server` in the same invocation alike — a real,
 named limit, not silently glossed over: the (rare) case of two HTTP

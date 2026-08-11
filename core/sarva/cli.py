@@ -436,6 +436,38 @@ async def _run(
             headers = _parse_mcp_headers(mcp_headers)
             env = _parse_mcp_env(mcp_envs)
 
+            # A real bug found by actually connecting a real, official,
+            # unmodified MCP server (npx @modelcontextprotocol/server-
+            # filesystem, the exact server this command's own --mcp-server
+            # help text names as an example) and triggering the tool-name
+            # collision check below live, not through the fake/stub
+            # connection this file's own existing test doubles with: both
+            # `raise typer.Exit(1)` calls just inside the `AsyncExitStack`
+            # block below used to fire while a real MCP `ClientSession` was
+            # still live on the stack. Exiting the `async with
+            # AsyncExitStack()` block via an exception forces
+            # `stack.__aexit__` to throw that exception INTO the still-
+            # open session's own `__aexit__` -- and `mcp`'s real
+            # `ClientSession`/`stdio_client` use an internal anyio
+            # TaskGroup, which wraps ANY exception threaded through its own
+            # `__aexit__` into a raw `BaseExceptionGroup` -- confirmed
+            # live: instead of the clean, already-printed red message and
+            # exit code 1, the real command dumped a full, ugly
+            # `ExceptionGroup` traceback straight past this file's own
+            # "never a raw traceback" discipline. The existing collision
+            # test's own fake `connect_stdio_mcp_server` stub is a plain
+            # `@asynccontextmanager` with no TaskGroup at all, so it
+            # structurally could never reproduce this -- the identical
+            # "the test double can't represent the real failure mode" gap
+            # already found once this session for `MockProvider`'s own
+            # empty-text bug. Fixed by never raising `typer.Exit` while a
+            # session is still live: a collision/connection failure now
+            # only sets a flag and breaks out of the loop, so the `async
+            # with AsyncExitStack()` block below always exits NORMALLY
+            # (every live session torn down via an ordinary, exception-
+            # free `__aexit__`) -- `typer.Exit(1)` is raised only after
+            # that block has already fully closed.
+            mcp_failed = False
             async with AsyncExitStack() as stack:
                 tools: list[Tool] = list(BUILTIN_TOOLS)
                 for server_cmd in mcp_servers:
@@ -492,7 +524,8 @@ async def _run(
                             f"[red]could not connect to MCP server "
                             f"{escape(repr(server_cmd))}: {escape(str(detail))}[/red]"
                         )
-                        raise typer.Exit(1) from e
+                        mcp_failed = True
+                        break
                     # A real bug found by actually connecting a real,
                     # official, unmodified MCP server (the filesystem
                     # server the --mcp-server help text itself names as
@@ -530,7 +563,8 @@ async def _run(
                             "a destructive-tool confirmation prompt the original "
                             "was relying on.[/red]"
                         )
-                        raise typer.Exit(1)
+                        mcp_failed = True
+                        break
                     # escape(): tool names come from the connected MCP
                     # server's own response -- for an http(s):// server
                     # that's a remote, untrusted source (a malicious/buggy
@@ -542,59 +576,66 @@ async def _run(
                     console.print(f"[dim]mcp: {escape(repr(server_cmd))} -> {tool_names}[/dim]")
                     tools.extend(mcp_tools)
 
-                loop = AgentLoop(
-                    router=_build_router(),
-                    providers=_build_providers(),
-                    tools=tools,
-                    confirm=confirm,
-                    workdir=workdir,
-                    degraders=default_degraders(),
-                    verify=verify,
-                )
-                last_detail: str | None = None
-                # See _chat's own comment on this exact gap, confirmed
-                # live against a real local model (Ollama's `moondream`)
-                # that completed a turn with zero text content: here a
-                # tool call is a real, visible signal something happened
-                # even with no text, so this only needs to catch the
-                # narrower "no text AND no tool call at all" case, the
-                # same total silence _chat's fix closes.
-                saw_output = False
-                transcript: list[Message] = []
-                async for event in loop.run(
-                    task,
-                    history=history,
-                    model_override=model,
-                    extra_content=extra_content,
-                    transcript_out=transcript,
-                    session_id=session,
-                ):
-                    if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
-                        if event.event.text:
+                if not mcp_failed:
+                    loop = AgentLoop(
+                        router=_build_router(),
+                        providers=_build_providers(),
+                        tools=tools,
+                        confirm=confirm,
+                        workdir=workdir,
+                        degraders=default_degraders(),
+                        verify=verify,
+                    )
+                    last_detail: str | None = None
+                    # See _chat's own comment on this exact gap, confirmed
+                    # live against a real local model (Ollama's `moondream`)
+                    # that completed a turn with zero text content: here a
+                    # tool call is a real, visible signal something happened
+                    # even with no text, so this only needs to catch the
+                    # narrower "no text AND no tool call at all" case, the
+                    # same total silence _chat's fix closes.
+                    saw_output = False
+                    transcript: list[Message] = []
+                    async for event in loop.run(
+                        task,
+                        history=history,
+                        model_override=model,
+                        extra_content=extra_content,
+                        transcript_out=transcript,
+                        session_id=session,
+                    ):
+                        if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
+                            if event.event.text:
+                                saw_output = True
+                            console.print(event.event.text, end="", markup=False)
+                        elif event.type == "tool_started":
                             saw_output = True
-                        console.print(event.event.text, end="", markup=False)
-                    elif event.type == "tool_started":
-                        saw_output = True
-                        name = escape(event.call.name)
-                        args = escape(str(event.call.arguments))
-                        console.print(f"\n[cyan]-> {name}({args})[/cyan]")
-                    elif event.type == "tool_finished":
-                        status = (
-                            "[red]error[/red]" if event.result.is_error else "[green]ok[/green]"
-                        )
-                        console.print(f"  {status}")
-                    elif event.type == "state_changed" and event.detail:
-                        last_detail = event.detail
-                    elif event.type == "run_done":
-                        console.print()
-                        final_state = event.state
-                        if event.state != "done":
-                            _print_run_failure(event.state, last_detail)
-                        elif not saw_output:
-                            console.print("[dim](the model returned an empty response)[/dim]")
+                            name = escape(event.call.name)
+                            args = escape(str(event.call.arguments))
+                            console.print(f"\n[cyan]-> {name}({args})[/cyan]")
+                        elif event.type == "tool_finished":
+                            status = (
+                                "[red]error[/red]" if event.result.is_error else "[green]ok[/green]"
+                            )
+                            console.print(f"  {status}")
+                        elif event.type == "state_changed" and event.detail:
+                            last_detail = event.detail
+                        elif event.type == "run_done":
+                            console.print()
+                            final_state = event.state
+                            if event.state != "done":
+                                _print_run_failure(event.state, last_detail)
+                            elif not saw_output:
+                                console.print("[dim](the model returned an empty response)[/dim]")
 
-                if session and final_state == "done":
-                    store.save(session, transcript)
+                    if session and final_state == "done":
+                        store.save(session, transcript)
+            # Raised only after `AsyncExitStack`'s own `async with` block
+            # has fully, cleanly closed above -- see this function's own
+            # comment on `mcp_failed` for why raising any earlier corrupts
+            # a still-live MCP session's shutdown into a raw traceback.
+            if mcp_failed:
+                raise typer.Exit(1)
     except ValueError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
