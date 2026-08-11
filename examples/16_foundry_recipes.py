@@ -88,8 +88,16 @@ def main() -> None:
     )
     print(f"  -> implied throughput: {measured_flops_per_sec:.2e} FLOP/s on this machine")
 
+    # dollars_per_hour is a required argument of compute_estimate() (and
+    # Recipe.compute_estimate's own docstring/tests reject a non-positive
+    # value -- $0/hour is nonsensical for a real market price, the same
+    # "unvalidated numeric parameter" bug class this project has fixed
+    # repeatedly elsewhere). This section's own claim is only ever about
+    # real measured GPU-hours, never a dollar figure, so the value here
+    # is an unused placeholder -- `this_machine_estimate.estimated_cost_usd`
+    # is deliberately never read below.
     this_machine_estimate = LAPTOP_125M.compute_estimate(
-        measured_flops_per_sec, dollars_per_hour=0.0
+        measured_flops_per_sec, dollars_per_hour=1.0
     )
     print(
         f"\n  Using THIS machine's real measured throughput, training "

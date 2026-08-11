@@ -22178,3 +22178,46 @@ selected. `ruff check`/`ruff format --check` both clean.
 extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 349: `examples/16_foundry_recipes.py` crashed on its own real-hardware measurement section -- a broken runnable example, not a library bug
+
+Continuing the module-by-module hardening sweep, shifted from static
+reading to actually *running* the bundled examples end to end -- a
+different verification lens than the line-by-line review the last
+several dozen rounds used, and one this session hadn't yet applied
+systematically. Running `examples/16_foundry_recipes.py` for real
+crashed with an uncaught `ValueError: dollars_per_hour must be
+positive, got 0.0`.
+
+**Confirmed live, and confirmed NOT a library bug**: `Recipe.
+compute_estimate`'s own rejection of a non-positive `dollars_per_hour`
+is a real, deliberate, already-tested invariant
+(`test_compute_estimate_rejects_non_positive_flops_per_second_or_
+dollars_per_hour`) -- `dollars_per_hour` is a real market-price input
+with no legitimate zero/negative value, the identical "unvalidated
+numeric parameter" bug class already fixed repeatedly elsewhere in
+this project. The actual bug was in the example script itself: its
+own "real measured check" section, which only ever reports
+`this_machine_estimate.gpu_hours` (a genuine measured quantity, never
+a dollar figure), passed `dollars_per_hour=0.0` as a lazy placeholder
+-- a real, runnable, documented example (this project's own
+`examples/` index treats every script as first-class, exercised code,
+not illustrative snippets) crashing on every real invocation.
+
+**Fixed** by passing a valid placeholder (`dollars_per_hour=1.0`)
+instead, with a comment explaining it's unused -- this section's own
+printed message never reads `estimated_cost_usd`.
+
+**Verified live**: the script crashed before the fix and now runs to
+completion, printing the correct real-measured GPU-hours figure
+unchanged. No dedicated test file exists for this example (matching
+how other example scripts in this project are verified -- via direct
+execution, not a pytest wrapper); the library-level invariant this
+crash exposed already has its own test, unmodified. Full suite
+unaffected (926 selected). `ruff check`/`ruff format --check` both
+clean. No existing docs/*.md narrative covers foundry recipes, so none
+was extended.
+
+**Next:** continuing the hardening sweep, module by module.
