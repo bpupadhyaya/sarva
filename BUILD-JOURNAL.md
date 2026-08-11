@@ -22221,3 +22221,50 @@ clean. No existing docs/*.md narrative covers foundry recipes, so none
 was extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 350: `sarva chat`/`sarva run` printed literally nothing for a real model's genuinely empty response -- confirmed live against a real local Ollama model, moondream
+
+Continuing the module-by-module hardening sweep, kept applying the
+live-execution lens that found round 349's example crash -- this time
+against the actual CLI, driven by a real, locally running Ollama
+server with real pulled models (`sarva doctor` confirmed it reachable
+in this environment). Running `sarva chat "What is 2+2?..." --model
+ollama/moondream:latest` (a real, small vision-focused model, an
+entirely ordinary "weak model" case, not adversarial) produced zero
+stdout, zero stderr, and exit code 0.
+
+**Confirmed live, traced to the real cause**: `OllamaProvider` itself
+was behaving correctly -- the raw Ollama wire response really was
+`{"content": "", ..., "eval_count": 1, "done_reason": "stop"}`, a
+genuinely empty but valid completion. `AgentLoop` correctly reports
+`state=DONE` with an empty final message. But neither `sarva chat` nor
+`sarva run` ever tracked whether any real `TextDeltaEvent` (or, for
+`run`, any tool call) actually fired during the turn -- a genuinely
+empty, successful response looked identical to the terminal doing
+nothing at all, with no way for a caller to tell "the model said
+nothing" apart from "the command hung/never ran."
+
+**A related bug found while writing the regression test**: `Mock
+Provider`'s own `ScriptedTurn(text="")` couldn't actually simulate this
+scenario -- `"".split(" ")` is `['']`, not `[]`, so an "empty" scripted
+turn still yielded one spurious `TextDeltaEvent(text=" ")` that never
+appeared in the final assembled message, a real streamed/final text
+mismatch that likely helped this bug go uncaught by any prior test.
+
+**Fixed** three places: `sarva chat`/`sarva run` now print an explicit
+`(the model returned an empty response)` note when a DONE turn
+produced no real text (and, for `run`, no tool call either); `Mock
+Provider` now yields zero deltas for a genuinely empty scripted turn,
+matching real provider behavior and making this exact scenario finally
+scriptable for tests.
+
+**Verified with a genuine revert-and-check** on all three fixes
+independently: each reverted fix reproduced its own exact predicted
+failure (a bare `TextDeltaEvent(text=' ')`, or a CLI printing only a
+blank line), restored. 3 new tests, 929 selected. `ruff check`/`ruff
+format --check` both clean. No existing docs/*.md narrative covers the
+CLI's own text-rendering loop, so none was extended.
+
+**Next:** continuing the hardening sweep, module by module.

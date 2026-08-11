@@ -51,6 +51,31 @@ async def test_delta_message_equivalence():
     assert deltas.strip() == done.message.text().strip()
 
 
+@pytest.mark.asyncio
+async def test_empty_scripted_text_yields_zero_text_delta_events():
+    # A real bug found by a fresh-eyes sweep: "".split(" ") is [''], not
+    # [] -- so a genuinely empty scripted turn (the exact shape a real
+    # provider produces for a real, weak model that returns nothing;
+    # confirmed live against a real local Ollama model, moondream, asked
+    # an ordinary text-only question) still ran the delta loop once,
+    # yielding a spurious TextDeltaEvent(text=" ") that never appears
+    # anywhere in the DoneEvent's own final message (TextBlock(text=""))
+    # -- streamed and final text disagreeing about whether ANY content
+    # exists at all. This mock provider exists specifically so tests can
+    # script real-world response shapes offline; before this fix, "a
+    # real model returns nothing" could never actually be scripted
+    # through ScriptedTurn(text=""), since any caller checking "did any
+    # real TextDeltaEvent fire" (the same check sarva chat's own fix for
+    # this exact scenario needs) saw a false positive.
+    from sarva.providers.base import TextDeltaEvent
+
+    provider = MockProvider(script=[ScriptedTurn(text="")])
+    events = [e async for e in provider.generate(_req("hi"))]
+    done = next(e for e in events if isinstance(e, DoneEvent))
+    assert not any(isinstance(e, TextDeltaEvent) for e in events)
+    assert done.message.text() == ""
+
+
 def test_empty_script_list_rejected_instead_of_crashing_later_with_a_raw_indexerror():
     # A real bug found by a fresh-eyes sweep: only `script=None` was
     # special-cased for echo mode -- `script=[]` is a distinct, non-None

@@ -100,9 +100,26 @@ class MockProvider:
             stop_reason = StopReason.TOOL_USE
         else:
             text = turn.text or ""
-            for word in text.split(" "):
-                yield TextDeltaEvent(text=word + " ")
-                await asyncio.sleep(0)
+            # A real bug found by a fresh-eyes sweep: `"".split(" ")` is
+            # `['']`, not `[]` -- so a genuinely empty scripted turn (the
+            # exact shape a real provider produces for a real, weak model
+            # that returns nothing, confirmed live against a real local
+            # Ollama model) still ran this loop once, yielding a spurious
+            # `TextDeltaEvent(text=" ")` that never appears anywhere in
+            # the DoneEvent's own final message (`TextBlock(text="")`) --
+            # streamed and final text disagreeing about whether ANY
+            # content exists at all. This mock provider exists
+            # specifically so tests can script real-world response
+            # shapes offline; this gap meant "a real model returns
+            # nothing" could never actually be scripted through
+            # `ScriptedTurn(text="")` -- any caller checking "did any
+            # real TextDeltaEvent fire" (the same check `sarva chat`'s
+            # own fix for this exact scenario needs) saw a false
+            # positive.
+            if text:
+                for word in text.split(" "):
+                    yield TextDeltaEvent(text=word + " ")
+                    await asyncio.sleep(0)
             content.append(TextBlock(text=text))
             stop_reason = StopReason.END_TURN
 

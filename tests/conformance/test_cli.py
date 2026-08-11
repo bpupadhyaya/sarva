@@ -134,6 +134,55 @@ def test_chat_with_model_forces_that_exact_model(monkeypatch):
     assert "[mock] received: hello" in result.stdout
 
 
+def test_chat_prints_an_explicit_note_when_the_model_returns_an_empty_response(monkeypatch):
+    # A real bug found by actually running a real local model (Ollama's
+    # moondream, a real, locally pulled vision model) against an
+    # ordinary text-only question: it completed the turn with
+    # stop_reason=END_TURN and zero text content -- not an error, not a
+    # crash, just an empty response. No TextDeltaEvent ever fires for
+    # that turn, so `sarva chat` printed a single blank line and exited
+    # 0 with no signal whatsoever that anything happened -- confirmed
+    # live, a caller has no way to tell "the model genuinely said
+    # nothing" apart from "the command hung/never ran."
+    from sarva.providers.mock import MockProvider, ScriptedTurn
+
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "build_providers",
+        lambda: {"mock": MockProvider(script=[ScriptedTurn(text="")])},
+    )
+
+    result = runner.invoke(app, ["chat", "hello", "--model", "mock"])
+
+    assert result.exit_code == 0
+    assert "the model returned an empty response" in result.stdout
+
+
+def test_run_prints_an_explicit_note_when_the_model_returns_an_empty_response(
+    monkeypatch, tmp_path
+):
+    # The `sarva run` counterpart to the identical `sarva chat` bug just
+    # above -- same real repro, same fix shape, just scoped to "no text
+    # AND no tool call at all" here, since a tool call is its own real,
+    # visible signal something happened even with no text.
+    from sarva.providers.mock import MockProvider, ScriptedTurn
+
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "build_providers",
+        lambda: {"mock": MockProvider(script=[ScriptedTurn(text="")])},
+    )
+
+    result = runner.invoke(
+        app, ["run", "do something", "--workdir", str(tmp_path), "--auto", "--model", "mock"]
+    )
+
+    assert result.exit_code == 0
+    assert "the model returned an empty response" in result.stdout
+
+
 def test_chat_with_an_unknown_model_fails_cleanly_with_a_clear_message_and_nonzero_exit(
     monkeypatch,
 ):

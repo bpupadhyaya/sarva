@@ -247,6 +247,20 @@ async def _chat(
                 verify=verify,
             )
             last_detail: str | None = None
+            # A real bug found by actually running a real local model
+            # against a real turn: a genuinely weak model (confirmed live
+            # with Ollama's `moondream` -- a real, locally pulled vision
+            # model asked an ordinary text-only question) can complete a
+            # turn with `stop_reason=END_TURN` and zero text content --
+            # not an error, not a crash, just an empty response. Nothing
+            # here ever prints a TextDeltaEvent for that turn (there isn't
+            # one), so `sarva chat` printed a single blank line and
+            # exited 0 with no signal whatsoever that anything happened --
+            # confirmed live, a caller has no way to tell "the model
+            # genuinely said nothing" apart from "the command hung/never
+            # ran." Tracked here so a truly empty DONE response gets its
+            # own honest, explicit note instead of silence.
+            saw_text = False
             transcript: list[Message] = []
             async for event in loop.run(
                 message,
@@ -260,6 +274,8 @@ async def _chat(
                 # or citations — never markup-parse text that came from
                 # the model.
                 if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
+                    if event.event.text:
+                        saw_text = True
                     console.print(event.event.text, end="", markup=False)
                 elif event.type == "state_changed" and event.detail:
                     last_detail = event.detail
@@ -268,6 +284,8 @@ async def _chat(
                     final_state = event.state
                     if event.state != "done":
                         _print_run_failure(event.state, last_detail)
+                    elif not saw_text:
+                        console.print("[dim](the model returned an empty response)[/dim]")
 
             if session and final_state == "done":
                 store.save(session, transcript)
@@ -534,6 +552,14 @@ async def _run(
                     verify=verify,
                 )
                 last_detail: str | None = None
+                # See _chat's own comment on this exact gap, confirmed
+                # live against a real local model (Ollama's `moondream`)
+                # that completed a turn with zero text content: here a
+                # tool call is a real, visible signal something happened
+                # even with no text, so this only needs to catch the
+                # narrower "no text AND no tool call at all" case, the
+                # same total silence _chat's fix closes.
+                saw_output = False
                 transcript: list[Message] = []
                 async for event in loop.run(
                     task,
@@ -544,8 +570,11 @@ async def _run(
                     session_id=session,
                 ):
                     if event.type == "model_stream" and isinstance(event.event, TextDeltaEvent):
+                        if event.event.text:
+                            saw_output = True
                         console.print(event.event.text, end="", markup=False)
                     elif event.type == "tool_started":
+                        saw_output = True
                         name = escape(event.call.name)
                         args = escape(str(event.call.arguments))
                         console.print(f"\n[cyan]-> {name}({args})[/cyan]")
@@ -561,6 +590,8 @@ async def _run(
                         final_state = event.state
                         if event.state != "done":
                             _print_run_failure(event.state, last_detail)
+                        elif not saw_output:
+                            console.print("[dim](the model returned an empty response)[/dim]")
 
                 if session and final_state == "done":
                     store.save(session, transcript)
