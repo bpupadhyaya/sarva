@@ -135,6 +135,23 @@ def test_a_special_token_that_is_a_prefix_of_another_still_matches_the_longer_on
     assert tok.decode(ids) == text
 
 
+def test_train_rejects_duplicate_special_tokens():
+    # A real bug found by a fresh-eyes sweep: the id-assignment loop
+    # (`self.special_tokens[token] = len(self.vocab) + len(self.
+    # special_tokens)`) computes each new id from the CURRENT dict size,
+    # so re-processing an already-seen token overwrites its existing
+    # entry instead of adding a new one -- the id meant for the
+    # duplicate silently gets assigned to whichever DIFFERENT token
+    # comes next instead. Confirmed live before this fix:
+    # special_tokens=["<eos>", "<eos>", "<pad>"] produced
+    # {"<eos>": 258, "<pad>": 258} -- two semantically distinct special
+    # tokens colliding on the exact same id, not merely an off-by-one
+    # vocab size.
+    tok = ByteLevelBPETokenizer()
+    with pytest.raises(ValueError, match="duplicate"):
+        tok.train(_CORPUS, vocab_size=300, special_tokens=["<eos>", "<eos>", "<pad>"])
+
+
 def test_decode_replaces_invalid_utf8_instead_of_raising():
     # Real, not hypothetical: encode() always produces valid UTF-8 by
     # construction, but decode() also has to handle arbitrary token id

@@ -22101,3 +22101,45 @@ clean. No existing docs/*.md narrative covers `sarva_foundry.train`
 internals, so none was extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 321: a duplicate entry in `special_tokens` silently collided two DIFFERENT special tokens onto the same id -- not merely an off-by-one vocab size
+
+Continuing the module-by-module hardening sweep, gave `sarva_foundry.
+tokenizer.bpe` -- already the subject of six documented fixes (the
+underscore-dropping pretokenizer gap, lone-surrogate encoding, longest-
+first special-token matching, unknown-id decode, colliding special-
+token/vocab ids on load) -- its own dedicated fresh-eyes re-read, this
+time on `train()`'s own `special_tokens` parameter, never previously
+checked for duplicates.
+
+**Confirmed live**: `train(..., special_tokens=["<eos>", "<eos>",
+"<pad>"])` produced `{"<eos>": 258, "<pad>": 258}` -- two semantically
+distinct special tokens colliding on the exact same numeric id. The
+id-assignment loop computes each new id from the CURRENT dict size, so
+re-processing an already-seen token overwrites its own existing entry
+instead of adding a new one -- the id meant for the duplicate silently
+lands on whichever DIFFERENT token comes next instead. `decode()`
+builds its reverse `id_to_special` map via a plain dict comprehension,
+so decoding the colliding id silently returns whichever token happens
+to iterate last -- the exact same "two different meanings collapsed
+onto one id" corruption `load()`'s own collision check already guards
+against for a vocab/special-token collision, just reached through a
+duplicate in the input list instead of a corrupted file. Reachable the
+same way every other config value in this project is: a caller
+building this list programmatically (merging a base template's special
+tokens with a project's own additions) can easily include the same
+token twice with no adversarial intent.
+
+**Fixed** by rejecting a duplicate `special_tokens` entry at the one
+place both budget accounting and id assignment depend on the list
+being duplicate-free.
+
+**Verified with a genuine revert-and-check**: reverted the check,
+watched the new test fail with "DID NOT RAISE ValueError", restored
+it. 1 new test, 925 selected. `ruff check`/`ruff format --check` both
+clean. No existing docs/*.md narrative covers the BPE tokenizer, so
+none was extended.
+
+**Next:** continuing the hardening sweep, module by module.

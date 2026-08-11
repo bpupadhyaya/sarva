@@ -181,6 +181,35 @@ class ByteLevelBPETokenizer:
             raise ValueError(f"vocab_size must be >= {_NUM_BYTES} (the byte alphabet alone)")
 
         special_tokens = list(special_tokens)
+        # A real bug found by a fresh-eyes sweep: a duplicate entry in
+        # `special_tokens` was never rejected. The assignment loop below
+        # (`self.special_tokens[token] = len(self.vocab) + len(self.
+        # special_tokens)`) computes each new id from the CURRENT dict
+        # size -- re-processing an already-seen token overwrites its
+        # existing entry rather than adding a new one, so the id
+        # intended for that duplicate silently gets assigned to
+        # whichever DIFFERENT token comes next instead. Confirmed live:
+        # `special_tokens=["<eos>", "<eos>", "<pad>"]` produced
+        # `{"<eos>": 258, "<pad>": 258}` -- two semantically distinct
+        # special tokens colliding on the exact same id, not merely an
+        # off-by-one vocab size. `decode()` builds `id_to_special` via
+        # `{v: k for k, v in self.special_tokens.items()}`, so decoding
+        # id 258 silently returns whichever of "<eos>"/"<pad>" happens
+        # to iterate last -- the same "two different meanings collapsed
+        # onto one id" corruption `load()`'s own collision check already
+        # guards against for a vocab/special-token collision, just
+        # reached through a duplicate in the input list instead of a
+        # corrupted file. Reachable the same way every other config
+        # value in this project is -- a caller building this list
+        # programmatically (e.g. merging a base template's special
+        # tokens with a project's own additions) can easily include the
+        # same token twice with no adversarial intent. Rejected here,
+        # at the one place both budget accounting and id assignment
+        # depend on the list being duplicate-free, rather than silently
+        # misassigning ids.
+        if len(special_tokens) != len(set(special_tokens)):
+            duplicates = sorted({t for t in special_tokens if special_tokens.count(t) > 1})
+            raise ValueError(f"special_tokens contains duplicate entries: {duplicates}")
         budget = vocab_size - _NUM_BYTES - len(special_tokens)
         if budget < 0:
             raise ValueError("vocab_size too small to fit the requested special_tokens")
