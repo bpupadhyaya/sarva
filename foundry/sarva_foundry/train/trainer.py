@@ -313,4 +313,32 @@ class Trainer:
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         self.model.load_state_dict(checkpoint["model_state"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-        self.step = checkpoint["step"]
+        # A real bug found by a fresh-eyes sweep, the same severity class
+        # as `WarmupCosineSchedule.peak_lr`/`min_lr`'s own already-fixed
+        # negative-LR bug (`sarva_foundry.train.schedule`): `checkpoint
+        # ["step"]` -- real, on-disk, corruptible state (a hand-edited
+        # checkpoint, disk corruption, a checkpoint from a differently-
+        # buggy save path) -- was assigned to `self.step` with zero
+        # validation, and `self.step` feeds straight into `schedule.
+        # lr_at(self.step)` on the very next `train_step` call. Confirmed
+        # live: `WarmupCosineSchedule(...).lr_at(-200)` returns `-0.0199`
+        # -- a negative learning rate, LARGER in magnitude than the
+        # schedule's own configured `peak_lr`, silently outside every
+        # bound the schedule's own `__post_init__` validation promises --
+        # `lr_at()`'s linear-warmup branch (`peak_lr * (step + 1) /
+        # warmup_steps`) has no floor at `step >= 0` the way the
+        # constructor validates `peak_lr`/`min_lr`/`warmup_steps` do.
+        # Training on a resumed checkpoint with a corrupted negative step
+        # would silently apply gradient ASCENT from the very first resumed
+        # step, the identical "genuinely possible, not merely
+        # hypothetical" harm the sibling fix already named -- just
+        # reachable through resume instead of a direct constructor call.
+        # Fixed at the boundary where untrusted on-disk state enters
+        # trusted in-memory state, matching this project's own established
+        # "corrupted on-disk state" precedent (ConfigError, MemoryStoreError,
+        # a corrupted foundry checkpoint bundle) rather than only guarding
+        # `lr_at()` itself.
+        step = checkpoint["step"]
+        if not isinstance(step, int) or step < 0:
+            raise ValueError(f"checkpoint at {path} has an invalid step value: {step!r}")
+        self.step = step

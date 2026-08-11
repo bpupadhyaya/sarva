@@ -22063,3 +22063,41 @@ restored it. 3 new tests, 923 selected. `ruff check`/`ruff format
 token training, so none was extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 318: `Trainer.load_checkpoint` assigned a corrupted on-disk `step` value straight into training state -- a negative step silently produces gradient ascent
+
+Continuing the module-by-module hardening sweep, followed the chain
+from `WarmupCosineSchedule`'s own already-fixed `peak_lr`/`min_lr`
+negative-LR validation (round 149-ish) one hop further: `lr_at(step)`
+has no floor on `step` itself, and `Trainer.load_checkpoint` assigns
+`checkpoint["step"]` -- real, on-disk, corruptible state -- straight to
+`self.step` with zero validation, one line before `train_step` feeds it
+into `schedule.lr_at(self.step)`.
+
+**Confirmed live**: `WarmupCosineSchedule(...).lr_at(-200)` returns
+`-0.0199` -- a negative learning rate LARGER in magnitude than the
+schedule's own configured `peak_lr`, silently outside every bound the
+schedule's own constructor validation promises. A hand-edited or
+corrupted checkpoint (disk corruption, a checkpoint from a differently-
+buggy save path -- the same "corrupted on-disk state" class already
+fixed for `~/.sarva/config.json`, a saved session file, and a foundry
+checkpoint bundle) with a negative `step` would silently apply gradient
+ASCENT from the very first resumed training step, with no error or
+warning anywhere.
+
+**Fixed** at the boundary where untrusted on-disk state enters trusted
+in-memory state: `load_checkpoint` now validates `step` is a
+non-negative int before assigning it, raising a clear `ValueError`
+otherwise -- matching this project's own established "corrupted
+on-disk state" precedent rather than only guarding `lr_at()` itself.
+
+**Verified with a genuine revert-and-check**: saved a real checkpoint,
+tampered its `step` field to `-200` on disk, reverted the validation,
+watched the new test fail with "DID NOT RAISE ValueError", restored it.
+1 new test, 924 selected. `ruff check`/`ruff format --check` both
+clean. No existing docs/*.md narrative covers `sarva_foundry.train`
+internals, so none was extended.
+
+**Next:** continuing the hardening sweep, module by module.

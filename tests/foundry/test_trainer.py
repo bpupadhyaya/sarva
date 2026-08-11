@@ -143,6 +143,33 @@ def test_checkpoint_resume_is_bit_identical_to_uninterrupted_training(tmp_path):
         assert torch.allclose(final_a[key], final_c[key], atol=1e-6), f"mismatch at {key}"
 
 
+def test_load_checkpoint_rejects_a_negative_step(tmp_path):
+    # A real bug found by a fresh-eyes sweep, the same severity class as
+    # WarmupCosineSchedule.peak_lr/min_lr's own already-fixed negative-LR
+    # bug: checkpoint["step"] -- real, on-disk, corruptible state -- was
+    # assigned to self.step with zero validation, and self.step feeds
+    # straight into schedule.lr_at(self.step) on the very next train_step
+    # call. Confirmed live: WarmupCosineSchedule(...).lr_at(-200) returns
+    # a negative learning rate, larger in magnitude than the schedule's
+    # own configured peak_lr -- training on a resumed checkpoint with a
+    # corrupted negative step would silently apply gradient ascent from
+    # the very first resumed step.
+    config = _config()
+    x, y = _fixed_batch(config)
+    trainer = Trainer(_seeded_model(config))
+    trainer.train_step(x, y)
+    ckpt_path = tmp_path / "checkpoint.pt"
+    trainer.save_checkpoint(ckpt_path)
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    checkpoint["step"] = -200
+    torch.save(checkpoint, ckpt_path)
+
+    reloaded = Trainer(_seeded_model(config))
+    with pytest.raises(ValueError, match="invalid step value"):
+        reloaded.load_checkpoint(ckpt_path)
+
+
 def test_save_checkpoint_does_not_destroy_the_previous_checkpoint_if_interrupted_mid_write(
     tmp_path, monkeypatch
 ):
