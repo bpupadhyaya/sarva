@@ -639,6 +639,48 @@ the full stderr captured; verified by reverting and watching the new
 test fail with the literal old bug's own shape (`timed_out=True` after
 the full 5-second timeout elapsed).
 
+**A later, independent bypass proved the third bug's own fix (`dup()`ing
+fd 0 away) closed only the raw-fd-0 channel, not the underlying class.**
+The driver's own real stdin stays open as a plain Python object
+(`_stream`) in its top-level script scope so it can still be read for
+phase 2 later — and `submitted_code`, despite running via `exec()` with
+its own separate globals dict, can reach that object directly via
+`sys._getframe(1).f_locals` (the calling frame, i.e. the driver's own
+scope). A background thread that steals that live reference and races
+the driver's own subsequent read wins every time it's given the chance,
+for the identical reason the third bug's thread did: threads share a
+process's entire live-object graph, not just its file descriptor table.
+Confirmed live before this fix: 30/30 real runs against a deliberately
+wrong solution scored `reward=1.0`, with the real test never actually
+checked. Hiding the value from frame introspection was investigated
+directly, not assumed impossible — `f_back` chains all the way up the
+real call stack regardless of how many function layers separate the
+`exec()` call from wherever the value lives, so any name (or object
+attribute) holding it in a frame that must stay on the stack (to remain
+usable afterward) stays reachable. Fixed differently: instead of hiding
+the value, the driver detects the exploit's own required *shape*, which
+is identical to the third bug's — a background thread that must survive
+past `submitted_code`'s own top-level return to keep racing for content
+that hasn't arrived yet. A short sleep followed by
+`threading.active_count() > 1`, checked before the ACK is ever printed
+and before the real test is ever sent, catches any submission that left
+a thread alive and refuses to proceed at all — generalizing to any
+future racing-thread variant, not just this one's specific discovery
+channel. The sleep is what makes the check decisive: the third bug's
+own thread (still spawned, now harmless) reads from the
+devnull-redirected fd 0 and gets EOF near-instantly, easily finishing
+inside the grace window, while this exploit's thread is *provably*
+still blocked at check time — the content it wants cannot exist yet,
+since sending it is gated on this very check passing first. Verified
+live: the existing raw-fd-race test still passes with the real test's
+`AssertionError` genuinely firing (proving its harmless thread finished
+in time), while this exploit is rejected 10/10 with the real test never
+sent at all. Not provably complete, named honestly: a raw `os.fork()`'d
+process on POSIX would share the same file descriptors while staying
+invisible to `threading.active_count()` — closing that, like the third
+bug's own remaining gap, needs the same genuine process/container
+isolation this module's docstring already names as deferred work.
+
 `CODING_TASKS` bundles three small, real, hand-verified tasks — same
 honesty discipline as `sarva.eval.benchmarks.ARITHMETIC`: real problems
 with real, hand-checked reference solutions, not a claim to

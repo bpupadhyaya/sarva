@@ -20,21 +20,28 @@ real, deferred, infrastructure-heavy work, named directly rather than
 implied to already be covered.
 
 **Specifically, not overclaimed for `evaluate_submission`'s own
-completion-signaling mechanism either:** three independent reward-
-hacking bypasses have been found and fixed here (see that function's
-own docstring for each) — a `sys.exit(0)` early-exit, a
-plaintext-sentinel-in-a-readable-file read, and a background thread
-racing a raw file-descriptor read against the driver's own stdin
-consumption. The third one is mitigated, not provably closed: any two
-threads of the *same* OS process have equal access to that process's
-entire file descriptor table, so no amount of same-process IPC
-cleverness can give one thread exclusive access against another,
-malicious one. A submission sophisticated enough to enumerate open file
-descriptors rather than assume fd 0 could still find and race whatever
-fd carries phase-2 content. Only genuine process/container isolation
-between the code being rewarded and the code determining the reward
-closes this for good — exactly the "real container/VM boundary"
-already named above as deferred, infrastructure-heavy work.
+completion-signaling mechanism either:** five independent reward-hacking
+bypasses have been found and fixed here (see that function's and
+`_build_driver_src`'s own docstrings for each) — a `sys.exit(0)`
+early-exit, a plaintext-sentinel-in-a-readable-file read, a background
+thread racing a raw file-descriptor read against the driver's own stdin
+consumption, embedding the phase-boundary marker's own text to smuggle
+code into the test phase, and a background thread using frame
+introspection to steal the driver's own live stdin object and race it
+instead of a raw fd. The two racing-thread bypasses are defeated the
+same way, and that fix generalizes beyond either one's specific
+discovery channel: any submission that leaves a background thread alive
+past its own top-level return is refused before the ACK is ever printed
+and before phase 2 is ever sent, regardless of what that thread was
+trying to steal or how. What remains genuinely open — named here
+directly, not left implicit — is a channel that doesn't rely on a
+Python-level `threading.Thread` at all (a raw `os.fork()`'d child
+process on POSIX, sharing the same file descriptors but invisible to
+`threading.active_count()`, is the clearest candidate). Only genuine
+process/container isolation between the code being rewarded and the
+code determining the reward closes this class for good — exactly the
+"real container/VM boundary" already named above as deferred,
+infrastructure-heavy work.
 """
 
 from __future__ import annotations
@@ -152,9 +159,17 @@ def _build_driver_src(phase1_end_marker: str, phase1_ack_marker: str) -> str:
     concatenates with this print into one unrecognizable line, and the
     marker comparison never matches. The leading "\\n" guarantees the
     marker always lands on its own, unambiguous line no matter what the
-    submission's own last write looked like."""
+    submission's own last write looked like.
+
+    The `threading.active_count() > 1` check between `submitted_code`'s
+    exec() and the ACK print is a fifth reward-hacking bypass's fix --
+    see evaluate_submission's own docstring for the full exploit and why
+    a short `time.sleep` first makes this check decisive rather than a
+    coin flip. It runs BEFORE the ACK is ever printed and BEFORE
+    task.test_code is ever sent, so a submission caught leaving a
+    background thread alive never even gets a chance at phase 2."""
     return f"""
-import os, sys
+import os, sys, threading, time
 _real_stdin_fd = os.dup(0)
 _devnull_fd = os.open(os.devnull, os.O_RDONLY)
 os.dup2(_devnull_fd, 0)
@@ -167,6 +182,9 @@ for _line in _stream:
         break
     _lines.append(_line)
 exec(compile("".join(_lines), "<submission>", "exec"), _ns)
+time.sleep(0.05)
+if threading.active_count() > 1:
+    sys.exit(1)
 print("\\n" + {phase1_ack_marker!r}, flush=True)
 exec(compile(_stream.read(), "<test>", "exec"), _ns)
 """
@@ -290,7 +308,62 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
     `"\\n"` (see `_build_driver_src`'s own docstring): this guarantees the
     marker always lands on its own, unambiguous line regardless of
     what the submission's last write looked like, without needing to
-    change the reader side at all."""
+    change the reader side at all.
+
+    **A fifth, independent bypass, found the same way as the first
+    four — actually submitting the exploit and watching `reward=1.0`
+    come back for a deliberately wrong solution:** the third bug's own
+    fix (dup()'ing fd 0 away to `os.devnull` before `submitted_code` is
+    ever exec'd) only closes the raw-fd-0 channel. It does nothing about
+    the driver's own Python-level `_stream` object -- the real stdin,
+    still fully open under a different fd -- which `submitted_code` can
+    reach directly via `sys._getframe(1).f_locals` (the calling frame,
+    i.e. the driver script's own top-level scope, where `_stream` lives
+    as a plain local variable). A background thread that steals that
+    live object reference and races the driver's own subsequent
+    `_stream.read()` for `task.test_code` + the sentinel wins every time
+    it's given the chance, for the identical reason the third bug's
+    thread did: threads share a process's entire live-object graph, not
+    just its file descriptor table, and there is no way for one thread
+    to reserve a Python object against another thread of the same
+    process either. Confirmed live before this fix: 30/30 real runs
+    against a deliberately wrong `add()` scored `reward=1.0`, with
+    `add(2, 3)` never actually checked against `5`.
+
+    Genuinely hiding `_stream` (or the raw fd number it wraps) from
+    frame introspection was investigated directly, not assumed
+    impossible: `sys._getframe().f_back` chains all the way up the real
+    call stack regardless of how many function layers separate the
+    exec() call from wherever the value is stored, so any name holding
+    it in an ancestor frame that must remain on the stack (to still be
+    usable for phase 2 afterward) stays reachable; stashing it as a
+    function or object attribute doesn't help either, since the
+    function/object reference itself is just as walkable. Fixed
+    differently: instead of hiding the value, the driver detects the
+    exploit's own required SHAPE, which is identical to the third bug's
+    -- a background thread that must survive past `submitted_code`'s own
+    top-level return to keep racing for content that hasn't arrived yet.
+    A short `time.sleep` followed by `threading.active_count() > 1`,
+    checked before the ACK is ever printed and before `task.test_code`
+    is ever sent (see `_build_driver_src`'s own docstring), catches any
+    submission that left a thread alive and refuses to proceed to phase
+    2 at all -- this generalizes to any future racing-thread variant
+    someone finds, not just this one's specific discovery channel. The
+    sleep is what makes the check decisive rather than a coin flip: the
+    third bug's own thread (still present, still spawned, just now
+    harmless) reads from the devnull-redirected fd 0 and gets EOF
+    near-instantly, easily finishing inside the grace window, while this
+    exploit's thread is *provably* still blocked at check time -- the
+    content it's racing for cannot exist yet, since sending it is gated
+    on this very check passing first. Confirmed live: the existing
+    third-bug test still passes with `task.test_code`'s own
+    `AssertionError` genuinely firing (proving its harmless thread
+    finished in time and the check didn't false-positive on it), while
+    this fifth exploit is rejected 10/10 with `task.test_code` never
+    sent at all. Not provably complete, and not claimed to be -- see
+    this module's own top-level docstring for what channel remains
+    genuinely open (a raw `os.fork()`'d process, invisible to
+    `threading.active_count()`)."""
     sentinel = f"__SARVA_TASK_COMPLETED_{secrets.token_hex(16)}__"
     phase1_end_marker = f"__SARVA_PHASE1_END_{secrets.token_hex(16)}__"
     phase1_ack_marker = f"__SARVA_PHASE1_ACK_{secrets.token_hex(16)}__"

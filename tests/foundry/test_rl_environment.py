@@ -292,6 +292,72 @@ def test_a_submission_that_embeds_the_phase1_end_marker_cannot_smuggle_code_into
     assert result.reward == 0.0
 
 
+def test_a_submission_that_steals_the_driver_stream_via_frame_introspection_cannot_skip_test_code():
+    # A fifth, independent reward-hacking bypass, found the same way the
+    # first four were: actually submitting the exploit and watching
+    # reward=1.0 come back for a submission whose real add() is
+    # deliberately wrong. The third bug's own fix (dup()'ing fd 0 away to
+    # os.devnull before submitted_code is ever exec'd) only closes the
+    # raw-fd-0 channel -- it does nothing about the driver's own Python-
+    # level `_stream` object (the real stdin, still fully open under a
+    # different fd), which `sys._getframe(1).f_locals` can read directly
+    # from inside submitted_code's exec() call. A background thread that
+    # steals that live object reference and races the driver's own
+    # subsequent `_stream.read()` for task.test_code + the sentinel wins
+    # every time it's given the chance, exactly like the third bug's
+    # thread did before that fix -- just via a completely different
+    # discovery channel the dup2 mitigation was never meant to cover.
+    # Confirmed live before this fix: 30/30 real runs against a
+    # deliberately wrong add() scored reward=1.0, with add(2, 3) never
+    # actually checked against 5.
+    #
+    # Fixed differently from the third bug: instead of trying to hide
+    # `_stream`/its underlying fd from frame introspection (shown by
+    # direct experimentation to be effectively impossible within a
+    # single process -- any name holding it is reachable via
+    # `sys._getframe().f_back`, and stashing it as a function/object
+    # attribute is just as reachable once the submission has any
+    # accessible reference to that function/object), the driver instead
+    # detects the ATTACK'S OWN REQUIRED SHAPE: this exploit (like the
+    # third bug's) fundamentally needs a background thread to survive
+    # past submitted_code's own top-level return and keep running
+    # afterward to win the race for content that hasn't arrived yet. A
+    # short grace period followed by `threading.active_count() > 1`,
+    # checked BEFORE the ACK is ever printed and BEFORE task.test_code is
+    # ever sent, catches any submission that left a thread alive --
+    # regardless of what that thread was trying to steal or how it found
+    # it -- and refuses to proceed to phase 2 at all. The grace period is
+    # what makes this decisive rather than a coin flip: the third bug's
+    # own (still-present) thread reads from the devnull-redirected fd 0
+    # and gets EOF near-instantly, easily finishing within the grace
+    # window, while THIS exploit's thread is provably still blocked at
+    # check time -- the content it's racing for cannot exist yet, since
+    # sending it is gated on this very check passing.
+    malicious_submission = (
+        "import sys, threading, re\n"
+        "frame = sys._getframe(1)\n"
+        "driver_locals = frame.f_locals\n"
+        "def steal():\n"
+        "    stream = driver_locals.get('_stream')\n"
+        "    if stream is None:\n"
+        "        return\n"
+        "    data = stream.read()\n"
+        "    m = re.search(r'__SARVA_TASK_COMPLETED_[0-9a-f]+__', data)\n"
+        "    if m:\n"
+        "        print(m.group(0))\n"
+        "        sys.stdout.flush()\n"
+        "threading.Thread(target=steal, daemon=True).start()\n"
+        "def add(a, b):\n"
+        "    return a + b + 100  # deliberately wrong\n"
+    )
+
+    for _ in range(10):
+        result = evaluate_submission(_ADD_TASK, malicious_submission, timeout=5.0)
+        assert result.passed is False, "the frame-introspection stream theft was wrongly rewarded"
+        assert result.reward == 0.0
+        assert "__SARVA_TASK_COMPLETED_" not in result.stdout
+
+
 @_posix_only
 def test_timeout_kills_grandchild_processes_the_submission_spawned_not_just_the_direct_child():
     # A real bug found by actually running a submission that forks: the

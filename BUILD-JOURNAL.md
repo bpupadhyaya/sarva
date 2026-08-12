@@ -22463,3 +22463,65 @@ sidebar the same way this file's own closing paragraph already does --
 not by fabricating a new public roadmap page from private content.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 417: a fifth reward-hacking bypass in `evaluate_submission` -- frame introspection stole the driver's own live stdin object, sidestepping the third bug's fd-0-only mitigation entirely
+
+Continuing the live-execution lens against `sarva_foundry.rl.environment`
+(the highest-yield file this session, two of this session's own earlier
+rounds -- 314, 315 -- already found real bugs here): after confirming a
+custom `sys.excepthook` couldn't fake completion, tried a more targeted
+attack informed directly by the third bug's own documented remaining
+gap ("a sufficiently determined submission could still... race whatever
+fd carries phase-2 content").
+
+**Confirmed live, 30/30 reproducible**: a submission using
+`sys._getframe(1).f_locals` from inside its own `exec()`'d code can
+reach the driver's own top-level scope directly and grab a live
+reference to `_stream` -- the real stdin, still fully open under a
+dup'd fd, since the third bug's fix (`dup2`'ing fd 0 to `os.devnull`)
+only replaces what fd 0 itself points to, never touching this Python
+object. A background thread that steals this reference and races the
+driver's own subsequent read wins every time, for the identical
+"threads share the whole process's live-object graph" reason the third
+bug's raw-fd race did.
+
+**Investigated hiding the value from frame introspection directly, not
+assumed impossible, and confirmed it doesn't work**: `f_back` chains
+all the way up the real call stack regardless of function-layer
+indirection, so any name (or object attribute) holding the value in a
+frame that must stay live on the stack (to remain usable for phase 2
+afterward) stays reachable.
+
+**Fixed differently**: detect the exploit's own required shape instead
+-- identical to the third bug's, a background thread that must outlive
+`submitted_code`'s own top-level return to keep racing for content that
+hasn't arrived yet. A short `time.sleep(0.05)` followed by
+`threading.active_count() > 1`, checked before the ACK is ever printed
+and before the real test is ever sent, rejects any submission that left
+a thread alive -- generalizing to future racing-thread variants, not
+just this specific discovery channel. The sleep is what makes the check
+decisive: the third bug's own (still-present, now-harmless) thread
+reads devnull and finishes in microseconds, easily inside the grace
+window, while this exploit's thread is provably still blocked at check
+time, since the content it wants is gated on this very check passing
+first.
+
+**Verified with a genuine revert-and-check**: reverted the fix and
+watched the new test fail with the exact predicted shape
+(`passed=True, reward=1.0` for a deliberately wrong solution), restored
+and confirmed it passes again, 10/10. The existing third-bug test still
+passes unmodified, with its own real `AssertionError` genuinely firing
+-- proving the grace period correctly distinguishes the two thread
+behaviors rather than accidentally breaking the earlier fix. 1 new
+test, 933 selected (932 -> 933). Full suite: 933 passed, 1 skipped.
+`ruff check`/`ruff format --check` both clean. `docs/foundry/training.md`'s
+existing `evaluate_submission` reward-hacking narrative extended with a
+matching new section. Not provably complete, named honestly in both the
+module docstring and the docs: a raw `os.fork()`'d process on POSIX
+would share file descriptors while staying invisible to
+`threading.active_count()` -- closing that needs the same genuine
+process/container isolation already named as deferred work.
+
+**Next:** continuing the hardening sweep, module by module.
