@@ -22362,3 +22362,39 @@ the test. 2 new tests. Full suite (`core/ tests/ foundry/ examples/`):
 with a matching new section.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 379: the identical missing-`User-Agent` gap round 378 just fixed for `web_fetch` also affected its sibling url-fetching path, `multimodal/fetch.py`'s `fetch_bytes`
+
+Immediately after shipping round 378 (`WebFetchTool` sending no
+`User-Agent`, causing real 403s from legitimate sites), applied the same
+lens to the *other* real url-fetching path this codebase's own docs
+already name as needing to stay in sync with `WebFetchTool` on safety:
+`sarva.multimodal.fetch.fetch_bytes`, used by `resolve_media_bytes()`
+for every `url`-sourced `ImageBlock`/`AudioBlock`/`VideoBlock`/
+`DocumentBlock`.
+
+**Confirmed live**: fetching an ordinary, non-adversarial media URL (a
+real Wikimedia-hosted PNG, not a crafted target -- exactly the kind of
+URL a url-sourced media block exists to support) returned a raw 403.
+Same root cause as round 378: no `User-Agent` header set anywhere on
+the request, so httpx's own default (`python-httpx/<version>`) is what
+Wikipedia's infrastructure rejected.
+
+**Fixed** by passing the identical `headers={"User-Agent": "Mozilla/5.0
+(compatible; sarva-agent/1.0)"}` `WebFetchTool`/`_duckduckgo_search`
+already send, on `fetch_bytes`'s own `client.stream("GET", current_url)`
+call.
+
+**Verified with a genuine revert-and-check**: both a mocked-transport
+test (the real outgoing request carries a real header, not httpx's own
+default) and a live test against the real Wikimedia URL that had just
+failed. Reverted and confirmed both fail with the exact predicted
+shape (no real header; a real 403), restored and confirmed both pass
+again. 2 new tests. Full suite (`core/ tests/ foundry/ examples/`): 932
+passed, 1 skipped. `ruff check`/`ruff format --check` both clean.
+`docs/multimodal.md`'s existing sibling-gap narrative (the `path`-source
+`asyncio.to_thread` fix) extended with a matching new section.
+
+**Next:** continuing the hardening sweep, module by module.

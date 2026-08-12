@@ -45,6 +45,48 @@ async def test_fetch_bytes_returns_the_response_body(monkeypatch):
     assert result == b"\x89PNG\r\n fake image bytes"
 
 
+async def test_fetch_bytes_sends_a_browser_like_user_agent(monkeypatch):
+    # A real bug found by actually fetching an ordinary, non-adversarial
+    # media URL (a Wikimedia-hosted image, not a crafted target -- the
+    # exact kind of URL a url-sourced ImageBlock exists to support):
+    # fetch_bytes sent no User-Agent header at all, so httpx fell back
+    # to its own default (`python-httpx/<version>`), and real,
+    # legitimate sites -- not just adversarial anti-bot ones -- reject
+    # that exact default with a raw 403 (confirmed live). WebFetchTool
+    # (core/sarva/agent/tools.py) had the identical gap, found and
+    # fixed in the same round.
+    _skip_ssrf_check(monkeypatch)
+
+    seen_headers = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers["user-agent"] = request.headers.get("user-agent")
+        return httpx.Response(200, content=b"ok")
+
+    await fetch_bytes("https://example.com/cat.png", client=_mock_client(handler))
+
+    # The real, decisive assertion: httpx's own default UA string always
+    # starts with "python-httpx/" -- anything else means a real header
+    # was actually sent, not left to the library's default.
+    assert seen_headers["user-agent"] is not None
+    assert not seen_headers["user-agent"].startswith("python-httpx/")
+
+
+@pytest.mark.live
+async def test_fetch_bytes_live_succeeds_against_a_real_site_that_blocks_the_default_user_agent():
+    """Requires network access — skipped by default. A real Wikimedia-
+    hosted image returns a raw 403 to httpx's own default User-Agent
+    (confirmed live before the fix); this proves the real, live request
+    now succeeds, not just that a mocked transport received the right
+    header."""
+    data = await fetch_bytes(
+        "https://upload.wikimedia.org/wikipedia/commons/6/63/Wikipedia-logo.png",
+        max_bytes=5_000_000,
+        timeout=15.0,
+    )
+    assert len(data) > 0
+
+
 async def test_fetch_bytes_rejects_non_http_schemes():
     with pytest.raises(FetchError, match="unsupported URL scheme"):
         await fetch_bytes("file:///etc/passwd")

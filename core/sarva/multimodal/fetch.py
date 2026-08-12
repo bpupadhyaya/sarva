@@ -175,7 +175,26 @@ async def fetch_bytes(
         try:
             for _ in range(_MAX_REDIRECTS + 1):
                 await ensure_public_host(current_url)
-                async with http_client.stream("GET", current_url) as response:
+                # A real bug found by actually fetching an ordinary,
+                # non-adversarial media URL (a Wikimedia-hosted image,
+                # not a crafted target -- the exact kind of URL a
+                # url-sourced ImageBlock exists to support): with no
+                # `User-Agent` header set here, httpx sends its own
+                # default (`python-httpx/<version>`), and real,
+                # legitimate sites -- not just adversarial anti-bot ones
+                # -- reject that exact default with a raw 403 (confirmed
+                # live). `WebFetchTool` (core/sarva/agent/tools.py) had
+                # the identical gap, found and fixed in the same round;
+                # this module's own docstring already says the two
+                # url-fetching paths in this codebase must not drift out
+                # of sync on what "safe to fetch" means -- this is the
+                # same principle applied to reachability, not just
+                # safety.
+                async with http_client.stream(
+                    "GET",
+                    current_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; sarva-agent/1.0)"},
+                ) as response:
                     if response.is_redirect and response.has_redirect_location:
                         current_url = urljoin(str(response.url), response.headers["location"])
                         continue

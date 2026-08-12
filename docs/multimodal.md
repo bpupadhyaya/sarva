@@ -83,6 +83,31 @@ freezing solid. Verified by reverting and watching the new test fail
 with the literal old bug's own shape — zero heartbeat ticks. 1 new
 test, 801 → 802 Python tests.
 
+### The `url` source also had the identical reachability gap `WebFetchTool`'s own sibling fix had just closed in the same round
+
+A real bug found immediately after fixing `WebFetchTool`'s missing
+`User-Agent` (`core/sarva/agent/tools.py`, see the tool-use chapter's
+own entry): `fetch_bytes` here has no header set on its request either
+— the exact same gap, in this module's own sibling url-fetching path.
+Confirmed live with an ordinary, non-adversarial media URL (a
+Wikimedia-hosted image, not a crafted target — the kind of URL a
+url-sourced `ImageBlock` exists to support): a raw 403, because httpx's
+own default `User-Agent` (`python-httpx/<version>`) is exactly what
+real, legitimate sites — not just adversarial anti-bot ones — reject.
+This module's own opening paragraphs above already state the principle
+that both real url-fetching paths in this codebase must not drift out
+of sync on what "safe to fetch" means; this is that same principle
+applied to reachability, not just SSRF safety.
+
+Fixed by passing the identical
+`headers={"User-Agent": "Mozilla/5.0 (compatible; sarva-agent/1.0)"}`
+`WebFetchTool`/`_duckduckgo_search` already send, on `fetch_bytes`'s own
+`client.stream("GET", current_url)` call. Verified by reverting and
+watching both a mocked-transport test (no real header reaches the
+outgoing request) and a live test against the real Wikimedia URL fail
+with the exact predicted shape, then restoring and confirming both pass
+again. 2 new tests.
+
 ## Degradation: never silently drop, or fail loudly instead
 
 `Degrader` is the registry every "this model can't see modality X"
