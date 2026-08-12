@@ -19,7 +19,9 @@ Sarva leans on frontier LLMs (Claude, GPT, Gemini) for that intelligence
 layer today, behind a provider abstraction that treats every model — hosted
 or local — identically. That choice is deliberate and temporary: as models
 more capable than today's frontier arrive, Sarva absorbs them as a one-entry
-registry change, never a rewrite. See the roadmap for where this leads.
+registry change, never a rewrite — and the from-scratch `foundry/` track
+(see the nav sidebar) exists so the project isn't permanently dependent on
+any frontier provider at all.
 
 **[Chapter 2 — The Provider Abstraction, Model Registry, and
 Routing](providers.md)** is live: the `Provider` protocol every backend

@@ -22432,3 +22432,34 @@ candidate final answer against the original task before a run
 completes -- also previously undocumented at this top-level summary.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 385: a docs-accuracy sweep across every remaining "not yet"/"deferred" claim in docs/*.md -- one genuine dangling reference found and fixed
+
+Continuing round 384's lens across the rest of the docs directory:
+grepped every `docs/*.md` file for "not yet", "not built", "still
+missing", "deferred", and similar phrasing, then checked each hit
+individually against the current codebase rather than trusting the
+grep alone. Five of six files' hits checked out as still genuinely
+accurate (Gemini Files API for long video still not implemented;
+Windows ACL isolation still a real platform limitation; MCP Streamable
+HTTP already correctly described as closed, past tense).
+
+**One genuine issue found**: `docs/index.md`'s own opening paragraph
+ended with "See the roadmap for where this leads" -- plain text, no
+link, and no roadmap document exists anywhere in the public `os/sarva`
+repo. The only roadmap that exists lives in the private dotfiles design
+doc (`global-memory/personal/sarva.md`'s own "## 8. Roadmap" section)
+-- a genuinely private planning document (author-specific decision
+annotations, internal phase tables) that must stay in the private repo,
+not get copied into the public one. A reader of the public docs site
+had no way to actually follow this reference at all.
+
+**Fixed** by removing the dangling pointer and replacing it with an
+accurate, already-true statement about the from-scratch `foundry/`
+track's real purpose (frontier-independence), pointing to the nav
+sidebar the same way this file's own closing paragraph already does --
+not by fabricating a new public roadmap page from private content.
+
+**Next:** continuing the hardening sweep, module by module.
