@@ -31,9 +31,11 @@ one-entry data edit instead of a rewrite.
 **[Chapter 3 — The Agent Loop](agent-loop.md)** is live too: the
 explicit plan/act/verify state machine every skin drives, concurrent
 tool execution gated by one confirm policy, budgets as a clean stop
-rather than an exception, and the opt-in multimodal-degradation
-fallback — plus what's honestly not built yet (subagent fan-out, named
-in the design but not in code).
+rather than an exception, the opt-in multimodal-degradation fallback,
+subagent fan-out (`delegate_task`, one level deep, its spend counted
+against the parent's own remaining budget), and an opt-in verifier
+subagent that checks a candidate final answer against the original
+task before a run completes.
 
 **[Chapter 4 — Multimodality](multimodal.md)** is live: the typed
 `ContentBlock` vocabulary every layer speaks, the four real degraders

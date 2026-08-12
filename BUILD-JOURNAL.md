@@ -22398,3 +22398,37 @@ passed, 1 skipped. `ruff check`/`ruff format --check` both clean.
 `asyncio.to_thread` fix) extended with a matching new section.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 384: `docs/index.md`'s own top-level chapter summary still claimed subagent fan-out was "honestly not built yet" -- long after it shipped
+
+While live-verifying `delegate_task`/subagent fan-out end to end (round
+382), noticed the claim in `subagents.py`'s own module docstring --
+"named in the design doc's own architecture section since this
+project's very first agent-loop chapter (`docs/agent-loop.md`'s 'What's
+honestly not built yet') and left deliberately unbuilt for a long time"
+-- and went looking for that exact phrase to see whether it still
+appeared anywhere. `docs/agent-loop.md` itself had already been kept in
+sync (it documents `DelegateTool` extensively, including several of
+this session's own fresh-eyes-sweep fixes to it), but `docs/index.md`'s
+own Chapter 3 summary paragraph -- the top-level book overview a reader
+sees FIRST, before ever reaching the chapter itself -- still said
+"what's honestly not built yet (subagent fan-out, named in the design
+but not in code)."
+
+Not a code bug, but a real instance of the same "no fabrication"
+discipline this project applies to test coverage and benchmark claims,
+just pointed the other direction: understating what's actually built is
+still a factual inaccuracy a reader would reasonably rely on, the exact
+kind of claim this project's own docs elsewhere go out of their way to
+keep honest and current.
+
+**Fixed** by updating the Chapter 3 summary to name both real,
+opt-in agent-orchestration features that exist today: subagent fan-out
+(`delegate_task`, one level deep, spend counted against the parent's
+own remaining budget) and the opt-in verifier subagent that checks a
+candidate final answer against the original task before a run
+completes -- also previously undocumented at this top-level summary.
+
+**Next:** continuing the hardening sweep, module by module.
