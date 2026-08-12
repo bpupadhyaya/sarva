@@ -1047,6 +1047,28 @@ shared lower-level `AsyncClient.send()` both entry points route
 through instead, a small but real ripple from changing which httpx API
 this tool actually calls. 1 new test, 722 → 723 Python tests.
 
+### `WebFetchTool` had a real reachability gap `_duckduckgo_search`, its own sibling in the same file, had already fixed
+
+A real bug found by actually fetching an ordinary, non-adversarial page
+(`en.wikipedia.org`, not a crafted target): `WebFetchTool` sent no
+`User-Agent` header at all, so httpx fell back to its own default
+(`python-httpx/<version>`) — and Wikipedia, like many real, legitimate
+sites (not just adversarial anti-bot ones), returns a raw 403 to that
+exact default, while a plain browser-like UA succeeds. Confirmed live
+both ways before fixing: `curl` with the default UA got 403; the same
+URL with `Mozilla/5.0` got 200. `_duckduckgo_search`, defined lower in
+this same file, already carries this identical fix for the identical
+reason — DuckDuckGo's own results page does the same thing — it just
+never propagated to this sibling tool, so `web_fetch`'s real-world
+reachability was silently narrower than `web_search`'s despite nothing
+about the target being unusual. Fixed by passing the same
+`headers={"User-Agent": "Mozilla/5.0 (compatible; sarva-agent/1.0)"}`
+`_duckduckgo_search` already sends, on the `client.stream("GET", url)`
+call. Verified by reverting and watching both the mocked-transport test
+(the request the tool actually sends carries no real header) and the
+live Wikipedia test (a real 403) fail with exactly the predicted shape,
+then restoring the fix and watching both pass again.
+
 ## Budgets: exceeding one is a clean stop, not an exception
 
 ```python

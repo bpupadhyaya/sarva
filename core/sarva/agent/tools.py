@@ -836,7 +836,27 @@ class WebFetchTool:
                     # stopping the READ itself once `_MAX_FETCH_CHARS`
                     # is reached bounds that cost directly, the same
                     # "stop reading, don't read-then-discard" fix shape.
-                    async with client.stream("GET", url) as resp:
+                    #
+                    # A real bug found by actually fetching an ordinary,
+                    # non-adversarial page (en.wikipedia.org, not a
+                    # crafted target): with no `User-Agent` header set
+                    # here, httpx sends its own default
+                    # (`python-httpx/<version>`), and Wikipedia -- like
+                    # many real, legitimate sites, not just adversarial
+                    # anti-bot ones -- returns a raw 403 to that exact
+                    # default, while a plain browser-like UA succeeds
+                    # (confirmed directly with both, live). This is the
+                    # identical fix `_duckduckgo_search` already applies
+                    # for the identical reason (see its own comment) --
+                    # it just never propagated to this sibling tool in
+                    # the same file, so `web_fetch`'s reachability was
+                    # silently narrower than `web_search`'s despite
+                    # nothing about the target being unusual.
+                    async with client.stream(
+                        "GET",
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0 (compatible; sarva-agent/1.0)"},
+                    ) as resp:
                         if resp.is_redirect and resp.has_redirect_location:
                             url = urljoin(str(resp.url), resp.headers["location"])
                             continue

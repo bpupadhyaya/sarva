@@ -962,8 +962,54 @@ async def test_web_fetch_bounds_the_read_itself_not_just_the_final_string(ctx, m
     )
 
 
+async def test_web_fetch_sends_a_browser_like_user_agent(ctx, monkeypatch):
+    # A real bug found by actually fetching an ordinary, non-adversarial
+    # page (en.wikipedia.org, not a crafted target): WebFetchTool sent no
+    # User-Agent header at all, so httpx fell back to its own default
+    # (`python-httpx/<version>`) -- and Wikipedia, like many real,
+    # legitimate sites (not just adversarial anti-bot ones), returns a
+    # raw 403 to that exact default, while a plain browser-like UA
+    # succeeds (confirmed live with both). `_duckduckgo_search` already
+    # carries this identical fix, in this same file, for the identical
+    # reason -- it just never propagated to this sibling tool, so
+    # web_fetch's real-world reachability was silently narrower than
+    # web_search's despite nothing about the target being unusual.
+    monkeypatch.setattr(tools_module, "ensure_public_host", lambda url: _noop())
+
+    seen_headers = {}
+
+    def handler(request):
+        seen_headers["user-agent"] = request.headers.get("user-agent")
+        return httpx.Response(200, text="ok")
+
+    monkeypatch.setattr(tools_module, "ssrf_safe_transport", lambda: httpx.MockTransport(handler))
+
+    tool = WebFetchTool()
+    result = await tool.run({"url": "http://example.test/page"}, ctx)
+
+    assert not result.is_error
+    # The real, decisive assertion: httpx's own default UA string always
+    # starts with "python-httpx/" -- anything else means a real header
+    # was actually sent, not left to the library's default.
+    assert seen_headers["user-agent"] is not None
+    assert not seen_headers["user-agent"].startswith("python-httpx/")
+
+
 async def _noop() -> None:
     return None
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_web_fetch_live_succeeds_against_a_real_site_that_blocks_the_default_user_agent(ctx):
+    """Requires network access — skipped by default. en.wikipedia.org
+    returns a raw 403 to httpx's own default User-Agent (confirmed live
+    before the fix); this proves the real, live request now succeeds,
+    not just that a mocked transport received the right header."""
+    tool = WebFetchTool()
+    result = await tool.run({"url": "https://en.wikipedia.org/wiki/Caf%C3%A9"}, ctx)
+    assert not result.is_error
+    assert "Caf" in result.content[0].text
 
 
 @pytest.mark.live

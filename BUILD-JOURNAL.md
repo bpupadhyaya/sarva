@@ -22324,3 +22324,41 @@ format --check` both clean. `docs/mcp.md`'s existing MCP-hardening
 narrative extended.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 378: `web_fetch` sent no `User-Agent`, silently narrower reach than `web_search`'s own sibling fix in the same file
+
+Continuing the live-execution lens: fetching an ordinary, non-adversarial
+real page (`en.wikipedia.org`, not a crafted target) through `web_fetch`
+returned a raw 403. Confirmed live, traced to the exact mechanism:
+`WebFetchTool` sent no `User-Agent` header at all, so httpx fell back to
+its own default (`python-httpx/<version>`), and Wikipedia -- like many
+real, legitimate sites, not just adversarial anti-bot ones -- returns a
+403 to that exact default while a plain browser-like UA succeeds
+(confirmed directly with both, via `curl`, before touching any code).
+
+`_duckduckgo_search`, defined lower in this exact same file, already
+carries this identical fix for the identical reason (DuckDuckGo's own
+results page does the same thing) -- it just never propagated to this
+sibling tool, so `web_fetch`'s real-world reachability was silently
+narrower than `web_search`'s despite nothing about the target being
+unusual.
+
+**Fixed** by passing the same `headers={"User-Agent": "Mozilla/5.0
+(compatible; sarva-agent/1.0)"}` `_duckduckgo_search` already sends, on
+`WebFetchTool`'s `client.stream("GET", url)` call.
+
+**Verified with a genuine revert-and-check**: both a mocked-transport
+test (asserting the actual outgoing request carries a real header, not
+httpx's own `python-httpx/`-prefixed default) and a live test against
+the real `en.wikipedia.org` URL that had just failed. Reverted and
+confirmed both fail with exactly the predicted shape (no real header;
+a real 403) -- restored and confirmed both pass again. Also re-verified
+directly against the live Wikipedia URL via the tool itself, not just
+the test. 2 new tests. Full suite (`core/ tests/ foundry/ examples/`):
+931 passed, 1 skipped. `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md`'s existing `WebFetchTool` fix narrative extended
+with a matching new section.
+
+**Next:** continuing the hardening sweep, module by module.
