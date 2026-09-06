@@ -123,6 +123,40 @@ shape changes from accepted to rejected. Verified by reverting and
 watching the new test fail with the literal old bug's own shape: `DID
 NOT RAISE ValueError`. 1 new test, 847 → 848 Python tests.
 
+**`_sanitize()` validated shape but never case, so two names differing
+only in case could silently become one session — a real bug found by
+actually saving under both cases on this real, unmodified machine.**
+macOS's default filesystem (APFS) is case-INSENSITIVE, so `"MySession"`
+and `"mysession"` resolved to the identical on-disk file: the second
+`save()` silently overwrote the first session's entire history, and
+both `load("MySession")` and `load("mysession")` then returned the
+second session's content, with no error or signal anywhere. Windows'
+default filesystem (NTFS) has the identical property; only Linux's
+common filesystems are case-sensitive by default, so the exact same
+code silently behaved differently across platforms even before
+considering the data-loss angle — the same two names are one session
+by accident on macOS/Windows and two genuinely independent ones on
+Linux. Reachable with zero adversarial intent: two independent callers
+(two browser tabs, two API clients) picking session names that differ
+only in case is an ordinary naming collision, not a crafted one.
+`sarva.memory.longterm`'s own topic-slug normalization already
+lowercases before slugifying for the identical reason — this sibling
+tier never got the same treatment. Confirmed live before the fix: the
+on-disk file's case was whichever name was used for the *first* save,
+regardless of which case a later save or load used, and
+`list_sessions()` echoed that same first-used case back even after a
+second save under different casing — an unprincipled, filesystem-
+accident identity rather than a deliberate one. Fixed by normalizing
+to lowercase in `_sanitize()` itself, the single source every caller
+(`_path`, and therefore `load`/`save`/`clear`/`locked`) already goes
+through, so `"MySession"` and `"mysession"` are now unambiguously the
+same session everywhere, on every platform, by design — not colliding
+on some filesystems by accident while silently diverging on others.
+Verified by reverting and watching the new test fail with the literal
+old bug's own shape: `list_sessions()` returning `['MySession']`
+instead of the canonical `['mysession']`. 1 new test, 946 → 947 Python
+tests.
+
 **`save()` itself used to be able to destroy a previously-good session
 on an interrupted write — a real bug found by actually simulating one,
 not a theoretical concern.** The permissions fix above wrote the new

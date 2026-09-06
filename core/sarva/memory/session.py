@@ -106,7 +106,31 @@ def _sanitize(name: str) -> str:
         raise ValueError(
             f"session name too long ({len(name)} chars, max {_MAX_NAME_LENGTH}): {name[:50]!r}..."
         )
-    return name
+    # A real bug found by actually saving two sessions whose names differ
+    # only in case ("MySession", "mysession") on this real, unmodified
+    # machine: macOS's default filesystem (APFS) is case-INSENSITIVE, so
+    # both names resolved to the identical on-disk file -- the second
+    # save silently overwrote the first session's entire history, and
+    # both `load("MySession")` and `load("mysession")` then returned the
+    # second session's content, with no error or signal anywhere.
+    # Windows' default filesystem (NTFS) has the identical property;
+    # only Linux's common filesystems are case-sensitive by default, so
+    # the exact same code silently behaved differently across platforms
+    # even before considering the data-loss angle -- the same two names
+    # are one session by accident on macOS/Windows and two genuinely
+    # independent ones on Linux. Reachable with zero adversarial intent:
+    # two independent callers (two browser tabs, two API clients)
+    # picking session names that differ only in case is an ordinary
+    # naming collision, not a crafted one. `sarva.memory.longterm`'s own
+    # topic-slug normalization already lowercases before slugifying for
+    # the identical reason -- this sibling tier never got the same
+    # treatment. Fixed by normalizing to lowercase here, at the single
+    # source every caller (`_path`, and therefore `load`/`save`/`clear`/
+    # `locked`) already goes through, so "MySession" and "mysession" are
+    # now unambiguously the SAME session everywhere, on every platform,
+    # by explicit design -- not colliding on some filesystems by
+    # accident while silently diverging on others.
+    return name.lower()
 
 
 class SessionStore:

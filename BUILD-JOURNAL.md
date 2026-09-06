@@ -22579,5 +22579,56 @@ new, narrower honest disclaimer takes its place -- these two fixes close
 the background-execution primitives found so far (threads and forked
 processes), not the whole class; only genuine process/container
 isolation closes that for good.
+---
+
+## Round 423: a real cross-platform bug -- session names differing only in case silently collide on macOS/Windows, silently diverge on Linux
+
+Continuing the adversarial/attacker-mindset sweep of trust-boundary
+code, this round turned to `sarva.memory.session.SessionStore` -- a
+tier whose own `_sanitize()` already has a long history in this
+journal of raw-exception and validation gaps, making it a natural place
+to look for one more.
+
+**Confirmed live, on this real, unmodified machine**: saving a session
+as `"MySession"` and then saving a second, different session as
+`"mysession"` silently overwrote the first session's entire history --
+macOS's default filesystem (APFS) is case-INSENSITIVE, so both names
+resolved to the identical on-disk file. Both `load("MySession")` and
+`load("mysession")` then returned the second session's content, with no
+error or signal anywhere. Windows' default filesystem (NTFS) has the
+identical property; Linux's common filesystems are case-sensitive by
+default, so the exact same code silently behaves differently across
+platforms even before considering the data-loss angle -- the same two
+names are one session by accident on macOS/Windows and two genuinely
+independent ones on Linux. Reachable with zero adversarial intent: two
+independent callers (two browser tabs, two API clients) picking session
+names that differ only in case is an ordinary naming collision, not a
+crafted one -- the exact "sibling module already has this fix" shape
+found repeatedly this session, since `sarva.memory.longterm`'s own
+topic-slug normalization already lowercases for the identical reason
+and this sibling tier never got it.
+
+**Fixed at the single source**: `_sanitize()` now returns `name.lower()`
+instead of the bare name, so every caller that already routes through
+it (`_path`, and therefore `load`/`save`/`clear`/`locked`) gets the fix
+for free. `"MySession"` and `"mysession"` are now unambiguously the same
+session everywhere, on every platform, by explicit design -- not
+colliding on some filesystems by accident while silently diverging on
+others.
+
+**Verified with a genuine revert-and-check**: reverted `_sanitize()`
+back to a bare `return name` and re-ran the new test. It failed with a
+decisive, exactly-predicted shape -- not on the content-equality
+assertions (those still passed "by accident," since the real
+filesystem's own case-folding was already unifying the two files
+underneath the unfixed code), but on `list_sessions() ==
+["mysession"]`, which instead produced `['MySession']`: proof that
+without the fix, the on-disk identity is an unprincipled accident of
+whichever case was used for the first save, not a deliberate, portable
+one. Restored the fix and confirmed all 21 tests in the file pass
+again. 1 new test, 946 -> 947 Python tests. Full suite (`core/ tests/
+foundry/ examples/`): 935 passed, 1 skipped, 11 deselected. `ruff
+check`/`ruff format --check` both clean. `docs/memory.md`'s existing
+`_sanitize()` fix narrative extended with a matching new section.
 
 **Next:** continuing the hardening sweep, module by module.

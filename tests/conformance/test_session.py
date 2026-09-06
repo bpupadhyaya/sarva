@@ -163,6 +163,41 @@ def test_list_sessions(store):
     assert store.list_sessions() == ["alpha", "beta"]
 
 
+def test_session_names_differing_only_in_case_are_treated_as_the_same_session(store):
+    # A real bug found by actually saving two sessions whose names differ
+    # only in case on this real, unmodified machine: macOS's default
+    # filesystem (APFS) is case-INSENSITIVE, so "MySession" and
+    # "mysession" resolved to the identical on-disk file -- the second
+    # save silently overwrote the first session's entire history, and
+    # both `load("MySession")` and `load("mysession")` then returned the
+    # second session's content, with no error or signal anywhere.
+    # Windows' default filesystem (NTFS) has the identical property;
+    # only Linux's common filesystems are case-sensitive by default, so
+    # the exact same code silently behaved differently across platforms
+    # even before considering the data-loss angle. Reachable with zero
+    # adversarial intent: two independent callers (two browser tabs, two
+    # API clients) picking session names that differ only in case is an
+    # ordinary naming collision, not a crafted one.
+    #
+    # Fixed by normalizing session names to lowercase at the single
+    # source every caller goes through (`_sanitize`), matching the
+    # identical design `sarva.memory.longterm`'s own topic-slug
+    # normalization already applies -- "MySession" and "mysession" are
+    # now unambiguously the SAME session everywhere, on every platform,
+    # by design, rather than silently colliding on some filesystems and
+    # silently diverging on others.
+    store.save("MySession", [Message(role="user", content=[TextBlock(text="first")])])
+    store.save("mysession", [Message(role="user", content=[TextBlock(text="second")])])
+
+    loaded_upper = store.load("MySession")
+    loaded_lower = store.load("mysession")
+    assert loaded_upper == loaded_lower
+    assert loaded_lower[0].text() == "second"
+    # Exactly one on-disk file, not two -- proves this is real unification,
+    # not two files that merely happen to read back the same content.
+    assert store.list_sessions() == ["mysession"]
+
+
 def test_session_name_traversal_is_rejected(store):
     with pytest.raises(ValueError, match="invalid session name"):
         store.load("../../etc/passwd")
