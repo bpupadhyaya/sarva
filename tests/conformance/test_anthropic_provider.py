@@ -237,15 +237,16 @@ async def test_generate_still_handles_a_plain_rate_limit_error_as_before():
 
 
 class _FakeUsage:
-    def __init__(self, input_tokens=10, output_tokens=5):
+    def __init__(self, input_tokens=10, output_tokens=5, cache_read_input_tokens=0):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.cache_read_input_tokens = cache_read_input_tokens
 
 
 class _FakeFinalMessage:
-    def __init__(self, stop_reason: str, content=None):
+    def __init__(self, stop_reason: str, content=None, usage=None):
         self.content = content or []
-        self.usage = _FakeUsage()
+        self.usage = usage if usage is not None else _FakeUsage()
         self.stop_reason = stop_reason
 
 
@@ -366,3 +367,45 @@ async def test_generate_translates_stop_sequences_to_the_real_sdk_kwarg():
     [e async for e in provider.generate(request)]
 
     assert client.messages.calls[0]["stop_sequences"] == ["STOP_HERE"]
+
+
+async def test_cache_read_tokens_are_priced_not_treated_as_free():
+    # A real bug found by a fresh-eyes sweep: `cache_read_tokens` is
+    # tracked on `Usage` (right alongside `cost_usd`) but the cost
+    # formula only ever summed `input_tokens`/`output_tokens`, silently
+    # treating every cache-read token as free. Anthropic's own published
+    # pricing bills a cache read at 10% of the base input-token price, a
+    # fixed multiplier constant across model tiers -- prompt caching is
+    # a normal, encouraged pattern for a multi-turn agent loop resending
+    # growing history on every call, not a rare edge case, so this
+    # under-reported real cost on an ordinary turn, undermining
+    # `Budget`/`Spend`'s whole purpose. Confirmed via this adapter's own
+    # established duck-typed-fake-client substitute for a live API call
+    # (see this test file's own module docstring on why no real key is
+    # available here): a request reporting 1000 cache-read tokens
+    # alongside 50 fresh input tokens must cost measurably more than the
+    # identical fresh-token count with no cache read at all.
+    from sarva.providers.anthropic_provider import _PRICE
+
+    in_price, _out_price = _PRICE["claude-opus-4-8"]
+    request = GenerateRequest(
+        model="claude-opus-4-8", messages=[Message(role="user", content=[TextBlock(text="hi")])]
+    )
+
+    no_cache_final = _FakeFinalMessage(
+        stop_reason="end_turn", usage=_FakeUsage(input_tokens=50, output_tokens=10)
+    )
+    no_cache_provider = AnthropicProvider(client=_FakeClientWithFinal(no_cache_final))
+    no_cache_done = [e async for e in no_cache_provider.generate(request)][-1]
+
+    cached_final = _FakeFinalMessage(
+        stop_reason="end_turn",
+        usage=_FakeUsage(input_tokens=50, output_tokens=10, cache_read_input_tokens=1000),
+    )
+    cached_provider = AnthropicProvider(client=_FakeClientWithFinal(cached_final))
+    cached_done = [e async for e in cached_provider.generate(request)][-1]
+
+    assert cached_done.usage.cache_read_tokens == 1000
+    expected_extra = 1000 * in_price * 0.1 / 1_000_000
+    expected_cost = no_cache_done.usage.cost_usd + expected_extra
+    assert cached_done.usage.cost_usd == pytest.approx(expected_cost)

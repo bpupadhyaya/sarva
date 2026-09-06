@@ -1057,6 +1057,45 @@ Verified by reverting and watching all three new tests fail with the
 literal old gap reproducing itself: the field simply absent from the
 captured request. 3 new tests, 840 → 843 Python tests.
 
+### `AnthropicProvider`'s own `cost_usd` treated every cache-read token as free
+
+A much later fresh-eyes sweep found that `Usage.cache_read_tokens` —
+tracked, right alongside `cost_usd`, in the same `Usage` object this
+adapter builds at the end of `generate()` — was never actually priced.
+The cost formula summed only `input_tokens * in_price + output_tokens
+* out_price`; a request's cache-read tokens were counted for reporting
+purposes but contributed nothing to the dollar figure `Budget`/`Spend`
+exist to track. Not a rare pattern to trigger: prompt caching is the
+normal, encouraged way to keep a multi-turn agent loop's growing
+history cheap, so a real, ordinary turn hitting a warm cache had its
+true cost measurably under-reported, not just a contrived one crafted
+to expose the gap.
+
+Anthropic's own published pricing bills a cache read at a fixed 10% of
+the base input-token price, a multiplier constant across every current
+model tier (only the base price itself varies by model) — not
+something this fix had to guess or derive per request. Confirmed via
+this adapter's own established substitute for a live API call (this
+module has never been exercised against a real key in this
+environment — see its own top-level docstring): a duck-typed fake
+client returning 1000 cache-read tokens alongside 50 fresh input
+tokens reported the exact same `cost_usd` as an otherwise-identical
+request with zero cache-read tokens, before this fix.
+
+Fixed by adding `cache_read_tokens * in_price * 0.1` to the cost sum.
+Honestly scoped, not overclaimed: cache-*creation* tokens (billed at a
+1.25x/2x premium depending on TTL) aren't tracked anywhere in `Usage`
+at all yet — a separate, larger schema gap left open rather than
+folded into this narrower fix. `OpenAIProvider`/`GoogleProvider` both
+already report `cost_usd=0.0` unconditionally with their own comment
+explaining why (no verified `models.yaml` pricing entry, so an
+honest "unknown" beats a guessed number) — this fix doesn't change
+that; it only corrects the one adapter that already attempts a real
+figure. Verified by reverting and watching the new test fail with the
+literal old bug's own shape: identical `cost_usd` for a cached and an
+uncached request that should differ. 1 new test, 952 → 953 Python
+tests.
+
 ### The very next round found the identical gap, one field over — Ollama alone never translated `max_tokens` either
 
 The same sibling-comparison lens, applied one field over on the very

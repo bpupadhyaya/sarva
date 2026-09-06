@@ -333,12 +333,41 @@ class AnthropicProvider:
                 yield ToolCallEvent(call=call)
 
         in_price, out_price = _PRICE.get(request.model, (0.0, 0.0))
+        cache_read_tokens = getattr(final.usage, "cache_read_input_tokens", 0) or 0
+        # A real bug found by a fresh-eyes sweep: `cache_read_tokens` is
+        # tracked (right above) but was never actually priced -- the
+        # cost formula summed only `input_tokens`/`output_tokens`,
+        # silently treating every cache-read token as free. Anthropic's
+        # own published pricing bills a cache read at 10% of the base
+        # input-token price (a fixed, documented multiplier constant
+        # across every current model tier, not something derived per
+        # request), so any real turn that hits a cache -- prompt
+        # caching is a normal, encouraged usage pattern for a
+        # multi-turn agent loop resending growing history on every
+        # call, not a rare one -- had its true cost under-reported,
+        # directly undermining `Budget`/`Spend`'s whole purpose of
+        # tracking what a run actually costs. Confirmed via a duck-typed
+        # fake client (this adapter's own established substitute for a
+        # live API test -- see this module's own top-level docstring on
+        # why no real key is available in this environment): a final
+        # message reporting 1000 cache-read tokens alongside 50 fresh
+        # input tokens priced identically to a request with the
+        # identical fresh-token count and NO cache read at all, when the
+        # real bill for the cached request is measurably higher.
+        # Honestly scoped, not overclaimed: cache-CREATION tokens
+        # (billed at a 1.25x/2x premium depending on TTL) aren't tracked
+        # anywhere in `Usage` at all -- a separate, larger gap left open
+        # rather than folded into this fix.
+        cost_usd = (
+            final.usage.input_tokens * in_price
+            + final.usage.output_tokens * out_price
+            + cache_read_tokens * in_price * 0.1
+        ) / 1_000_000
         usage = Usage(
             input_tokens=final.usage.input_tokens,
             output_tokens=final.usage.output_tokens,
-            cache_read_tokens=getattr(final.usage, "cache_read_input_tokens", 0) or 0,
-            cost_usd=(final.usage.input_tokens * in_price + final.usage.output_tokens * out_price)
-            / 1_000_000,
+            cache_read_tokens=cache_read_tokens,
+            cost_usd=cost_usd,
         )
         yield DoneEvent(
             # Default REFUSAL, not END_TURN -- see _STOP_REASON_MAP's

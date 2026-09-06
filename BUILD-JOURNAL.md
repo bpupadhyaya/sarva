@@ -22878,5 +22878,49 @@ nothing" request) is still allowed. 1 new test, 951 -> 952 Python
 tests. Full suite: 940 passed, 1 skipped, 11 deselected. `ruff check`/
 `ruff format --check` both clean. `docs/memory.md`'s existing `top_k`
 validation narrative extended with this follow-up section.
+---
+
+## Round 429: `AnthropicProvider`'s own `cost_usd` treated every cache-read token as free
+
+Continuing the sweep, gave the provider adapters -- directly-reachable
+production code responsible for real cost tracking -- a fresh-eyes
+pass, this time on `AnthropicProvider`, the one adapter that actually
+attempts a real `cost_usd` figure rather than reporting `0.0`.
+
+**Confirmed** (via this adapter's own established duck-typed-fake-
+client substitute for a live API call -- this module has never been
+exercised against a real Anthropic key in this environment, named
+honestly in its own top-level docstring): `Usage.cache_read_tokens` is
+tracked in the same object `cost_usd` is computed for, but the cost
+formula only ever summed `input_tokens * in_price + output_tokens *
+out_price` -- cache-read tokens were counted for reporting but priced
+at zero. A request reporting 1000 cache-read tokens alongside 50 fresh
+input tokens produced the exact same `cost_usd` as an otherwise-
+identical request with no cache read at all. Not a rare pattern to
+trigger: prompt caching is the normal, encouraged way to keep a
+multi-turn agent loop's growing history cheap, so this under-reported
+real cost on an ordinary turn, not just a contrived one -- directly
+undermining `Budget`/`Spend`'s whole purpose of tracking what a run
+actually costs.
+
+**Fixed** by adding `cache_read_tokens * in_price * 0.1` to the cost
+sum -- Anthropic's own published pricing bills a cache read at a fixed
+10% of the base input-token price, constant across every current model
+tier, not something this fix had to guess. Honestly scoped: cache-
+*creation* tokens (billed at a 1.25x/2x premium depending on TTL)
+aren't tracked anywhere in `Usage` at all yet -- a separate, larger
+schema gap left open rather than folded into this narrower fix.
+`OpenAIProvider`/`GoogleProvider` both already report `cost_usd=0.0`
+unconditionally with their own "no verified pricing entry" comment
+explaining why -- this fix doesn't touch that honest-unknown choice,
+it only corrects the one adapter that already attempts a real number.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (identical `cost_usd`
+for a cached and an uncached request that should differ), restored. 1
+new test, 952 -> 953 Python tests. Full suite: 941 passed, 1 skipped,
+11 deselected. `ruff check`/`ruff format --check` both clean. `docs/
+providers.md`'s existing sibling-adapter-comparison narrative extended
+with this section.
 
 **Next:** continuing the hardening sweep, module by module.
