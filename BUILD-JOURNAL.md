@@ -22797,5 +22797,48 @@ message), restored. 1 new test, 949 -> 950 Python tests. Full suite:
 specific validation-consistency pattern in prose form, so none was
 extended, matching the established precedent for several other
 server.py field-validation fixes in this same file.
+---
+
+## Round 427: `_google_key()` reintroduced, one layer up, the exact truthiness bug `get_env()` was already fixed for
+
+Continuing the adversarial sweep, moved to `sarva.config`/`sarva.
+runtime` -- credential-handling code with a documented history of this
+project's own most-repeated bug class: "truthiness treats a legitimate
+empty/zero value as absent."
+
+**Confirmed live**: `sarva.runtime._google_key()` computed
+`get_env("GEMINI_API_KEY") or get_env("GOOGLE_API_KEY")`. `get_env()`
+itself was already fixed (see this journal's earlier rounds and
+`docs/multimodal.md`'s running list of this exact bug's occurrences) to
+correctly return `""` -- not fall through to a stale config value --
+for an explicitly-emptied env var, matching the ordinary `GEMINI_
+API_KEY= sarva ...` idiom used to clear an inherited/previously-saved
+key for one invocation. `_google_key()`'s `or`, built directly on top
+of that already-fixed function, reintroduced the identical bug one
+layer up: `""` is falsy, so an explicitly-cleared `GEMINI_API_KEY`
+silently fell through to `GOOGLE_API_KEY` anyway. Reproduced directly:
+`GEMINI_API_KEY=""` with a stale `GOOGLE_API_KEY` still set returned
+the stale key, not the empty string -- and since `build_providers()`
+uses this exact return value to construct a real, authenticated Google
+client, this wasn't just a boolean-availability quirk: a user
+explicitly trying to not use a Gemini/Google credential for one run
+would silently get one anyway.
+
+**Fixed** the same way `get_env()` fixed itself: `is not None` instead
+of truthiness, only falling back to `GOOGLE_API_KEY` when `GEMINI_
+API_KEY` is genuinely unset everywhere (neither a real env var nor a
+saved config entry), never when it was explicitly cleared. The reverse
+case (clearing `GOOGLE_API_KEY` while `GEMINI_API_KEY` is genuinely
+set) was never affected, since `GEMINI_API_KEY` is always checked
+first.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (returning the stale
+key instead of the explicit empty string), restored; confirmed the
+genuine-fallback case (GEMINI_API_KEY truly absent) still works. 1 new
+test, 950 -> 951 Python tests. Full suite: 939 passed, 1 skipped, 11
+deselected. `ruff check`/`ruff format --check` both clean. `docs/
+multimodal.md`'s existing running list of this exact bug class's
+occurrences extended with this fourth instance.
 
 **Next:** continuing the hardening sweep, module by module.

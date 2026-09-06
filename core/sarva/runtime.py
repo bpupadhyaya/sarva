@@ -156,7 +156,36 @@ def ollama_pulled_models(host: str = OLLAMA_HOST) -> set[str]:
 
 
 def _google_key() -> str | None:
-    return get_env("GEMINI_API_KEY") or get_env("GOOGLE_API_KEY")
+    # A real bug found by a fresh-eyes sweep: this reintroduces, one
+    # layer up, the exact "truthiness collapses an explicitly-empty
+    # value with genuinely absent" shape `get_env()` itself was already
+    # fixed for (see that function's own docstring), and the audio
+    # subsystem was fixed for twice. `GEMINI_API_KEY`/`GOOGLE_API_KEY`
+    # are aliases for the identical underlying credential; the ordinary,
+    # documented `NAME= sarva ...` idiom this project's own docstrings
+    # repeatedly describe (clearing an inherited or previously-saved key
+    # for one invocation) sets `GEMINI_API_KEY` to `""`, a real,
+    # explicitly-set value `get_env()` correctly returns as `""`, not
+    # `None`. The old `or` treated that `""` as falsy exactly like
+    # "unset," so it silently fell through to `GOOGLE_API_KEY` -- if a
+    # stale key was saved there (config file or a separate real env
+    # var), `build_providers()` (below) used it to construct a real,
+    # authenticated Google client, directly defeating the user's
+    # explicit intent to not use a Gemini/Google credential for this run.
+    # Confirmed live: `GEMINI_API_KEY=""` with a stale `GOOGLE_API_KEY`
+    # set returned the stale key instead of `""`. Fixed the same way
+    # `get_env()` fixed the identical shape for itself: `is not None`,
+    # not truthiness -- only fall back to `GOOGLE_API_KEY` when
+    # `GEMINI_API_KEY` is genuinely unset everywhere (neither a real env
+    # var nor a saved config entry), never when it was explicitly
+    # cleared. Clearing `GOOGLE_API_KEY` alone while `GEMINI_API_KEY` is
+    # genuinely set is unaffected either way, since `GEMINI_API_KEY` is
+    # always checked first and this function never reaches the second
+    # call in that case.
+    gemini = get_env("GEMINI_API_KEY")
+    if gemini is not None:
+        return gemini
+    return get_env("GOOGLE_API_KEY")
 
 
 def foundry_checkpoints_dir() -> Path | None:

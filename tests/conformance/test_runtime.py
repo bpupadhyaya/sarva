@@ -35,6 +35,37 @@ def _stub_bundle(directory, config_data: dict) -> None:
     (directory / "model.pt").write_bytes(b"")
 
 
+def test_google_key_respects_an_explicitly_cleared_gemini_api_key_over_a_stale_google_one(
+    monkeypatch, tmp_path
+):
+    # A real bug found by a fresh-eyes sweep: `_google_key()` used
+    # `get_env("GEMINI_API_KEY") or get_env("GOOGLE_API_KEY")` --
+    # reintroducing, one layer up, the exact "truthiness collapses an
+    # explicitly-empty value with genuinely absent" shape `get_env()`
+    # itself was already fixed for. The ordinary, documented
+    # `NAME= sarva ...` idiom (clearing an inherited/previously-saved
+    # key for one invocation) sets `GEMINI_API_KEY` to `""`, which
+    # `get_env()` correctly returns as `""`, not `None` -- but the old
+    # `or` treated that `""` as falsy exactly like "unset," silently
+    # falling through to a stale `GOOGLE_API_KEY`. Confirmed live: with
+    # `GEMINI_API_KEY=""` and a stale `GOOGLE_API_KEY` set,
+    # `build_providers()` would construct a real Google client using the
+    # stale key, directly defeating the user's explicit intent.
+    import sarva.config as config_module
+    import sarva.runtime as runtime
+
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GOOGLE_API_KEY", "stale-google-key-should-not-be-used")
+
+    assert runtime._google_key() == ""
+
+    # The other direction must still work: GEMINI_API_KEY genuinely
+    # unset (not just emptied) still falls back to GOOGLE_API_KEY.
+    monkeypatch.delenv("GEMINI_API_KEY")
+    assert runtime._google_key() == "stale-google-key-should-not-be-used"
+
+
 def test_ollama_model_is_unavailable_when_reachable_but_not_the_pulled_tag(monkeypatch):
     # The real scenario this session hit directly: Ollama running, but
     # only a small model pulled -- NOT the registry's registered

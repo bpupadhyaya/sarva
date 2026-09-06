@@ -476,7 +476,15 @@ treats a legitimate empty/zero value as absent/failed" shape as the
 duration bug directly above, and as two other fixes elsewhere in this
 project (`_decode_audio_isolated`'s stdout check, `sarva.config.
 get_env()`'s env-var check) — reintroduced, unnoticed, one branch up in
-this same method.
+this same method. A much later fresh-eyes sweep of a completely
+different module found this exact shape a fourth time, one layer
+*above* `get_env()` itself rather than beside it: `sarva.runtime.
+_google_key()`'s `get_env("GEMINI_API_KEY") or get_env("GOOGLE_API_KEY")`
+treated an explicitly-emptied `GEMINI_API_KEY` (the same `NAME=
+sarva ...` idiom this project's own docs describe for clearing a
+saved/inherited key for one invocation) as equivalent to "unset," and
+silently fell back to a stale `GOOGLE_API_KEY` -- fixed the same way,
+with an explicit `is not None` check instead of `or`.
 
 It's also the direct downstream continuation of the audio-decode
 isolation fix (see the packaging doc's own per-bug narrative for
