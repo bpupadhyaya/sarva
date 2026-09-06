@@ -845,6 +845,63 @@ appears. Verified by reverting and watching the new test fail with the
 literal old bug's own shape — `is_error=False`, empty output, the full
 unbounded duration elapsed. 1 new test, 802 → 803 Python tests.
 
+### A fourth, more severe gap in the same kill path — `os.killpg` never reaches a child that detaches into its own process group
+
+A much later adversarial pass, applying the same "actually attack it,
+don't just trust the isolation" lens this project's RL sandbox work
+(`sarva_foundry.rl.environment`) has repeatedly used, targeted the kill
+mechanism the three fixes above all rely on. `os.killpg` reaches every
+process still a *member* of the shell's own process group — but
+membership isn't permanent. Any child can call `os.setsid()` (pure
+Python stdlib, no external `setsid` binary required — a single line
+inside `python3 -c "..."` is enough) to detach itself into a brand-new
+session and process group at any moment, after which `os.killpg`
+structurally cannot reach it, regardless of how the shell itself was
+spawned.
+
+Confirmed live: `python3 -c "import os,time; os.setsid(); ..." & sleep
+0.5` — an ordinary backgrounding shell idiom, not a contrived syntax —
+kept running and writing to a file a full second after this tool
+reported `"command timed out ... and was killed"`. That's a *false*
+"killed" claim, worse than reporting nothing: for a `destructive=True`
+tool whose entire confirmation gate exists to stop unwanted side
+effects from running unattended, a caller reading "killed" has every
+reason to believe the side effect actually stopped.
+
+The natural fix — walk the real process table by PID lineage (parent-
+child, which a process cannot unilaterally escape the way it can escape
+its process group) and kill whatever's found — has a subtler problem
+that only showed up when verifying it live: the shell's own foreground
+work in the repro above finishes and the shell itself *exits* at
+around 0.5 seconds, well before any timeout fires. The instant it
+exits, the kernel reparents its still-running detached child to init,
+permanently discarding the parent-child link a *post*-timeout lookup
+would need — confirmed directly: a one-shot walk performed only once
+the timeout actually fired found nothing, because by then the escaped
+child's parent PID was already `1`, not the long-dead shell's. This is
+the common case for this exact attack shape, not a rare corner: the
+whole point of backgrounding a detached job is for the parent to exit
+cleanly while the job survives, so the shell finishing early is the
+expected behavior, not an edge case to special-case around.
+
+Fixed by observing the link continuously instead of looking it up
+after the fact: a background task polls the process table every 0.25s
+for the lifetime of the shell command, accumulating every descendant
+PID it ever sees into a set — so even once the shell exits and the
+kernel discards the live parent-child relationship, this project
+already recorded the PID while the relationship still existed. The
+kill path now kills every PID in that accumulated set explicitly, in
+addition to the existing `os.killpg` (which still catches ordinary,
+non-detached pipeline children directly, no polling needed for those).
+The common case — a command with no detaching children — costs at most
+one or two extra `ps` calls before the polling task is cancelled.
+Verified live: the same repro's detached child, checked by real PID
+(`os.kill(pid, 0)`), is confirmed dead within the tool's own timeout
+window. Verified by reverting and watching the new test fail with the
+literal old bug's own shape: `DID NOT RAISE ProcessLookupError` — the
+escaped process still answering to its own PID after the tool claimed
+it was killed. 1 new test, 947 → 948 Python tests.
+
 ### Two destructive calls sharing the same `tool_call_id` could let a declined one run anyway — the confirm-gate's own key, not a tool bug
 
 **Worse than any crash in this file: a declined destructive call

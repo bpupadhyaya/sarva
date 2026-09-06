@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import os
 import shutil
@@ -382,7 +383,75 @@ class EditFileTool:
         )
 
 
-async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+def _all_descendant_pids(root_pid: int) -> list[int]:
+    """Returns every PID whose parent-child chain traces back to
+    `root_pid`, found by walking the real, live process table via `ps
+    -axo pid=,ppid=` (portable across the BSD `ps` on macOS and the
+    GNU `ps` on Linux -- no new dependency). Exists specifically because
+    process-GROUP membership (what `os.killpg` below reaches) and
+    parent-child lineage (what this walks) are two independent things:
+    a process can freely detach itself from its process group and
+    session at any time via `os.setsid()` -- pure Python stdlib, no
+    external `setsid` binary required -- but it cannot detach itself
+    from its own parent PID. See `_kill_process_group`'s own docstring
+    for the real escape this closes."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    descendants: list[int] = []
+    frontier = [root_pid]
+    while frontier:
+        next_frontier: list[int] = []
+        for pid in frontier:
+            for child in children.get(pid, []):
+                descendants.append(child)
+                next_frontier.append(child)
+        frontier = next_frontier
+    return descendants
+
+
+async def _track_descendants(root_pid: int, seen: set[int]) -> None:
+    """Continuously records every descendant PID `root_pid` (the shell)
+    ever spawns, polling every 0.25s for as long as this task runs --
+    NOT a one-shot lookup, and that's the whole point. A backgrounded
+    child that detaches via `os.setsid()` keeps its PPID pointed at the
+    shell only until the shell itself exits; typical shell scripts (`cmd
+    & echo done`) finish their own foreground work and exit within a
+    fraction of a second, at which point the kernel reparents the still-
+    running detached child to init and the original parent-child link
+    `_kill_process_group` needs is gone for good -- a lookup performed
+    AFTER the fact (i.e. only once a timeout/cap actually fires) is
+    already too late in exactly this, the most natural shape of this
+    attack, confirmed live: the shell in a real repro exited at ~0.5s
+    while the detached child it spawned kept running past the tool's
+    2s timeout, and a post-timeout-only walk found nothing, since by
+    then the child's PPID was already 1, not this shell's PID. Started
+    as a background task for the lifetime of every `run_shell` call and
+    cancelled once the command finishes; the overwhelmingly common case
+    (a command with no detaching children, exiting on its own) costs at
+    most one or two extra `ps` calls before cancellation."""
+    try:
+        while True:
+            seen.update(_all_descendant_pids(root_pid))
+            await asyncio.sleep(0.25)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _kill_process_group(proc: asyncio.subprocess.Process, extra_pids: set[int]) -> None:
     """Kills the WHOLE process group the shell command runs in, not just
     the shell interpreter `proc` itself -- a real deadlock found while
     verifying the size-cap fix below, before it ever shipped: a shell
@@ -398,7 +467,32 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     (set at the call site) puts the shell in its own process group at
     spawn time specifically so this function can reach every process in
     it via `os.killpg`, not just the one PID this project happens to be
-    tracking."""
+    tracking.
+
+    A real, more severe bug found by a later adversarial pass, closed by
+    `extra_pids` below: `os.killpg` only reaches processes still IN that
+    process group. A backgrounded child that calls `os.setsid()` --
+    pure Python stdlib, requires no external `setsid` binary, so
+    `python3 -c "import os; os.setsid(); ..." &` is enough -- detaches
+    itself into a brand-new session and process group the instant it
+    runs, fully escaping `os.killpg`'s reach. Confirmed live: such a
+    command kept running and writing to a marker file a full second
+    after this tool reported "command timed out ... and was killed" --
+    a false "killed" claim, worse than no claim at all, for a
+    `destructive=True` tool whose entire confirmation gate exists to
+    stop unwanted side effects from running unattended. `extra_pids` is
+    the accumulated output of `_track_descendants`, which (see its own
+    docstring) has to observe the shell's real children WHILE it's
+    still alive, since a post-hoc walk from here is provably too late
+    once the shell itself has already exited and orphaned them. Killed
+    explicitly by PID first, then the process group killed as before
+    for defense in depth against any ordinary (non-detached) pipeline
+    child this doesn't need to catch specially."""
+    for pid in extra_pids | set(_all_descendant_pids(proc.pid)):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already exited on its own before this walk reached it
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except ProcessLookupError:
@@ -455,74 +549,38 @@ class RunShellTool:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        # `_SHELL_TIMEOUT_SECONDS` is meant to bound the WHOLE command,
-        # not just the output read below -- deadline-based so the later
-        # `proc.wait()` gets whatever's left of the same budget, not a
-        # fresh one.
-        deadline = asyncio.get_running_loop().time() + _SHELL_TIMEOUT_SECONDS
+        # See `_track_descendants`'s own docstring for why this has to run
+        # continuously alongside the command, not get looked up only if/when
+        # a kill actually becomes necessary: a detached (`os.setsid()`'d)
+        # child's link back to this shell is gone forever the instant the
+        # shell itself exits, which routinely happens well before any
+        # timeout/cap fires.
+        descendant_pids: set[int] = set()
+        tracker = asyncio.create_task(_track_descendants(proc.pid, descendant_pids))
         try:
-            stdout, truncated = await asyncio.wait_for(
-                _read_stream_bounded(proc.stdout, _MAX_SHELL_OUTPUT_BYTES),
-                timeout=_SHELL_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            # A real bug found by actually running a long-lived shell
-            # command against a shortened timeout: asyncio.wait_for()
-            # only cancels the *awaiting* communicate() call -- it never
-            # touches the child process itself, confirmed directly with
-            # a real `sleep`-then-`echo` command still alive (and its
-            # trailing side effect still completing) seconds after the
-            # "timeout." That matters specifically because this tool is
-            # `destructive=True` -- the whole confirmation gate exists to
-            # stop unwanted side effects, and a silent timeout defeated
-            # it by leaving the command running unattended regardless of
-            # what the user actually approved.
-            await _kill_process_group(proc)
-            return ToolResultBlock(
-                tool_call_id="",
-                content=[
-                    TextBlock(
-                        text=f"command timed out after {_SHELL_TIMEOUT_SECONDS}s and was killed"
-                    )
-                ],
-                is_error=True,
-            )
-        if truncated:
-            # The same "don't leave an unwanted side effect running
-            # unattended" reasoning as the timeout branch above: once
-            # we've decided to stop reading, leaving the process alive
-            # to keep producing output nobody will see is exactly the
-            # gap that branch already exists to close, just reached via
-            # a size cap instead of a time cap.
-            await _kill_process_group(proc)
-        else:
-            # A real bug found by a fresh-eyes sweep: `_read_stream_
-            # bounded` returns as soon as the stdout PIPE hits EOF --
-            # which happens the instant every process holding the
-            # write end closes its stdout/stderr, an ordinary shell
-            # idiom (`exec 1>&- 2>&-`, or any command that redirects
-            # away its own fds and keeps running -- backgrounding/
-            # daemonizing a job is the common real case, not a
-            # contrived one). That left `_SHELL_TIMEOUT_SECONDS`
-            # bounding only the READ, not the command itself: `await
-            # proc.wait()` here had no timeout at all, so a command
-            # that closed its fds early but kept running was left
-            # completely unbounded -- confirmed live, a command
-            # configured against a 2s timeout that closed its fds then
-            # slept for 8s ran the full 8s and returned `is_error=False`
-            # with no indication the timeout never engaged. The same
-            # "a destructive tool's own confirmation gate exists to
-            # stop unwanted side effects, and a defeated timeout leaves
-            # it running unattended regardless of what was approved"
-            # reasoning as the read-timeout branch above -- `proc.wait()`
-            # now shares the exact same overall deadline the read
-            # already started counting down from, not a fresh budget.
+            # `_SHELL_TIMEOUT_SECONDS` is meant to bound the WHOLE command,
+            # not just the output read below -- deadline-based so the later
+            # `proc.wait()` gets whatever's left of the same budget, not a
+            # fresh one.
+            deadline = asyncio.get_running_loop().time() + _SHELL_TIMEOUT_SECONDS
             try:
-                await asyncio.wait_for(
-                    proc.wait(), timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+                stdout, truncated = await asyncio.wait_for(
+                    _read_stream_bounded(proc.stdout, _MAX_SHELL_OUTPUT_BYTES),
+                    timeout=_SHELL_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
-                await _kill_process_group(proc)
+                # A real bug found by actually running a long-lived shell
+                # command against a shortened timeout: asyncio.wait_for()
+                # only cancels the *awaiting* communicate() call -- it never
+                # touches the child process itself, confirmed directly with
+                # a real `sleep`-then-`echo` command still alive (and its
+                # trailing side effect still completing) seconds after the
+                # "timeout." That matters specifically because this tool is
+                # `destructive=True` -- the whole confirmation gate exists to
+                # stop unwanted side effects, and a silent timeout defeated
+                # it by leaving the command running unattended regardless of
+                # what the user actually approved.
+                await _kill_process_group(proc, descendant_pids)
                 return ToolResultBlock(
                     tool_call_id="",
                     content=[
@@ -532,6 +590,57 @@ class RunShellTool:
                     ],
                     is_error=True,
                 )
+            if truncated:
+                # The same "don't leave an unwanted side effect running
+                # unattended" reasoning as the timeout branch above: once
+                # we've decided to stop reading, leaving the process alive
+                # to keep producing output nobody will see is exactly the
+                # gap that branch already exists to close, just reached via
+                # a size cap instead of a time cap.
+                await _kill_process_group(proc, descendant_pids)
+            else:
+                # A real bug found by a fresh-eyes sweep: `_read_stream_
+                # bounded` returns as soon as the stdout PIPE hits EOF --
+                # which happens the instant every process holding the
+                # write end closes its stdout/stderr, an ordinary shell
+                # idiom (`exec 1>&- 2>&-`, or any command that redirects
+                # away its own fds and keeps running -- backgrounding/
+                # daemonizing a job is the common real case, not a
+                # contrived one). That left `_SHELL_TIMEOUT_SECONDS`
+                # bounding only the READ, not the command itself: `await
+                # proc.wait()` here had no timeout at all, so a command
+                # that closed its fds early but kept running was left
+                # completely unbounded -- confirmed live, a command
+                # configured against a 2s timeout that closed its fds then
+                # slept for 8s ran the full 8s and returned `is_error=False`
+                # with no indication the timeout never engaged. The same
+                # "a destructive tool's own confirmation gate exists to
+                # stop unwanted side effects, and a defeated timeout leaves
+                # it running unattended regardless of what was approved"
+                # reasoning as the read-timeout branch above -- `proc.wait()`
+                # now shares the exact same overall deadline the read
+                # already started counting down from, not a fresh budget.
+                try:
+                    await asyncio.wait_for(
+                        proc.wait(),
+                        timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+                    )
+                except TimeoutError:
+                    await _kill_process_group(proc, descendant_pids)
+                    return ToolResultBlock(
+                        tool_call_id="",
+                        content=[
+                            TextBlock(
+                                text=f"command timed out after {_SHELL_TIMEOUT_SECONDS}s "
+                                "and was killed"
+                            )
+                        ],
+                        is_error=True,
+                    )
+        finally:
+            tracker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tracker
         text = stdout.decode(errors="replace")
         if truncated:
             text += f"\n\n[truncated to {_MAX_SHELL_OUTPUT_BYTES} bytes and killed]"

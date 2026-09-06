@@ -22630,5 +22630,74 @@ again. 1 new test, 946 -> 947 Python tests. Full suite (`core/ tests/
 foundry/ examples/`): 935 passed, 1 skipped, 11 deselected. `ruff
 check`/`ruff format --check` both clean. `docs/memory.md`'s existing
 `_sanitize()` fix narrative extended with a matching new section.
+---
+
+## Round 424: a fourth, more severe gap in `RunShellTool`'s own kill path -- `os.killpg` can be escaped entirely by a child that detaches via `os.setsid()`
+
+Continuing the adversarial/attacker-mindset sweep, turned to the
+production agent's own `run_shell`/`run_code` execution tools --
+already the subject of three documented timeout/kill fixes, and a
+natural place to apply the exact lens that found six real bypasses in
+the RL sandbox this session: don't just trust that the existing
+isolation holds, attack it directly.
+
+**Confirmed live, reproducible every time**: a completely ordinary
+backgrounding shell idiom -- `python3 -c "import os,time; os.setsid();
+..." & sleep 0.5` -- detaches its background child into a brand-new
+process group and session via a single stdlib call (no external
+`setsid` binary needed). `_kill_process_group`'s `os.killpg` only
+reaches processes still IN the shell's original process group;
+`os.setsid()` removes the child from it. The tool reported `"command
+timed out ... and was killed"` while the detached child kept running
+and writing to a file a full second later -- a false "killed" claim,
+worse than no claim at all, for a `destructive=True` tool whose entire
+confirmation gate exists to stop unwanted side effects from running
+unattended.
+
+**A second, subtler problem found while building the fix, not a second
+exploit**: the obvious fix -- walk the real process table by PID
+lineage after a kill is triggered, since a process can't unilaterally
+escape its own parent-child chain the way it can escape its process
+group -- doesn't work as a one-shot, post-timeout lookup. In the exact
+repro above, the shell's own foreground work finishes and the shell
+itself EXITS at ~0.5s, well before the 1-2s timeout ever fires. The
+instant it exits, the kernel reparents the still-running detached child
+to init, permanently discarding the parent-child link a post-hoc walk
+needs -- confirmed directly: a one-shot walk performed only at kill
+time found nothing, since by then the escaped child's PPID was already
+`1`. This is the COMMON case for this attack shape, not a rare corner:
+the whole point of detaching a background job is for the parent to
+exit cleanly while the job survives.
+
+**Fixed by observing the link continuously instead of looking it up
+after the fact**: a background `asyncio` task polls the process table
+(via `ps -axo pid=,ppid=`, portable across macOS/Linux, no new
+dependency) every 0.25s for the lifetime of every `run_shell` call,
+accumulating every descendant PID ever seen into a set -- so even once
+the shell exits and the OS discards the live relationship, the PID was
+already recorded while it still existed. The kill path now kills every
+accumulated PID explicitly by `os.kill`, in addition to -- not instead
+of -- the existing `os.killpg`, which still directly catches ordinary,
+non-detached pipeline children with no polling needed. The overwhelming
+common case (a command with no detaching children) costs at most one or
+two extra `ps` calls before the polling task is cancelled.
+
+**Verified with a genuine revert-and-check**: the new test checks the
+escaped child by its own real PID (`os.kill(pid, 0)`), not just marker-
+file staleness -- an earlier draft of the test using file-write recency
+alone produced an ambiguous result and was rewritten before being
+trusted. Reverted the fix and watched the test fail with the literal
+old bug's own shape: `DID NOT RAISE ProcessLookupError`. Restored, all
+6 `run_shell`-related tests pass. 1 new test, 947 -> 948 Python tests.
+Full suite: 936 passed, 1 skipped, 11 deselected. `ruff check`/`ruff
+format --check` both clean. `docs/agent-loop.md`'s existing
+`RunShellTool` kill-path narrative extended with a fourth section.
+`RunCodeTool`'s own container-based kill path (`_kill_container`) is
+not affected by this exact escape -- a `setsid()` call inside the
+container can't reach outside the container's own PID namespace the
+way it can escape a bare process group on the host -- so it was left
+unchanged; this round's live testing of `run_code` itself was limited
+by no Docker/Podman runtime being available on this machine, named
+honestly rather than assumed clean.
 
 **Next:** continuing the hardening sweep, module by module.

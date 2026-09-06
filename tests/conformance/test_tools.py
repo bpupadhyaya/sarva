@@ -559,6 +559,55 @@ async def test_run_shell_kills_the_whole_pipeline_not_just_the_shell(ctx, monkey
     assert result.is_error is True
 
 
+@pytest.mark.asyncio
+async def test_run_shell_timeout_kills_a_child_that_detaches_via_os_setsid(ctx, monkeypatch):
+    # A real, more severe bug found by a later adversarial pass on the
+    # already-fixed timeout/pipeline-kill logic above: `_kill_process_
+    # group`'s `os.killpg` only reaches processes still IN the shell's
+    # own process group. A backgrounded child that calls `os.setsid()`
+    # -- pure Python stdlib, no external `setsid` binary required --
+    # detaches itself into a brand-new session and process group the
+    # instant it runs, fully escaping `os.killpg`'s reach. Confirmed
+    # live: such a command kept running (writing to a file) a full
+    # second after this tool reported "timed out ... and was killed" --
+    # a false "killed" claim, worse than no claim at all, for a
+    # `destructive=True` tool whose entire confirmation gate exists to
+    # stop unwanted side effects from running unattended. Realistic, not
+    # contrived: the shell's own foreground work (the `sleep 0.5` below)
+    # finishes and the shell exits well before the timeout fires, which
+    # is precisely what makes a naive post-timeout process-tree lookup
+    # too late -- the kernel has already reparented the detached child
+    # to init by the time any kill logic runs, discarding the
+    # parent-child link needed to find it. The fix has to observe that
+    # link continuously, while the shell is still alive, not look it up
+    # after the fact.
+    monkeypatch.setattr(tools_module, "_SHELL_TIMEOUT_SECONDS", 1)
+    shell = RunShellTool()
+    pidfile = ctx.workdir + "/escaped.pid"
+    marker = ctx.workdir + "/escaped-marker.txt"
+    command = (
+        'python3 -c "'
+        "import os,time; os.setsid(); "
+        f"open({pidfile!r}, 'w').write(str(os.getpid())); "
+        f"[(open({marker!r}, 'w').write(str(time.time())), time.sleep(1)) for _ in range(30)]"
+        '" & sleep 0.5'
+    )
+
+    result = await shell.run({"command": command}, ctx)
+
+    assert result.is_error
+    assert "timed out" in result.content[0].text
+
+    # Give the detached child's own 1s write loop time to prove whether
+    # it's still alive, then check by real PID, not just marker age --
+    # the decisive, unambiguous proof this test needs.
+    await asyncio.sleep(2)
+    assert os.path.exists(pidfile), "the detaching child never even started"
+    escaped_pid = int(Path(pidfile).read_text().strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(escaped_pid, 0)
+
+
 class _FakeStdout:
     """A minimal async stand-in for `asyncio.StreamReader` -- only
     `_read_stream_bounded`'s own `await stream.read(n)` call needs to
