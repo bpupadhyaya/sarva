@@ -1144,6 +1144,39 @@ def test_websocket_with_a_non_string_model_fails_cleanly_not_a_bare_disconnect(m
     assert events[-1]["state"] == "failed"
 
 
+def test_websocket_with_a_non_string_message_fails_cleanly_with_an_actionable_detail(monkeypatch):
+    # A real bug found by a fresh-eyes sweep, the identical sibling-field
+    # gap just closed for `model` immediately above -- the one top-level
+    # field in this handler that never got its own explicit type check.
+    # `payload.get("message", "")` only substitutes the default for an
+    # ABSENT key: `{"message": null}` passes straight through as `None`
+    # into `AgentLoop.run(message, ...)`, several frames into
+    # `Message(content=[TextBlock(text=message)])`. Confirmed live before
+    # this fix: it DID fail cleanly (no crash, no bare disconnect) purely
+    # by accident -- pydantic's own `ValidationError` happens to subclass
+    # `ValueError`, landing in this handler's existing outer `except
+    # (ValueError, TypeError)` -- but the `detail` text was a raw,
+    # multi-line pydantic trace naming `TextBlock` and linking to
+    # pydantic's own docs site, an internal implementation detail no
+    # caller of this API should ever see, unlike every sibling field's
+    # clean "X must be a Y, got Z" message.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": None, "auto": True})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    state_changed = next(e for e in events if e["type"] == "state_changed" and e.get("detail"))
+    assert state_changed["detail"] == "message must be a string, got NoneType"
+    assert "pydantic" not in state_changed["detail"].lower()
+    assert events[-1]["state"] == "failed"
+
+
 def test_websocket_with_a_corrupted_config_file_fails_cleanly_not_a_bare_disconnect(monkeypatch):
     # The WS counterpart to the same real bug just fixed for /chat: a
     # corrupted ~/.sarva/config.json made build_router() raise

@@ -22762,5 +22762,40 @@ OSError`), restored. 1 new test, 948 -> 949 Python tests. Full suite:
 937 passed, 1 skipped, 11 deselected. `ruff check`/`ruff format
 --check` both clean. `docs/agent-loop.md`'s existing atomic-write
 narrative extended with this section.
+---
+
+## Round 426: `/ws/chat`'s `message` field was the one sibling that never got the raw-JSON type-validation fix already applied to `session`/`auto`/`verify`/`model`
+
+Continuing the adversarial sweep, gave `sarva.server.app`'s `ws_chat`
+handler -- already the subject of many documented raw-JSON validation
+fixes in this journal -- another fresh-eyes pass, checking each
+top-level field against the "does this have its own explicit type
+check" bar the others already meet.
+
+**Confirmed live**: `payload.get("message", "")` only substitutes the
+default for an ABSENT key -- `{"message": null}` (or any other
+non-string JSON value) passes straight through as `None`, several
+frames into `AgentLoop.run(message, ...)` -> `Message(content=
+[TextBlock(text=message)])`. It did fail cleanly before this fix (no
+crash, no bare disconnect) -- but only by accident: pydantic's own
+`ValidationError` happens to subclass `ValueError`, landing in this
+handler's existing outer `except (ValueError, TypeError)`. The `detail`
+text the client actually saw was a raw, multi-line pydantic trace
+naming `TextBlock` and linking to pydantic's own docs site -- an
+internal implementation detail, unlike every sibling field's clean "X
+must be a Y, got Z" message (`model`'s own identical fix sits three
+lines above this one).
+
+**Fixed** the same way, at the point `message` is first used, instead
+of relying on an accidental downstream `ValueError` subclass
+relationship three layers of abstraction away. Verified with a genuine
+revert-and-check: reverted, watched the new test fail with the literal
+old bug's own shape (the raw pydantic trace instead of the clean
+message), restored. 1 new test, 949 -> 950 Python tests. Full suite:
+938 passed, 1 skipped, 11 deselected. `ruff check`/`ruff format
+--check` both clean. No existing docs/*.md narrative covers this
+specific validation-consistency pattern in prose form, so none was
+extended, matching the established precedent for several other
+server.py field-validation fixes in this same file.
 
 **Next:** continuing the hardening sweep, module by module.

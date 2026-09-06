@@ -614,6 +614,40 @@ def create_app() -> FastAPI:
                             # runs; /ws/chat parses raw, schema-less JSON,
                             # so nothing validated this until now.
                             raise TypeError(f"model must be a string, got {type(model).__name__}")
+                        if not isinstance(message, str):
+                            # A real bug found by a fresh-eyes sweep, the
+                            # identical sibling-field gap just closed for
+                            # `model` immediately above -- the one top-level
+                            # field in this handler that never got its own
+                            # explicit check. `payload.get("message", "")`
+                            # only substitutes the default for an ABSENT
+                            # key: `{"message": null}` (or any other
+                            # non-string JSON value) passes straight through
+                            # as `None`, into `AgentLoop.run(message, ...)`,
+                            # several frames into `Message(content=
+                            # [TextBlock(text=message)])`. Confirmed live: a
+                            # real WebSocket session sending `{"message":
+                            # null}` DID fail cleanly (state_changed +
+                            # run_done, no crash, no hang) purely by
+                            # accident -- pydantic's own `ValidationError`
+                            # happens to subclass `ValueError`, so it lands
+                            # in this same function's outer `except
+                            # (ValueError, TypeError)` -- but the `detail`
+                            # text the client actually saw was a raw,
+                            # multi-line pydantic trace naming `TextBlock`
+                            # and linking to pydantic's own docs site, an
+                            # internal implementation detail no caller of
+                            # this API should ever see, directly
+                            # contradicting the clean, actionable "X must be
+                            # a Y, got Z" shape every sibling field in this
+                            # handler already gets. Fixed the same way, at
+                            # the earliest point this value is used, instead
+                            # of relying on an accidental downstream
+                            # ValueError subclass relationship three layers
+                            # of abstraction away.
+                            raise TypeError(
+                                f"message must be a string, got {type(message).__name__}"
+                            )
                         # asyncio.to_thread: the WS counterpart to the
                         # identical fix just applied to /chat -- see that
                         # call site's own comment for the full history of
