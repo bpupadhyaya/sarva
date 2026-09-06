@@ -22525,3 +22525,59 @@ would share file descriptors while staying invisible to
 process/container isolation already named as deferred work.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 422: a sixth reward-hacking bypass -- forking a child process evades the fifth bug's thread-only detection; and a real performance bug found while fixing it
+
+Prompted directly by the user asking whether Sarva is production-ready:
+rather than treat round 417's own honestly-named remaining gap ("a raw
+`os.fork()`'d process... invisible to `threading.active_count()`") as
+untouchable, tested it directly instead of leaving it as a disclaimer.
+
+**Confirmed live, 20/20 reproducible**: the identical frame-introspection
+theft from round 417, run inside a forked child instead of a thread,
+evades `threading.active_count() > 1` entirely -- a forked process
+shares the parent's file descriptor table (the same property that made
+the thread exploit work) but is structurally invisible to a check that
+only sees threads of the current process.
+
+**Fixed by extending the same detection to the sibling primitive**:
+`os.waitpid(-1, os.WNOHANG)`, looped right after the thread check, reaps
+every already-exited child while treating `(0, 0)` (a child that exists
+and hasn't exited yet) as the identical disqualifying signal. Not
+generated on Windows, where `os.fork` doesn't exist at all.
+
+**A real, separate bug found while verifying THIS fix, not a second
+exploit**: reusing the fifth bug's own `sys.exit(1)` response worked
+correctly but took ~5 seconds (the full test timeout) per rejected
+attempt instead of milliseconds -- the orphaned forked child inherits
+its own copy of the driver's stdout pipe, and merely exiting the driver
+leaves that still-blocked child holding the pipe open indefinitely,
+so `evaluate_submission`'s own stdout reader never sees EOF and silently
+degrades to "wait out the full timeout" instead of failing fast. A
+thread left alive by the fifth bug's own exploit never had this problem,
+since exiting a process closes every fd it holds regardless of its
+threads' state -- forked child processes have their own independent fd
+table copies, threads don't. Fixed by killing the whole process group
+(`os.killpg(os.getpgrp(), signal.SIGKILL)`) instead of a bare
+`sys.exit(1)`, reachable because the driver is already its own process
+group leader at spawn time.
+
+**Verified with a genuine revert-and-check, twice over**: reverted the
+fork-check entirely and watched the new test fail with the exact
+predicted shape (`passed=True, reward=1.0`); restored it but reverted
+just the `killpg` back to `sys.exit(1)` and watched the test's own new
+timing assertion (`elapsed < 2.0`) fail with the literal old bug's shape
+(~5s); restored the full fix and confirmed both pass again. 1 new test
+(with a real timing assertion, not just a correctness one), 934
+selected (933 -> 934). Full suite: 934 passed, 1 skipped. `ruff
+check`/`ruff format --check` both clean. Both the module's own top-level
+docstring and `docs/foundry/training.md`'s existing narrative updated:
+the "raw fork()'d process" gap named in round 417 is now closed, and a
+new, narrower honest disclaimer takes its place -- these two fixes close
+the background-execution primitives found so far (threads and forked
+processes), not the whole class; only genuine process/container
+isolation closes that for good.
+
+**Next:** continuing the hardening sweep, module by module.

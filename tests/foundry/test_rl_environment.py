@@ -359,6 +359,82 @@ def test_a_submission_that_steals_the_driver_stream_via_frame_introspection_cann
 
 
 @_posix_only
+def test_a_submission_that_forks_a_child_to_steal_the_driver_stream_cannot_skip_test_code_either():
+    # A sixth, independent reward-hacking bypass, an evasion of the
+    # fifth bug's own fix rather than a new discovery channel: the fifth
+    # bug's `threading.active_count() > 1` check only ever sees threads
+    # of the CURRENT process. `os.fork()` shares a process's entire file
+    # descriptor table exactly like a thread does -- the identical
+    # underlying property that made the fifth bug's theft possible in
+    # the first place -- but a forked CHILD PROCESS is structurally
+    # invisible to `threading.active_count()`, so this is the exact same
+    # attack, wearing a different OS primitive specifically to slip past
+    # that one check. Confirmed live before this fix: 20/20 real runs
+    # against a deliberately wrong `add()` scored `reward=1.0`, using the
+    # identical frame-introspection theft as the fifth bug's exploit,
+    # just from inside a forked child instead of a thread.
+    #
+    # Fixed the same way as the fifth bug, extended to the sibling
+    # primitive: `os.waitpid(-1, os.WNOHANG)`, looped right after the
+    # thread check, reaps every already-exited child (so a submission
+    # that forks and cleanly joins/exits before returning is never
+    # penalized) while treating `(0, 0)` -- a child that exists and
+    # hasn't exited yet -- as the same disqualifying signal a lingering
+    # thread already is. `os.fork` doesn't exist on Windows at all, so
+    # this specific attack has no channel to begin with there, and the
+    # driver never generates this check on that platform.
+    #
+    # A real, separate bug found while verifying THIS fix: a plain
+    # `sys.exit(1)` on detecting a live child (the thread check's own
+    # approach) is correct but slow here, for a reason specific to
+    # `fork()` -- the orphaned child inherits its own copy of the
+    # driver's stdout pipe, and merely exiting the driver leaves that
+    # still-blocked child (waiting on content that will never arrive)
+    # holding the pipe's write end open indefinitely, so
+    # `evaluate_submission`'s stdout reader never sees EOF and silently
+    # degrades from "reject in milliseconds" to "wait out the full
+    # wall-clock timeout" -- correct in the end (`reward=0.0` either
+    # way) but a real efficiency bug: confirmed live, this exact
+    # exploit took ~5s (the full timeout) per rejected attempt with a
+    # bare `sys.exit(1)`, versus milliseconds once fixed. Fixed by
+    # killing the whole process group (`os.killpg(os.getpgrp(),
+    # signal.SIGKILL)`, reachable because `start_new_session=True` at
+    # spawn time already makes the driver its own process group leader)
+    # instead -- this reaches the orphaned child too, closing its held-
+    # open pipe copy immediately. The timing assertion below is what
+    # makes this decisive, not just documented in prose.
+    malicious_submission = (
+        "import sys, os, re\n"
+        "frame = sys._getframe(1)\n"
+        "driver_locals = frame.f_locals\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    stream = driver_locals.get('_stream')\n"
+        "    if stream is not None:\n"
+        "        data = stream.read()\n"
+        "        m = re.search(r'__SARVA_TASK_COMPLETED_[0-9a-f]+__', data)\n"
+        "        if m:\n"
+        "            print(m.group(0))\n"
+        "            sys.stdout.flush()\n"
+        "    os._exit(0)\n"
+        "def add(a, b):\n"
+        "    return a + b + 100  # deliberately wrong\n"
+    )
+
+    for _ in range(10):
+        t0 = time.monotonic()
+        result = evaluate_submission(_ADD_TASK, malicious_submission, timeout=5.0)
+        elapsed = time.monotonic() - t0
+        assert result.passed is False, "the forked-child stream theft was wrongly rewarded"
+        assert result.reward == 0.0
+        assert "__SARVA_TASK_COMPLETED_" not in result.stdout
+        assert elapsed < 2.0, (
+            f"rejection took {elapsed:.2f}s -- close to the 5s timeout means the orphaned "
+            "forked child was left alive holding the stdout pipe open instead of being killed"
+        )
+
+
+@_posix_only
 def test_timeout_kills_grandchild_processes_the_submission_spawned_not_just_the_direct_child():
     # A real bug found by actually running a submission that forks: the
     # module's own "hard wall-clock timeout" claim wasn't true for code

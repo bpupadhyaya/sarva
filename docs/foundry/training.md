@@ -675,11 +675,53 @@ since sending it is gated on this very check passing first. Verified
 live: the existing raw-fd-race test still passes with the real test's
 `AssertionError` genuinely firing (proving its harmless thread finished
 in time), while this exploit is rejected 10/10 with the real test never
-sent at all. Not provably complete, named honestly: a raw `os.fork()`'d
-process on POSIX would share the same file descriptors while staying
-invisible to `threading.active_count()` — closing that, like the third
-bug's own remaining gap, needs the same genuine process/container
-isolation this module's docstring already names as deferred work.
+sent at all.
+
+**A later bypass proved that fix's own honestly-named remaining gap
+real, not just theoretical, by directly testing it.** `os.fork()` shares
+a process's entire file descriptor table exactly like a thread does —
+the identical property behind the previous bug's theft — but a forked
+*child process* is structurally invisible to `threading.active_count()`,
+which only ever sees threads of the current process. The identical
+frame-introspection theft, run from a forked child instead of a thread,
+evades that check entirely. Confirmed live before this fix: 20/20 real
+runs against a deliberately wrong solution scored `reward=1.0`. Fixed by
+extending the same detection to the sibling primitive:
+`os.waitpid(-1, os.WNOHANG)`, looped right after the thread check, reaps
+every already-exited child (so a submission that forks and cleanly
+exits is never penalized) while treating `(0, 0)` — a child that exists
+and hasn't exited yet — as the same disqualifying signal a lingering
+thread already is.
+
+**A real, separate bug found while verifying that fix, not a second
+exploit:** a plain `sys.exit(1)` on detecting a live forked child (the
+thread check's own approach, reused unchanged at first) is correct but
+slow, for a reason specific to `fork()` — the orphaned child inherits
+its own copy of the driver's stdout pipe, and merely exiting the driver
+leaves that still-blocked child (waiting on content that will now never
+arrive) holding the pipe's write end open indefinitely, so the caller's
+stdout reader never sees EOF and the whole call silently degrades from
+"reject in milliseconds" to "wait out the full wall-clock timeout" —
+correct in the end (`reward=0.0` either way) but a real efficiency bug.
+Confirmed live: this exact exploit took ~5s (the full timeout used in
+testing) per rejected attempt before this fix, versus milliseconds
+after. A thread left alive by the earlier exploit never had this
+problem — exiting a process closes every file descriptor it holds
+regardless of its own threads' state, since threads share the process's
+one fd table rather than each having an independent one the way forked
+processes do. Fixed by killing the whole process group
+(`os.killpg(os.getpgrp(), signal.SIGKILL)`) instead of just exiting the
+driver — reachable because the driver is already its own process group
+leader at spawn time, so one signal reaches it and every descendant it
+forked at once. Verified with a genuine revert-and-check: reverted to a
+bare `sys.exit(1)` and watched the new test's own timing assertion fail
+with the literal old bug's shape (~5s, not milliseconds).
+
+Not provably complete, named honestly: these two fixes close the
+background-execution primitives found so far (threads and forked
+processes), not the whole class. Closing it for good needs the same
+genuine process/container isolation this module's own docstring already
+names as deferred work.
 
 `CODING_TASKS` bundles three small, real, hand-verified tasks — same
 honesty discipline as `sarva.eval.benchmarks.ARITHMETIC`: real problems

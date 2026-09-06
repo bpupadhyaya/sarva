@@ -20,27 +20,28 @@ real, deferred, infrastructure-heavy work, named directly rather than
 implied to already be covered.
 
 **Specifically, not overclaimed for `evaluate_submission`'s own
-completion-signaling mechanism either:** five independent reward-hacking
+completion-signaling mechanism either:** six independent reward-hacking
 bypasses have been found and fixed here (see that function's and
 `_build_driver_src`'s own docstrings for each) — a `sys.exit(0)`
 early-exit, a plaintext-sentinel-in-a-readable-file read, a background
 thread racing a raw file-descriptor read against the driver's own stdin
 consumption, embedding the phase-boundary marker's own text to smuggle
-code into the test phase, and a background thread using frame
-introspection to steal the driver's own live stdin object and race it
-instead of a raw fd. The two racing-thread bypasses are defeated the
-same way, and that fix generalizes beyond either one's specific
-discovery channel: any submission that leaves a background thread alive
-past its own top-level return is refused before the ACK is ever printed
-and before phase 2 is ever sent, regardless of what that thread was
+code into the test phase, a background thread using frame introspection
+to steal the driver's own live stdin object and race it instead of a
+raw fd, and a forked child process doing the identical theft to evade
+the thread-specific fix for that one. All three racing-background-
+activity bypasses are defeated the same way, and that fix generalizes
+beyond any one of their specific discovery channels: any submission
+that leaves a background thread OR child process alive past its own
+top-level return is refused before the ACK is ever printed and before
+phase 2 is ever sent, regardless of what that background activity was
 trying to steal or how. What remains genuinely open — named here
-directly, not left implicit — is a channel that doesn't rely on a
-Python-level `threading.Thread` at all (a raw `os.fork()`'d child
-process on POSIX, sharing the same file descriptors but invisible to
-`threading.active_count()`, is the clearest candidate). Only genuine
-process/container isolation between the code being rewarded and the
-code determining the reward closes this class for good — exactly the
-"real container/VM boundary" already named above as deferred,
+directly, not left implicit — is a channel that relies on neither
+primitive these two checks cover (`threading.Thread` and `os.fork()`);
+none has been found, but none is claimed to be impossible either. Only
+genuine process/container isolation between the code being rewarded and
+the code determining the reward closes this class for good — exactly
+the "real container/VM boundary" already named above as deferred,
 infrastructure-heavy work.
 """
 
@@ -167,7 +168,62 @@ def _build_driver_src(phase1_end_marker: str, phase1_ack_marker: str) -> str:
     a short `time.sleep` first makes this check decisive rather than a
     coin flip. It runs BEFORE the ACK is ever printed and BEFORE
     task.test_code is ever sent, so a submission caught leaving a
-    background thread alive never even gets a chance at phase 2."""
+    background thread alive never even gets a chance at phase 2.
+
+    The `os.waitpid(-1, os.WNOHANG)` loop right after it, POSIX-only, is
+    a sixth reward-hacking bypass's fix -- `os.fork()` shares a process's
+    entire file descriptor table exactly like `threading.Thread` does,
+    but a forked CHILD PROCESS is invisible to `threading.active_count()`
+    (which only ever sees threads of the current process), so the fifth
+    bug's fix alone left this variant of the identical attack wide open.
+    See evaluate_submission's own docstring for the confirmed exploit
+    and why `waitpid`'s three possible outcomes (`ChildProcessError`: no
+    children at all; `(pid, status)`: an already-exited child to reap and
+    keep checking; `(0, 0)`: a child exists and hasn't exited yet) let
+    this loop reap every already-finished child while still flagging any
+    that's genuinely still alive -- the exact same "still running past
+    submitted_code's own return" shape the thread check already detects,
+    just for the sibling primitive `threading.active_count()` can't see.
+    Not generated on Windows, where `os.fork` doesn't exist at all, so
+    this specific attack has no channel to begin with.
+
+    A live child found this way is killed via `os.killpg(os.getpgrp(),
+    signal.SIGKILL)`, not a plain `sys.exit(1)` -- a real, measured
+    consequence of `os.fork()` sharing the process's file descriptor
+    table found while verifying this fix, not a hypothetical robustness
+    nicety: a forked child inherits its own copy of the driver's stdout
+    pipe, and merely exiting the driver leaves that orphaned,
+    still-blocked child holding the pipe's write end open indefinitely
+    (it's waiting on content that will never arrive, since the ACK that
+    would trigger sending it is exactly what this check is refusing to
+    print). `evaluate_submission`'s own stdout reader thread never sees
+    EOF while any process still holds that pipe open, so it silently
+    degrades from "reject in milliseconds" to "wait out the full
+    wall-clock timeout before giving up" -- correct in the end
+    (`reward=0.0` either way), but a real efficiency bug of its own: an
+    RL rollout batch where several samples try this exploit would see
+    real per-call latency balloon to the timeout ceiling instead of
+    failing fast, for every attempt. `start_new_session=True` at spawn
+    time (see evaluate_submission's own `popen_kwargs`) already makes
+    the driver its own process group leader, so `killpg` here reaches
+    the driver itself and every descendant it forked in one signal --
+    confirmed live: the same exploit that used to take ~5s (the full
+    timeout) per rejected attempt now takes milliseconds, matching the
+    thread-based check's own speed."""
+    _fork_check = (
+        ""
+        if _IS_WINDOWS
+        else """
+while True:
+    try:
+        _wpid, _wstatus = os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError:
+        break
+    if _wpid == 0:
+        import signal
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+"""
+    )
     return f"""
 import os, sys, threading, time
 _real_stdin_fd = os.dup(0)
@@ -184,7 +240,7 @@ for _line in _stream:
 exec(compile("".join(_lines), "<submission>", "exec"), _ns)
 time.sleep(0.05)
 if threading.active_count() > 1:
-    sys.exit(1)
+    sys.exit(1){_fork_check}
 print("\\n" + {phase1_ack_marker!r}, flush=True)
 exec(compile(_stream.read(), "<test>", "exec"), _ns)
 """
@@ -360,10 +416,61 @@ def evaluate_submission(task: CodingTask, submitted_code: str, timeout: float = 
     `AssertionError` genuinely firing (proving its harmless thread
     finished in time and the check didn't false-positive on it), while
     this fifth exploit is rejected 10/10 with `task.test_code` never
-    sent at all. Not provably complete, and not claimed to be -- see
-    this module's own top-level docstring for what channel remains
-    genuinely open (a raw `os.fork()`'d process, invisible to
-    `threading.active_count()`)."""
+    sent at all.
+
+    **A sixth, independent bypass, found by directly testing the exact
+    remaining gap the fifth bug's own fix named honestly rather than
+    hid:** `os.fork()` shares a process's entire file descriptor table
+    exactly like `threading.Thread` does -- the identical property that
+    made the fifth bug's theft possible -- but a forked CHILD PROCESS is
+    structurally invisible to `threading.active_count()`, which only
+    ever sees threads of the *current* process. The identical frame-
+    introspection theft, run from inside a forked child instead of a
+    thread, evades the fifth bug's check entirely. Confirmed live before
+    this fix: 20/20 real runs against a deliberately wrong `add()` scored
+    `reward=1.0`. Fixed by extending the same detection to the sibling
+    primitive: `os.waitpid(-1, os.WNOHANG)`, looped right after the
+    thread check, reaps every already-exited child (so a submission that
+    forks and cleanly exits before returning is never penalized) while
+    treating `(0, 0)` -- a child that exists and hasn't exited yet -- as
+    the identical disqualifying signal a lingering thread already is.
+
+    **A real, separate bug found while verifying the sixth bug's own
+    fix, not a second exploit:** a plain `sys.exit(1)` on detecting a
+    live forked child (the fifth bug's own approach, reused unchanged at
+    first) is correct but slow, for a reason specific to `fork()` and
+    not threads -- the orphaned child inherits its own copy of the
+    driver's stdout pipe, and merely exiting the driver leaves that
+    still-blocked child (waiting on content that will now never arrive)
+    holding the pipe's write end open indefinitely. `evaluate_submission`'s
+    stdout reader thread never sees EOF while any process still holds
+    that pipe open, so the call silently degrades from "reject in
+    milliseconds" to "wait out the full wall-clock timeout before giving
+    up" -- correct in the end (`reward=0.0` either way) but a real
+    efficiency bug: confirmed live, this exact exploit attempt took ~5s
+    (the full timeout used in testing) per rejected call before this
+    fix, versus milliseconds after. A background *thread* left alive by
+    the fifth bug's exploit never had this problem: exiting a process
+    closes every file descriptor it holds regardless of what its own
+    threads were doing, since threads don't have independent fd tables
+    the way forked child processes do. Fixed by killing the whole
+    process group (`os.killpg(os.getpgrp(), signal.SIGKILL)`) instead of
+    just exiting the driver -- reachable because `start_new_session=True`
+    at spawn time (see this function's own `popen_kwargs`) already makes
+    the driver its own process group leader, so one signal reaches the
+    driver and every descendant it forked at once, closing the orphan's
+    held-open pipe copy immediately. Verified live and with a genuine
+    revert-and-check: reverted to a bare `sys.exit(1)` and watched the
+    new test's own timing assertion fail with the literal old bug's
+    shape (~5s, not milliseconds), confirming the assertion is decisive
+    and not just documentation.
+
+    Not provably complete, and not claimed to be: this closes the two
+    background-execution primitives found so far (threads and forked
+    processes), not the whole class. Only genuine process/container
+    isolation between the code being rewarded and the code determining
+    the reward closes that for good -- see this module's own top-level
+    docstring."""
     sentinel = f"__SARVA_TASK_COMPLETED_{secrets.token_hex(16)}__"
     phase1_end_marker = f"__SARVA_PHASE1_END_{secrets.token_hex(16)}__"
     phase1_ack_marker = f"__SARVA_PHASE1_ACK_{secrets.token_hex(16)}__"
