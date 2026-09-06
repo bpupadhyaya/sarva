@@ -150,6 +150,62 @@ def _within_workdir(workdir: str, path: str) -> Path:
     return resolved
 
 
+def _read_bytes_no_follow(path: Path) -> bytes:
+    """Reads `path` via a file descriptor opened with `O_NOFOLLOW`, so a
+    symlink swapped into this exact path AFTER `_within_workdir` already
+    validated it -- but before this read actually runs -- fails cleanly
+    (`OSError`, `ELOOP`) instead of transparently reading through to
+    whatever the symlink points at.
+
+    Not a theoretical TOCTOU: the agent loop runs every tool call in one
+    model turn CONCURRENTLY via `asyncio.gather` (see `sarva.agent.loop`,
+    already the site of a real, separate concurrency bug -- the
+    `delegate_task` budget-double-grant race). `ReadFileTool` is
+    `destructive=False` -- no confirmation gate -- so a single turn that
+    also requests a `destructive=True` `run_shell` call the operator
+    approves (routine in autonomous mode, where `always_allow` never
+    asks at all) can race a `ln -sf ~/.ssh/id_rsa notes.txt`-style
+    symlink swap against a `read_file("notes.txt")` for a path that
+    doesn't exist yet at validation time. Confirmed live: swapping in a
+    symlink to an outside file in that exact window, then reading
+    through the already-resolved (now-stale) `Path` object the way
+    `ReadFileTool`/`EditFileTool` used to, returned the outside file's
+    real content -- `id_rsa`'s in this repro -- with the confinement
+    check having run, seen nothing wrong, and never run again.
+    `WriteFileTool`/`EditFileTool`'s own *write* side turned out to
+    already be safe from the identical race by construction (`atomic_
+    write`'s `os.replace()` replaces whatever dentry sits at the
+    destination -- including a symlink -- rather than writing through
+    it), confirmed live before concluding this was read-only; only the
+    read side needed a fix.
+
+    Deliberately rejects EVERY symlink at this exact path component, not
+    just ones resolving outside the workdir -- there's no way to
+    distinguish "a symlink swapped in by a race" from "an ordinary,
+    already-validated in-workdir symlink" from inside a single
+    `open()` call, and closing the whole race is worth more than
+    supporting symlinks at this leaf position, the same "reject, don't
+    guess" tradeoff this file already makes elsewhere (`EditFileTool`'s
+    ambiguous-match and non-bool `replace_all` rejections). Narrower
+    residual risk, named honestly rather than assumed closed: this only
+    protects the FINAL path component: a symlink swapped into an
+    INTERMEDIATE directory in `path` mid-race is not caught by a single
+    `O_NOFOLLOW` open the way `openat2`'s `RESOLVE_NO_SYMLINKS` would
+    catch it end-to-end -- the same class of "real mitigation, not an
+    absolute guarantee" residual risk this project already names
+    honestly for `RunCodeTool`'s container isolation. `O_NOFOLLOW` is
+    POSIX-only; Windows has no equivalent open flag, so this only
+    guards POSIX-based deployments -- the same honesty already applied
+    to this project's other POSIX-only protections (`os.chmod`,
+    `os.killpg`)."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as f:
+        return f.read()
+
+
 class ReadFileTool:
     spec = ToolSpec(
         name="read_file",
@@ -196,7 +252,13 @@ class ReadFileTool:
         # concurrent user's in-flight `/chat`/`/ws/chat` turn in a real
         # `sarva serve` process would freeze too, for as long as one file
         # read takes.
-        text = await asyncio.to_thread(p.read_text, encoding="utf-8")
+        # `_read_bytes_no_follow`, not a plain `p.read_text()` -- see its
+        # own docstring for the real symlink-race information-disclosure
+        # bug this closes: the confinement check above and this read are
+        # two separate steps, and `asyncio.gather`-driven concurrent tool
+        # calls in the same model turn can swap a symlink in between them.
+        raw = await asyncio.to_thread(_read_bytes_no_follow, p)
+        text = raw.decode("utf-8")
         return ToolResultBlock(tool_call_id="", content=[TextBlock(text=text)])
 
 
@@ -353,7 +415,12 @@ class EditFileTool:
         # with the identical zero-heartbeat-ticks repro. Worse than
         # ReadFileTool alone, since this tool does BOTH a blocking read
         # here and a blocking write below in the same call.
-        raw = await asyncio.to_thread(p.read_bytes)
+        # `_read_bytes_no_follow`, not a plain `p.read_bytes()` -- the
+        # same symlink-race information-disclosure gap `ReadFileTool`
+        # had (see that helper's own docstring); this tool's read half
+        # is exposed to the identical race between `_within_workdir`'s
+        # check above and this call.
+        raw = await asyncio.to_thread(_read_bytes_no_follow, p)
         text = raw.decode("utf-8")
         count = text.count(old_string)
         if count == 0:

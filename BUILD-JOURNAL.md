@@ -22699,5 +22699,68 @@ way it can escape a bare process group on the host -- so it was left
 unchanged; this round's live testing of `run_code` itself was limited
 by no Docker/Podman runtime being available on this machine, named
 honestly rather than assumed clean.
+---
+
+## Round 425: a real information-disclosure bug -- `read_file`/`edit_file` could be tricked into reading outside the workdir via a symlink race
+
+Continuing the adversarial sweep from round 424, turned to the file
+tools (`ReadFileTool`/`WriteFileTool`/`EditFileTool`) that share the
+identical `_within_workdir` confinement check already the subject of
+several documented fixes in this journal.
+
+**Confirmed live**: `_within_workdir` validates `path` once, at the
+start of `run()`, and the actual read happens as a separate step
+afterward -- a real TOCTOU window. Not theoretical: round 424 already
+established every tool call in one model turn runs concurrently via
+`asyncio.gather`, and `read_file` is `destructive=False` -- no
+confirmation gate. A single turn that also includes a `destructive=
+True` `run_shell` call the operator approves (routine in autonomous
+mode, where `always_allow` never asks at all) can race a `ln -sf
+~/.ssh/id_rsa notes.txt`-style symlink swap into that exact window for
+a path that doesn't exist yet at validation time. Reproduced directly:
+swapping a symlink into an already-validated path, then reading
+through the stale, already-resolved `Path` the real code already held,
+returned the outside file's real content.
+
+**A real dead end investigated and ruled out before concluding this was
+read-only**: the identical race against `WriteFileTool`'s write side
+was tested first and found to be already safe, purely as a side effect
+of the existing atomic-write fix -- `os.replace()` replaces whatever
+sits at the destination (including a symlink) rather than writing
+through it, so a swapped-in symlink just gets clobbered by the new file
+instead of being followed. Confirmed live before ruling it out, not
+assumed.
+
+**Fixed** on the read side (`ReadFileTool` and `EditFileTool`'s own
+read-before-edit) by opening with `O_NOFOLLOW` (a new
+`_read_bytes_no_follow` helper) instead of a plain `Path.read_text`/
+`read_bytes`, so a symlink at the exact validated path fails the open
+cleanly (`OSError`/`ELOOP`) instead of being followed. Deliberately
+rejects every symlink at that leaf position, not just ones resolving
+outside the workdir -- there's no way to distinguish a raced-in symlink
+from an ordinary already-validated one from inside a single `open()`
+call, so the whole race gets closed rather than guessed at, matching
+this file's own established "reject, don't guess" precedent. Named
+honestly, not assumed fully closed: only the FINAL path component is
+protected -- a symlink swapped into an intermediate directory mid-race
+would need `openat2`'s `RESOLVE_NO_SYMLINKS` to catch end-to-end, and
+`O_NOFOLLOW` itself is POSIX-only.
+
+**A real side effect of this fix required updating three existing
+tests**, not just adding one: `ReadFileTool`/`EditFileTool` no longer
+call `Path.read_text`/`Path.read_bytes` at all, so the existing
+encoding-spy and event-loop-freeze tests that monkeypatched those
+`Path` methods directly would have silently stopped testing anything
+real (their spies would simply never fire) without being updated to
+spy on `_read_bytes_no_follow`, the function actually dispatched via
+`asyncio.to_thread` -- caught before it could become a second, quieter
+bug (tests that pass without verifying anything).
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (`DID NOT RAISE
+OSError`), restored. 1 new test, 948 -> 949 Python tests. Full suite:
+937 passed, 1 skipped, 11 deselected. `ruff check`/`ruff format
+--check` both clean. `docs/agent-loop.md`'s existing atomic-write
+narrative extended with this section.
 
 **Next:** continuing the hardening sweep, module by module.

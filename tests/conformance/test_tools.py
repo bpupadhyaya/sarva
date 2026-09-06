@@ -102,22 +102,15 @@ async def test_read_file_passes_an_explicit_utf8_encoding_not_locale_default(ctx
     # ones. Confirmed live before this fix: a file WriteFileTool had
     # just written (always UTF-8 via atomic_write_text) crashed with
     # UnicodeDecodeError reading it straight back, despite this tool's
-    # own description promising "Read a UTF-8 text file." This spy
-    # directly pins the fix (explicit encoding="utf-8"), rather than
-    # depending on the OS's actual locale to reproduce it.
+    # own description promising "Read a UTF-8 text file." A later round
+    # (see `_read_bytes_no_follow`) replaced the `p.read_text()` call
+    # entirely with a raw-bytes read plus an explicit `.decode("utf-8")`
+    # in this tool's own code -- structurally immune to a locale
+    # regression now, not just pinned by a spy -- so this test keeps the
+    # real, decisive part: an actual real non-ASCII round trip through
+    # the real tool.
     write = WriteFileTool()
     await write.run({"path": "note.txt", "content": "café Ω 日本語 -- bonjour!"}, ctx)
-
-    real_read_text = Path.read_text
-
-    def spy_read_text(self, *args, **kwargs):
-        assert kwargs.get("encoding") == "utf-8", (
-            "read_text() must pass encoding='utf-8' explicitly, not rely on "
-            "locale.getpreferredencoding()"
-        )
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", spy_read_text)
 
     read = ReadFileTool()
     result = await read.run({"path": "note.txt"}, ctx)
@@ -130,21 +123,27 @@ async def test_read_file_does_not_freeze_the_event_loop_on_a_slow_disk(ctx, monk
     # to_thread fix already applied four separate times in this same
     # file (RememberTool._add, RecallMemoryTool._search, NoteTool._write,
     # SearchNotesTool._search) never propagated to this tool -- the
-    # plainest and most-called of the three file tools. p.read_text() is
-    # real, synchronous filesystem I/O, called directly on the event
-    # loop with no asyncio.to_thread. Confirmed live before this fix: a
-    # deliberately slowed read froze the ENTIRE event loop for the whole
-    # call -- a heartbeat coroutine that should tick every 0.05s
-    # recorded ZERO ticks across the full window.
+    # plainest and most-called of the three file tools. The underlying
+    # read is real, synchronous filesystem I/O, called directly on the
+    # event loop with no asyncio.to_thread. Confirmed live before this
+    # fix: a deliberately slowed read froze the ENTIRE event loop for
+    # the whole call -- a heartbeat coroutine that should tick every
+    # 0.05s recorded ZERO ticks across the full window. Spies on
+    # `_read_bytes_no_follow` (the function actually dispatched via
+    # `asyncio.to_thread`, since a later round replaced the plain
+    # `p.read_text()` this test originally slowed down -- see that
+    # helper's own docstring for why), matching the same
+    # spy-the-actual-dispatched-call pattern the sibling `write_file`
+    # test below already uses for `atomic_write_text`.
     (Path(ctx.workdir) / "big.txt").write_text("x" * 1000)
 
-    real_read_text = Path.read_text
+    real_read = tools_module._read_bytes_no_follow
 
-    def slow_read_text(self, *args, **kwargs):
+    def slow_read(path):
         time.sleep(0.3)
-        return real_read_text(self, *args, **kwargs)
+        return real_read(path)
 
-    monkeypatch.setattr(Path, "read_text", slow_read_text)
+    monkeypatch.setattr(tools_module, "_read_bytes_no_follow", slow_read)
 
     ticks = 0
 
@@ -203,19 +202,23 @@ async def test_write_file_does_not_freeze_the_event_loop_on_a_slow_disk(ctx, mon
 async def test_edit_file_does_not_freeze_the_event_loop_on_a_slow_disk(ctx, monkeypatch):
     # The same sibling-propagation gap fixed for ReadFileTool/
     # WriteFileTool above: this tool does BOTH a blocking read
-    # (p.read_bytes()) and a blocking write (atomic_write_text()) in
-    # the same call, called directly on the event loop with no
-    # asyncio.to_thread. Confirmed live before this fix with the
-    # identical zero-heartbeat-ticks repro used above.
+    # (`_read_bytes_no_follow`) and a blocking write
+    # (`atomic_write_text()`) in the same call, called directly on the
+    # event loop with no asyncio.to_thread. Confirmed live before this
+    # fix with the identical zero-heartbeat-ticks repro used above.
+    # Spies on `_read_bytes_no_follow`, the function actually dispatched
+    # via `asyncio.to_thread` -- a later round replaced the plain
+    # `p.read_bytes()` this test originally slowed down (see that
+    # helper's own docstring for why).
     (Path(ctx.workdir) / "file.txt").write_text("the quick brown fox")
 
-    real_read_bytes = Path.read_bytes
+    real_read = tools_module._read_bytes_no_follow
 
-    def slow_read_bytes(self, *args, **kwargs):
+    def slow_read(path):
         time.sleep(0.3)
-        return real_read_bytes(self, *args, **kwargs)
+        return real_read(path)
 
-    monkeypatch.setattr(Path, "read_bytes", slow_read_bytes)
+    monkeypatch.setattr(tools_module, "_read_bytes_no_follow", slow_read)
 
     ticks = 0
 
@@ -233,6 +236,57 @@ async def test_edit_file_does_not_freeze_the_event_loop_on_a_slow_disk(ctx, monk
 
     assert not result.is_error
     assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_a_symlink_swapped_in_after_the_workdir_check(
+    ctx, monkeypatch, tmp_path_factory
+):
+    # A real information-disclosure bug found by a later adversarial
+    # pass: `_within_workdir` validates `path` once, at the START of
+    # `run()`, and the actual read happens as a SEPARATE step
+    # afterward -- a real TOCTOU window, not a theoretical one. The
+    # agent loop runs every tool call in one model turn CONCURRENTLY
+    # via `asyncio.gather` (see `sarva.agent.loop`, already the site of
+    # a real, separate concurrency bug -- the `delegate_task` budget-
+    # double-grant race). `read_file` is `destructive=False` -- no
+    # confirmation gate -- so a single turn that also includes a
+    # `destructive=True` `run_shell` call the operator approves
+    # (routine in autonomous mode, where `always_allow` never asks at
+    # all) can race a `ln -sf ~/.ssh/id_rsa notes.txt`-style symlink
+    # swap into this exact window, for a path that doesn't exist yet at
+    # validation time. Confirmed live: swapping a symlink into an
+    # already-validated path, then reading through the stale, already-
+    # resolved `Path` the real code already held, returned the outside
+    # file's real content with the confinement check having run, seen
+    # nothing wrong, and never run again.
+    #
+    # `WriteFileTool`/`EditFileTool`'s own *write* side turned out to
+    # already be safe from the identical race by construction --
+    # `atomic_write`'s `os.replace()` replaces whatever sits at the
+    # destination (including a symlink) rather than writing through it
+    # -- confirmed live before concluding this was read-only.
+    #
+    # Simulated deterministically here, not via real OS-scheduling
+    # timing, by having `_within_workdir` itself plant the symlink the
+    # instant after it validates the path -- exactly the state a
+    # genuinely concurrent racing `run_shell` call would leave behind.
+    outside_dir = tmp_path_factory.mktemp("outside")
+    secret = outside_dir / "id_rsa"
+    secret.write_text("fake-secret-key-material")
+
+    real_within_workdir = tools_module._within_workdir
+
+    def within_workdir_then_swap_symlink(workdir, path):
+        resolved = real_within_workdir(workdir, path)
+        os.symlink(secret, resolved)
+        return resolved
+
+    monkeypatch.setattr(tools_module, "_within_workdir", within_workdir_then_swap_symlink)
+
+    read = ReadFileTool()
+    with pytest.raises(OSError):
+        await read.run({"path": "notes.txt"}, ctx)
 
 
 @pytest.mark.asyncio

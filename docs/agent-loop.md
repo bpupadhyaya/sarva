@@ -738,6 +738,50 @@ same shared `sarva.atomic_write` helper `sarva.config`/`sarva.memory.
 session` already use — see the memory chapter for the fuller history of
 this bug class and where else it was found and closed.
 
+**`ReadFileTool`/`EditFileTool` could be tricked into reading OUTSIDE
+the workdir via a symlink swapped in after the confinement check ran —
+a real information-disclosure bug, not a theoretical TOCTOU.**
+`_within_workdir` validates `path` once, at the start of each tool's
+`run()`, and the actual read happens as a separate step afterward — a
+real race window between them. Not academic: this section already
+established that every tool call in one model turn runs concurrently
+via `asyncio.gather`, and `read_file` is `destructive=False` — no
+confirmation gate. A single turn that also includes a `destructive=
+True` `run_shell` call the operator approves (routine in autonomous
+mode, where `always_allow` never asks at all) can race a `ln -sf
+~/.ssh/id_rsa notes.txt`-style symlink swap into that exact window, for
+a path that doesn't exist yet at validation time. Confirmed live:
+swapping a symlink into an already-validated path, then reading
+through the stale, already-resolved `Path` the real code already held,
+returned the outside file's real content — the confinement check had
+run, seen nothing wrong, and never ran again.
+
+`WriteFileTool`/`EditFileTool`'s own *write* side turned out to already
+be safe from the identical race, purely as a side effect of the atomic-
+write fix directly above: `os.replace()` replaces whatever sits at the
+destination path — including a symlink — rather than writing through
+it, so a swapped-in symlink just gets clobbered by the new real file
+instead of being followed. Confirmed live before concluding this was
+read-only. Fixed on the read side by opening with `O_NOFOLLOW`
+(`_read_bytes_no_follow`) instead of a plain `Path.read_text`/
+`read_bytes`, so a symlink at the exact validated path fails the open
+cleanly (`OSError`, `ELOOP`) instead of being followed. Deliberately
+rejects every symlink at that leaf position, not just ones resolving
+outside the workdir — there's no way to tell "a symlink swapped in by a
+race" from "an ordinary, already-validated in-workdir symlink" from
+inside one `open()` call, and closing the whole race is worth more than
+supporting symlinks at this position, the same "reject, don't guess"
+tradeoff `EditFileTool`'s own ambiguous-match and non-bool `replace_all`
+rejections already make. Named honestly, not assumed fully closed: this
+only protects the FINAL path component — a symlink swapped into an
+*intermediate* directory mid-race isn't caught by a single `O_NOFOLLOW`
+open the same way `openat2`'s `RESOLVE_NO_SYMLINKS` would catch it
+end-to-end — and `O_NOFOLLOW` itself is POSIX-only, the same honesty
+already applied to this project's other POSIX-only protections
+(`os.chmod`, `os.killpg`). Verified by reverting and watching the new
+test fail with the literal old bug's own shape: `DID NOT RAISE
+OSError`. 1 new test, 948 → 949 Python tests.
+
 **A real bug found in `RunShellTool`'s own timeout, not just an
 uncaught exception:** `asyncio.wait_for(proc.communicate(),
 timeout=...)` only cancels the *awaiting* coroutine on expiry — it
