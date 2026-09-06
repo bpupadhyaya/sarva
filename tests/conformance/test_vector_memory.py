@@ -130,6 +130,29 @@ def test_search_respects_top_k(store):
     assert len(results) == 3
 
 
+def test_search_rejects_a_negative_top_k_instead_of_silently_dropping_results(store):
+    # A real gap found by a fresh-eyes sweep, one layer below where this
+    # class's own only real caller (RecallMemoryTool) already validates
+    # the identical value: this class's own `scored[:top_k]` had no
+    # guard of its own. Confirmed live: `search(..., top_k=-1)` against
+    # three real entries returned two, not zero and not an error --
+    # Python's own list-slice semantics turn a negative top_k into "drop
+    # the last |top_k| results" (the worst-scoring one, specifically),
+    # the exact opposite of a "return up to top_k, highest first"
+    # contract. RecallMemoryTool can't reach this today (it rejects a
+    # negative top_k before ever calling in), but a future direct caller
+    # of this public method shouldn't have to rediscover the same fix.
+    store.add("s1", "the quick brown fox")
+    store.add("s1", "jumps over the lazy dog")
+    store.add("s1", "a completely unrelated sentence about weather")
+
+    with pytest.raises(ValueError, match="top_k must be non-negative"):
+        store.search("quick brown fox", top_k=-1)
+
+    # top_k=0 is a genuinely valid "give me nothing" request, unaffected.
+    assert store.search("quick brown fox", top_k=0) == []
+
+
 def test_search_is_scoped_to_session_id_when_given(store):
     store.add("session-a", "apples and oranges are fruit")
     store.add("session-b", "apples and oranges are fruit")  # same text, different session

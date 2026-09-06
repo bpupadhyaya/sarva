@@ -577,6 +577,25 @@ both new tests fail with the literal old bug reproducing itself — the
 raw `TypeError` for the first, the false "No relevant memories found"
 for the second. 2 new tests, 741 → 743 total.
 
+**A much later fresh-eyes sweep found that fix had never been
+centralized into the library itself.** `RecallMemoryTool.run()`'s own
+`top_k` validation above is the only thing standing between a negative
+`top_k` and `VectorMemoryStore.search()`'s unguarded `scored[:top_k]`
+-- the store's own public method still had no check of its own,
+resting correctness entirely on this one caller remembering to
+re-derive the identical rule. Confirmed live: calling `search(...,
+top_k=-1)` directly (bypassing the tool layer) against three real
+entries returned two, not zero and not an error -- the exact same
+"drop the worst-scoring result instead of erroring" shape the bug
+above already named, just reachable again from underneath the fix.
+`RecallMemoryTool` itself can't hit this today; a future direct caller
+of `VectorMemoryStore.search()` could. Fixed by adding the identical
+`top_k < 0` check to `search()` itself, matching the same "don't rest
+correctness on every caller re-deriving the same validation" reasoning
+`sarva.atomic_write`'s own consolidation already applies elsewhere in
+this project. Verified by reverting and watching the new test fail
+with `DID NOT RAISE ValueError`. 1 new test, 951 → 952 Python tests.
+
 ## Long-term memory: plain markdown files, one per topic
 
 The design doc's own literal promise (§3.4): "long-term memory as plain

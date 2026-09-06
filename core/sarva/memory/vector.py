@@ -195,7 +195,30 @@ class VectorMemoryStore:
         exactly the candidate set being searched (all entries, or just
         `session_id`'s if given) — a query scoped to one session is
         scored against that session's own term statistics, not polluted
-        by unrelated sessions' vocabulary."""
+        by unrelated sessions' vocabulary.
+
+        A real gap found by a fresh-eyes sweep, one layer below where
+        this class's own only real caller (`RecallMemoryTool`, in
+        `sarva.agent.tools`) already validates the identical value: this
+        class's own `scored[:top_k]` had no guard of its own, resting
+        correctness entirely on every future caller remembering to
+        re-derive the tool layer's own check. Confirmed live: `search(
+        ..., top_k=-1)` against three real entries returned two, not
+        zero and not an error -- Python's own list-slice semantics turn
+        a negative `top_k` into "drop the last `|top_k|` results," the
+        exact opposite of what a "return up to top_k, ranked highest
+        first" contract promises, and silently dropping the WORST match
+        (not a random one) makes the wrong behavior easy to miss in a
+        quick manual check. `RecallMemoryTool` already can't reach this
+        (it rejects a negative `top_k` before ever calling in), so this
+        doesn't change any behavior a real agent turn can hit today --
+        but centralizing the check here, matching the same "don't rest
+        correctness on every caller re-deriving the same validation"
+        reasoning `sarva.atomic_write`'s own consolidation already
+        applies, means the NEXT caller of this public method inherits
+        the fix for free instead of needing to rediscover it."""
+        if top_k < 0:
+            raise ValueError(f"top_k must be non-negative, got {top_k!r}")
         with self._lock:
             if session_id is not None:
                 rows = self._conn.execute(

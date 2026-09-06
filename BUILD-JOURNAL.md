@@ -22840,5 +22840,43 @@ test, 950 -> 951 Python tests. Full suite: 939 passed, 1 skipped, 11
 deselected. `ruff check`/`ruff format --check` both clean. `docs/
 multimodal.md`'s existing running list of this exact bug class's
 occurrences extended with this fourth instance.
+---
+
+## Round 428: `VectorMemoryStore.search()`'s own `top_k` was unguarded at the library layer -- centralizing a fix that had only ever lived at the one call site
+
+Continuing the sweep, gave `sarva.memory.vector` -- a module with its
+own documented history of a `top_k` validation gap already fixed once,
+at the `RecallMemoryTool` call site -- a fresh-eyes re-read of the
+underlying store itself.
+
+**Confirmed live**: `RecallMemoryTool.run()` validates `top_k` before
+ever calling into `VectorMemoryStore.search()`, but `search()`'s own
+`scored[:top_k]` has no guard of its own. Calling `search(...,
+top_k=-1)` directly -- bypassing the tool layer, the way any future
+direct caller of this public method would -- against three real
+entries returned two, not zero and not an error: Python's own
+list-slice semantics turn a negative `top_k` into "drop the last
+`|top_k|` results" (specifically the worst-scoring one), the exact
+opposite of the "return up to top_k, ranked highest first" contract
+this method's own docstring promises. `RecallMemoryTool` can't reach
+this today (it rejects a negative `top_k` before ever calling in), so
+this doesn't change any behavior a real agent turn can hit right now --
+this is a defense-in-depth fix, not a currently-exploitable path,
+named honestly as such.
+
+**Fixed** by adding the identical `top_k < 0` check directly to
+`search()`, matching the same "don't rest correctness on every caller
+re-deriving the same validation" reasoning `sarva.atomic_write`'s own
+consolidation already applies elsewhere in this project -- the next
+caller of this public method inherits the fix for free instead of
+needing to rediscover it.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (`DID NOT RAISE
+ValueError`), restored; confirmed `top_k=0` (a genuinely valid "give me
+nothing" request) is still allowed. 1 new test, 951 -> 952 Python
+tests. Full suite: 940 passed, 1 skipped, 11 deselected. `ruff check`/
+`ruff format --check` both clean. `docs/memory.md`'s existing `top_k`
+validation narrative extended with this follow-up section.
 
 **Next:** continuing the hardening sweep, module by module.
