@@ -23243,4 +23243,53 @@ skipped, 11 deselected. `ruff check`/`ruff format --check` both clean.
 four affected modules at once, since no existing narrative covered this
 exact cross-cutting pattern.
 
+## Round 437: `sarva run --mcp-server`'s own documented example never actually worked -- it always tripped the collision guard it was written to demonstrate safety around
+
+Continuing live execution testing: with `npx`/`node` available and a
+real, isolated `SARVA_HOME` (this round's own first practical use of
+round 436's fix), actually ran the CLI's own `--mcp-server` help-text
+example verbatim: `sarva run "..." --mcp-server "npx -y
+@modelcontextprotocol/server-filesystem /tmp" --auto`.
+
+**Confirmed live**: this exits 1 every time, printing "exports tool
+name(s) edit_file, read_file, write_file that collide" -- never
+connecting. `docs/mcp.md` already documents, in detail, exactly why:
+`@modelcontextprotocol/server-filesystem` exports tools literally named
+`read_file`/`write_file`/`edit_file`, identical to Sarva's own
+`BUILTIN_TOOLS` (always included in `sarva run`), and the project's own
+collision guard correctly refuses to let one silently replace the
+other. That guard is working exactly as designed -- the actual bug is
+that the CLI's own `--mcp-server` help text, and `docs/mcp.md`'s own
+"## CLI usage" example, both still used this exact colliding command as
+if it were a normal, successful usage demonstration, with no note that
+it always fails. A user copy-pasting the documented example would never
+see a successful MCP connection, only ever the (correct) rejection.
+
+**A second, related docs-accuracy gap found while fixing the first**:
+`docs/mcp.md`'s own `tests/live/test_live_mcp.py` narrative claimed
+"confirmed through the actual CLI (`sarva run --mcp-server
+"...server-filesystem..."`), which connected and printed the real tool
+list" -- also no longer true, for the identical reason. That test
+itself remains entirely valid (it talks to `connect_stdio_mcp_server`
+directly, bypassing `sarva run`'s own collision layer on purpose), but
+the doc's claim about the CLI path specifically was stale.
+
+**Fixed** by swapping the documented example to `@modelcontextprotocol/
+server-memory` -- a real, official MCP server with zero tool-name
+overlap with Sarva's builtins. Confirmed live: `sarva run "create an
+entity in the knowledge graph named 'Ada Lovelace', described as the
+first programmer" --mcp-server "npx -y @modelcontextprotocol/
+server-memory" --auto` connects cleanly, lists its real tool set
+(`create_entities`, `create_relations`, ...), and completes the task
+correctly end to end. Updated in both `cli.py`'s help text and
+`docs/mcp.md`'s CLI-usage example; corrected the stale test narrative
+claim rather than leaving it. The historical collision-bug narrative
+earlier in the same doc, which uses `server-filesystem` deliberately
+AS the proof of that bug, is untouched -- it's accurate as a historical
+record of what was tested when that fix shipped.
+
+Docs/help-text-only change (no new source behavior to regression-test);
+full suite reconfirmed green (950 passed, 1 skipped, 11 deselected),
+`ruff check`/`ruff format --check` both clean.
+
 **Next:** continuing the hardening sweep, module by module.

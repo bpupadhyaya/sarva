@@ -327,9 +327,21 @@ def run(
     mcp_server: list[str] = typer.Option(
         [],
         "--mcp-server",
+        # A real bug found by actually running this exact example, not
+        # just reading it: @modelcontextprotocol/server-filesystem
+        # exports read_file/write_file/edit_file, which collide with
+        # Sarva's own builtins of the same name -- BUILTIN_TOOLS is
+        # always included in `sarva run`, so the CLI's own documented
+        # example always tripped the collision guard (docs/mcp.md's own
+        # earlier fix for that exact gap), never actually connecting.
+        # Confirmed live: running this help text's example verbatim
+        # printed "exports tool name(s) edit_file, read_file, write_file
+        # that collide" and exited 1, every time. server-memory (a real,
+        # official MCP server with no file-tool overlap) connects
+        # cleanly instead -- confirmed live too.
         help="Connect an MCP server and add its tools to this run (repeatable). "
         'A shell command connects over stdio, e.g. --mcp-server "npx -y '
-        '@modelcontextprotocol/server-filesystem /tmp"; an http:// or https:// '
+        '@modelcontextprotocol/server-memory"; an http:// or https:// '
         "URL connects over Streamable HTTP instead, e.g. "
         "--mcp-server https://example.com/mcp.",
     ),

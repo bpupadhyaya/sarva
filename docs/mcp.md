@@ -111,9 +111,14 @@ before the run ever starts. 3 new tests.
 
 ## CLI usage
 
+**Not `server-filesystem`, deliberately — see why below.** `server-memory`
+is a real, official MCP server with no file-tool overlap, so this
+example actually connects and runs rather than demonstrating the
+collision guard above by accident.
+
 ```bash
-sarva run "list the files in /tmp" \
-    --mcp-server "npx -y @modelcontextprotocol/server-filesystem /tmp" \
+sarva run "create an entity in the knowledge graph named 'Ada Lovelace', described as the first programmer" \
+    --mcp-server "npx -y @modelcontextprotocol/server-memory" \
     --auto
 
 # An http:// or https:// value connects over Streamable HTTP instead:
@@ -382,10 +387,18 @@ third-party MCP server, `@modelcontextprotocol/server-filesystem`
 real via `npx`), listed 14 real tools it actually implements, and a
 real read + write round trip — the write direction verified by reading
 the file back from disk directly afterward, not by trusting the tool
-result alone. Also confirmed through the actual CLI (`sarva run
---mcp-server "npx -y @modelcontextprotocol/server-filesystem ..."`),
-which connected and printed the real tool list. Live-gated like every
-other real-external-service test in this project (`pytest.mark.live`,
-skipped by default, additionally skipped if `npx` isn't on `PATH`) — a
-CI run depending on npm registry availability on every push isn't a
+result alone. **Deliberately talks to `connect_stdio_mcp_server`
+directly, not through `sarva run` itself:** this exact server is the
+one the collision-guard fix above exists because of, so running it
+through the actual CLI (with `BUILTIN_TOOLS` always included) correctly
+hits that guard and refuses to connect rather than "connecting and
+printing the real tool list" — a claim a stale earlier version of this
+paragraph made and this session's own live re-verification found no
+longer holds, now corrected rather than left stale. The "## CLI usage"
+section above exercises the actual CLI path instead, with
+`server-memory` (no builtin-name overlap) as its real, working example.
+Live-gated like every other real-external-service test in this project
+(`pytest.mark.live`, skipped by default, additionally skipped if `npx`
+isn't on `PATH`) — a CI run depending on npm registry availability on
+every push isn't a
 tradeoff this project makes for any live external verification.
