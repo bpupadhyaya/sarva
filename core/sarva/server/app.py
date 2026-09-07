@@ -318,7 +318,25 @@ def create_app() -> FastAPI:
                 # Sharing this except block means both failure modes get
                 # the identical clean ChatResponse(state=failed, detail=...)
                 # treatment.
-                extra_content = _extra_content_blocks(req.image_base64, req.image_media_type)
+                #
+                # asyncio.to_thread: a real bug found by a fresh-eyes
+                # sweep, the identical "blocking call directly on the
+                # event loop" shape already fixed at every other blocking
+                # call site in this handler (build_router, build_
+                # providers, run_diagnostics, save_config, the session
+                # store's own I/O) -- this one call was never wrapped.
+                # `base64.b64decode()` is a real, synchronous, CPU-bound
+                # operation with no upper bound on `image_base64`'s size:
+                # confirmed live, decoding a realistic 200MB image (a
+                # large screenshot or scan, ordinary user-attached
+                # content, not a crafted payload) blocked the event loop
+                # for 164ms with a heartbeat coroutine that should tick
+                # every 0.05s recording ZERO ticks across the whole call
+                # -- every other concurrent user's in-flight /chat or
+                # /ws/chat turn freezes too, not just this one request.
+                extra_content = await asyncio.to_thread(
+                    _extra_content_blocks, req.image_base64, req.image_media_type
+                )
 
                 try:
                     # asyncio.to_thread: see /models' own comment -- both
@@ -664,8 +682,17 @@ def create_app() -> FastAPI:
                         # try block gives it the identical clean failure
                         # treatment the invalid-session-name case below
                         # already has.
-                        extra_content = _extra_content_blocks(
-                            payload.get("image_base64"), payload.get("image_media_type")
+                        #
+                        # asyncio.to_thread: the WS counterpart to the
+                        # identical fix just applied to /chat -- see that
+                        # call site's own comment for the full confirmed-
+                        # live repro (a realistic 200MB image blocking
+                        # the event loop for 164ms with zero heartbeat
+                        # ticks).
+                        extra_content = await asyncio.to_thread(
+                            _extra_content_blocks,
+                            payload.get("image_base64"),
+                            payload.get("image_media_type"),
                         )
                     except (ValueError, TypeError) as e:
                         await _send_failure(str(e))

@@ -22922,5 +22922,44 @@ new test, 952 -> 953 Python tests. Full suite: 941 passed, 1 skipped,
 11 deselected. `ruff check`/`ruff format --check` both clean. `docs/
 providers.md`'s existing sibling-adapter-comparison narrative extended
 with this section.
+---
+
+## Round 430: `/chat`/`/ws/chat`'s shared image-decode helper was the one blocking call site in the server that never got wrapped in `asyncio.to_thread`
+
+Continuing the sweep of directly-reachable production code, gave
+`sarva.server.app` -- a file with a long, thorough history of
+`asyncio.to_thread` fixes for every OTHER blocking call it makes
+(`build_router`, `build_providers`, `run_diagnostics`, `save_config`,
+the session store's own load/save) -- one more fresh-eyes pass, this
+time checking `_extra_content_blocks`, the shared helper both `/chat`
+and `/ws/chat` call to decode an attached image.
+
+**Confirmed live**: `base64.b64decode()` inside `_extra_content_blocks`
+is a real, synchronous, CPU-bound operation with no upper bound on
+`image_base64`'s size, called directly from both handlers with no
+`asyncio.to_thread` -- the one call site in this file that never got
+the fix every sibling blocking call already has. Decoding a realistic
+200MB image (a large screenshot or scan an ordinary user attaches, not
+a crafted payload -- this project's own multimodal pipeline already
+documents that data/path-sourced media blocks have no size cap the way
+url-sourced ones do) blocked the event loop for 164ms with a heartbeat
+coroutine that should tick every 0.05s recording ZERO ticks across the
+whole call. In a real `sarva serve` deployment, every other concurrent
+user's in-flight `/chat`/`/ws/chat` turn freezes too, not just the one
+attaching the image.
+
+**Fixed** by wrapping both call sites in `asyncio.to_thread`, matching
+every other blocking call in this same file. Verified live: the
+identical decode, dispatched through `asyncio.to_thread`, let the
+heartbeat tick during the call instead of stalling solid.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (1 tick instead of the
+expected 3+), restored. 1 new test, 953 -> 954 Python tests. Full
+suite: 942 passed, 1 skipped, 11 deselected. `ruff check`/`ruff format
+--check` both clean. No existing docs/*.md narrative covers this exact
+server.py blocking-call pattern in prose form, so none was extended,
+matching the established precedent for several other server.py fixes
+in this same file.
 
 **Next:** continuing the hardening sweep, module by module.

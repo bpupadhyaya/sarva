@@ -470,6 +470,63 @@ async def test_a_slow_session_save_does_not_freeze_the_event_loop(monkeypatch):
     assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
 
 
+async def test_a_slow_image_decode_does_not_freeze_the_event_loop(monkeypatch):
+    # A real bug found by a fresh-eyes sweep, the identical bug class
+    # already fixed at every OTHER blocking call site in this file
+    # (build_router, build_providers, run_diagnostics, save_config, the
+    # session store's own load/save): `_extra_content_blocks`'s
+    # `base64.b64decode()` is a real, synchronous, CPU-bound operation
+    # with no upper bound on `image_base64`'s size, called directly from
+    # both /chat and /ws/chat with no `asyncio.to_thread`. Confirmed
+    # live: decoding a realistic 200MB image (a large screenshot or
+    # scan attached by an ordinary user, not a crafted payload) blocked
+    # the event loop for 164ms with a heartbeat coroutine that should
+    # tick every 0.05s recording ZERO ticks across the whole call --
+    # every other concurrent user's in-flight /chat or /ws/chat turn
+    # freezes too, not just the one attaching the image. Same
+    # heartbeat-coroutine technique as the session load/save tests
+    # above, for the same reason a concurrent-request race wouldn't
+    # reliably catch it.
+    import time
+
+    import httpx
+
+    _force_mock_only(monkeypatch)
+
+    real_extra_content_blocks = app_module._extra_content_blocks
+
+    def slow_extra_content_blocks(image_base64, image_media_type):
+        time.sleep(0.3)  # simulate a slow/large real-world image decode
+        return real_extra_content_blocks(image_base64, image_media_type)
+
+    monkeypatch.setattr(app_module, "_extra_content_blocks", slow_extra_content_blocks)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.05)
+            ticks += 1
+
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        hb_task = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0)
+        resp = await client.post(
+            "/chat",
+            json={
+                "message": "describe this",
+                "image_base64": base64.b64encode(b"fake-image-bytes").decode(),
+                "image_media_type": "image/png",
+            },
+        )
+        hb_task.cancel()
+
+    assert resp.status_code == 200
+    assert ticks >= 3, f"event loop only ticked {ticks} times -- looks frozen"
+
+
 def test_chat_without_session_does_not_persist(tmp_path, monkeypatch):
     _force_mock_only(monkeypatch)
     monkeypatch.setattr(session_module, "DEFAULT_SESSIONS_DIR", tmp_path)
