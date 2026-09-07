@@ -57,14 +57,24 @@ non-thinking registry entries risks a real request failure rather than a
 hypothetical one — same reasoning openai_provider.py names for
 `reasoning_effort`.
 
-Also honestly named as unhandled: network-level connection failures.
-Unlike the `anthropic`/`openai` SDKs, which document a dedicated
-`APIConnectionError`, this session found no equivalent documented
-exception type for `google-genai` to catch with confidence -- only
-`errors.ClientError`/`errors.ServerError` (both `errors.APIError`
-subclasses, covering HTTP-level failures) are handled below. A real
-connection failure will surface as an uncaught exception rather than a
-`StreamErrorEvent` until verified against a live run.
+Network-level connection failures, previously honestly named as
+unhandled ("this session found no equivalent documented exception type
+for `google-genai` to catch with confidence"), are now closed: reading
+`google.genai._api_client` directly shows the SDK transports every
+request over `httpx` with no wrapping exception type of its own for
+transport-level failures, unlike `errors.ClientError`/`errors.
+ServerError` (both `errors.APIError` subclasses) which the SDK raises
+itself for HTTP-level (4xx/5xx) failures. Confirmed live (no API key
+needed -- a `genai.Client` pointed at a genuinely unreachable host
+fails before auth ever matters): a real DNS resolution failure raised
+`httpx.ConnectError` completely uncaught, exactly as predicted here
+before this fix. `httpx.RequestError` (the base of `ConnectError`/
+`TimeoutException`/every other transport-level failure, a direct
+sibling of `httpx.HTTPStatusError` -- so this can never shadow the
+status-code handling below) is now caught explicitly, matching the
+"network" `StreamErrorEvent` code and `retryable=True` the `anthropic`/
+`openai` adapters' own `APIConnectionError` handlers already use for
+the identical failure class.
 
 A real bug found (and fixed) in the same family: `errors.
 UnknownApiResponseError` -- raised by the SDK's own
@@ -80,6 +90,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import httpx
 from google import genai
 from google.genai import errors, types
 
@@ -396,6 +407,25 @@ class GoogleProvider:
             # something we can't make sense of" shape as the Ollama
             # streaming-JSON bug, just one layer down inside the SDK.
             yield StreamErrorEvent(code="provider", detail=str(e), retryable=True)
+            return
+        except httpx.RequestError as e:
+            # A real bug found live, one layer below every other handler
+            # above: those all catch exceptions the google-genai SDK
+            # raises AFTER getting some response from the network (an
+            # HTTP status, or a malformed body) -- this catches the
+            # request never getting that far at all. `httpx.RequestError`
+            # is a direct sibling of `httpx.HTTPStatusError` (both are
+            # `httpx.HTTPError`), so it can never shadow the status-code
+            # handling above; it's the base of `ConnectError`/
+            # `TimeoutException`/every other transport-level failure.
+            # Confirmed live: a `genai.Client` pointed at a genuinely
+            # unreachable host (no API key needed -- the request fails
+            # before auth is ever checked) raised `httpx.ConnectError`
+            # completely uncaught before this fix. Matches the "network"
+            # code and `retryable=True` the `anthropic`/`openai` adapters'
+            # own `APIConnectionError` handlers already use for the
+            # identical failure class.
+            yield StreamErrorEvent(code="network", detail=str(e), retryable=True)
             return
 
         # Appended, not inserted at the front -- any trailing text (the

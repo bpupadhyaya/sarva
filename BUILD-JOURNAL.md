@@ -23479,4 +23479,50 @@ No test suite changes (pure documentation/comment accuracy, no runtime
 behavior changed) -- full suite reconfirmed green (952 passed, 1
 skipped, 11 deselected), `ruff check`/`ruff format --check` both clean.
 
+## Round 442: GoogleProvider's own honestly-named "unhandled network failure" gap, closed by reading the SDK's actual transport layer instead of guessing
+
+`google_provider.py`'s own module docstring has named this gap
+explicitly since it was written: "this session found no equivalent
+documented exception type for google-genai to catch with confidence"
+for network-level connection failures, unlike Anthropic/OpenAI's own
+documented `APIConnectionError`. Closed by asking a narrower, answerable
+question instead of the one that stalled before: not "what does
+google-genai call this," but "what transport library does it actually
+use underneath."
+
+**Confirmed by reading `google.genai._api_client` directly**: every
+request is transported over `httpx`, with no wrapping exception type
+of the SDK's own for transport-level failures -- unlike `errors.
+ClientError`/`errors.ServerError`, which the SDK does raise itself,
+translated from an actual HTTP response it received. **Confirmed live,
+no API key needed**: a real `genai.Client` constructed with
+`http_options=types.HttpOptions(base_url=<a genuinely unreachable
+host>)` fails before authentication is ever checked, reaching this
+exact failure path with zero credentials. `httpx.ConnectError`
+propagated completely uncaught, exactly as the module's own honest
+note predicted.
+
+**Fixed** with `except httpx.RequestError as e:` -- the base of
+`ConnectError`/`TimeoutException`/every other transport-level failure
+httpx defines, and a direct sibling of `httpx.HTTPStatusError` (both
+are `httpx.HTTPError`), so it can never shadow the status-code handling
+`errors.ClientError`/`errors.ServerError` already cover. Mapped to the
+"network" `StreamErrorEvent` code and `retryable=True`, matching the
+`anthropic`/`openai` adapters' own `APIConnectionError` handlers for
+the identical failure class exactly.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test (a fake stream raising `httpx.ConnectError` mid-iteration,
+mirroring this file's own existing malformed-response test's fake-
+async-stream pattern) fail with the raw, uncaught exception propagating
+straight out of `generate()`, restored. 1 new test, 964 -> 965 Python
+tests. Full suite: 953 passed, 1 skipped, 11 deselected. `ruff check`/
+`ruff format --check` both clean. `docs/providers.md`'s existing
+uncaught-SDK-exception narrative extended -- this closes the last of
+the three real SDK-based adapters' documented "unhandled" gaps;
+Anthropic and OpenAI both already had a real `APIConnectionError` from
+day one, and Google's own equivalent stayed honestly open until reading
+the transport layer directly (rather than the SDK's own documented
+exception surface) found it.
+
 **Next:** continuing the hardening sweep, module by module.

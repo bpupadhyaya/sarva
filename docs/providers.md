@@ -465,6 +465,46 @@ async-stream infra), 547 → 550 Python tests. **This closes the
 adapters (Anthropic, OpenAI, Google) — Ollama's own equivalent
 (malformed NDJSON, not an SDK exception) was already closed earlier.**
 
+### The network-level connection gap this chapter's own paragraph above named as still-open, closed by reading the SDK's actual transport layer rather than guessing
+
+The one deliberately-deferred gap the fix above explicitly named — "no
+documented `google-genai` equivalent to `APIConnectionError` was
+found" — closed by asking a narrower, answerable question instead:
+not "what does google-genai call this," but "what library does it
+actually use underneath." Reading `google.genai._api_client` directly
+answers it: every request is transported over `httpx`, with no
+wrapping exception type of the SDK's own for transport-level failures
+(unlike `errors.ClientError`/`errors.ServerError`, which the SDK does
+raise itself, translated from an actual HTTP response it received).
+
+**Confirmed live, no API key needed**: a real `genai.Client`
+constructed with `http_options=types.HttpOptions(base_url=<a
+genuinely unreachable host>)` fails before authentication is ever
+checked, so no credentials are required to reach this exact failure
+path. The result: `httpx.ConnectError` propagated completely uncaught,
+exactly as the earlier, honest "unhandled" note predicted. Fixed with
+`except httpx.RequestError as e:` — the base of `ConnectError`/
+`TimeoutException`/every other transport-level failure httpx defines,
+and a direct sibling of `httpx.HTTPStatusError` (both are
+`httpx.HTTPError`), so it can never shadow the status-code handling
+`errors.ClientError`/`errors.ServerError` already cover. Mapped to the
+"network" `StreamErrorEvent` code and `retryable=True`, matching the
+`anthropic`/`openai` adapters' own `APIConnectionError` handlers for
+the identical failure class exactly.
+
+Verified with a genuine revert-and-check: reverted, watched the new
+test (a fake stream raising `httpx.ConnectError` mid-iteration,
+mirroring this file's own existing malformed-response test's fake-async-
+stream pattern) fail with the raw, uncaught `httpx.ConnectError`
+propagating straight out of `generate()`, restored. 1 new test, 964 →
+965 Python tests. **This is the last of the three real SDK-based
+adapters' documented "unhandled" gaps to close — Anthropic and OpenAI
+both already had a real `APIConnectionError` to catch from day one;
+Google's own equivalent was genuinely harder to find and stayed
+honestly open until this fix identified it by reading the transport
+layer directly instead of trusting the SDK's own documented exception
+surface.**
+
 ### Malformed tool-call-arguments JSON silently became an empty dict, with no signal anywhere — the one OpenAI-specific accumulation gap the interleaving test above didn't cover
 
 The tool-call streaming shape named earlier in this chapter — OpenAI

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 from google.genai import errors
 from sarva.multimodal.content import Message, TextBlock
 from sarva.providers.base import (
@@ -325,3 +326,29 @@ async def test_generate_yields_a_clean_stream_error_on_a_malformed_sdk_response(
     assert events[0].code == "provider"
     assert events[0].retryable is True
     assert "Failed to parse response as JSON" in events[0].detail
+
+
+async def test_generate_yields_a_clean_stream_error_on_a_real_network_failure():
+    # A real bug found live, one layer below the malformed-response fix
+    # above: those errors.* handlers only ever catch exceptions the SDK
+    # raises AFTER getting some response from the network. A genuine
+    # transport-level failure (no response at all) is not wrapped by the
+    # SDK in any errors.APIError subclass -- confirmed live with a real
+    # genai.Client pointed at a genuinely unreachable host (no API key
+    # needed, since the request fails before auth is ever checked):
+    # httpx.ConnectError propagated completely uncaught before this fix.
+    # httpx.RequestError is what actually gets raised for every
+    # transport-level failure (ConnectError, TimeoutException, ...), a
+    # direct sibling of httpx.HTTPStatusError, so it can never shadow
+    # the status-code handling already covered by errors.ClientError/
+    # ServerError above.
+    exc = httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")
+    provider = GoogleProvider(client=_FakeClient(error=exc))
+
+    events = [e async for e in provider.generate(_simple_request())]
+
+    assert len(events) == 1
+    assert isinstance(events[0], StreamErrorEvent)
+    assert events[0].code == "network"
+    assert events[0].retryable is True
+    assert "nodename nor servname" in events[0].detail
