@@ -36,6 +36,7 @@ from pydantic import TypeAdapter
 
 from sarva.atomic_write import atomic_write_bytes
 from sarva.multimodal.content import Message
+from sarva.paths import sarva_home
 
 if sys.platform == "win32":
     import msvcrt
@@ -44,7 +45,11 @@ else:
 
 _MESSAGES_ADAPTER: TypeAdapter[list[Message]] = TypeAdapter(list[Message])
 
-DEFAULT_SESSIONS_DIR = Path.home() / ".sarva" / "sessions"
+# See sarva.paths' own module docstring: a SARVA_HOME environment
+# variable override, checked once here at import time -- the exact real
+# gap discovered by this project's own testing practice silently
+# writing to the real ~/.sarva/sessions instead of an intended sandbox.
+DEFAULT_SESSIONS_DIR = sarva_home() / "sessions"
 
 # A real bug found by a fresh-eyes sweep: `$` in Python's `re` does NOT
 # mean "end of string" -- per the stdlib's own documentation it matches

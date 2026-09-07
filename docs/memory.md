@@ -9,6 +9,52 @@ every conversation, found by exact text). The third layer was a real,
 named-but-unbuilt gap for a long time — closed further down this
 chapter.
 
+## `~/.sarva` had no environment-variable override at all, across all three memory tiers and config — a real gap, found by this project's own testing practice tripping over it
+
+Every path in this chapter defaults to somewhere under `~/.sarva` —
+`sarva.memory.session.DEFAULT_SESSIONS_DIR`, `sarva.memory.vector.
+DEFAULT_MEMORY_DB_PATH`, `sarva.memory.longterm.
+DEFAULT_LONGTERM_MEMORY_DIR`, and `sarva.config.DEFAULT_CONFIG_PATH`
+(a different module, the same home) — each independently hardcoded
+`Path.home() / ".sarva" / <subpath>`, with no way to redirect any of
+them.
+
+**Confirmed live and consequential, not hypothetical:** this project's
+own development practice repeatedly assumed a `SARVA_HOME` environment
+variable would sandbox a real `sarva serve`/`sarva chat` invocation away
+from the actual user's home directory during testing — it silently did
+nothing, since no such variable was ever read anywhere. Real, dated
+session files (session names, message counts) from live concurrency and
+tool-use test rounds ended up written straight into this machine's
+genuine `~/.sarva/sessions/`, discovered only when `sarva sessions list`
+against the real, unmodified home turned up dozens of test-named
+sessions that were never meant to persist there. The same exposure
+applies to anyone else testing Sarva locally, running it in CI, or
+wanting more than one isolated profile on one machine — an ordinary
+need, not an edge case unique to this project's own workflow.
+
+**Fixed** with one shared function, `sarva.paths.sarva_home()` (checked
+once, at each of the four modules' own import time — the same moment
+their `Path.home() / ".sarva"` constants were always computed, so every
+existing test that monkeypatches those constants directly is
+unaffected): it returns `Path(os.environ["SARVA_HOME"])` if set, else
+`Path.home() / ".sarva"` exactly as before. All four call sites now go
+through it — the identical "one shared function instead of several
+places that could drift" reasoning `sarva.atomic_write`'s own
+consolidation already applies elsewhere in this project — so setting
+`SARVA_HOME` once redirects sessions, vector memory, long-term memory,
+and config together as one coherent profile, rather than needing four
+separate overrides that could disagree.
+
+**Verified two ways:** a direct unit test of `sarva_home()` itself
+(environment set/unset, `monkeypatch.setenv`/`delenv`), and — the test
+that actually proves the real-world mechanism, not just the function in
+isolation — a genuinely fresh `subprocess` invocation (module-level
+constants are computed once per real process, the same way every actual
+`sarva` CLI run works; an in-process `CliRunner` call reusing already-
+imported modules could not observe this) confirming all four defaults
+land under a given `SARVA_HOME` in one real process.
+
 ## Session persistence: plain files
 
 `sarva.memory.session.SessionStore` is a saved conversation — one JSON

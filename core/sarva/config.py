@@ -57,13 +57,20 @@ import sys
 from pathlib import Path
 
 from sarva.atomic_write import atomic_write_text
+from sarva.paths import sarva_home
 
 if sys.platform == "win32":
     import msvcrt
 else:
     import fcntl
 
-DEFAULT_CONFIG_PATH = Path.home() / ".sarva" / "config.json"
+# See sarva.paths' own module docstring for the real, live-confirmed gap
+# this closes: a SARVA_HOME environment variable override, checked once
+# here at import time (the same way every prior version of this
+# constant was computed, just now via the shared helper) -- a fresh
+# `sarva` process reads it correctly; existing tests that monkeypatch
+# this constant directly are unaffected.
+DEFAULT_CONFIG_PATH = sarva_home() / "config.json"
 
 # The exact env-var names sarva.runtime checks -- kept here as the one
 # place both sides agree on the set of names this module manages.

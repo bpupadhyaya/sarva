@@ -23182,4 +23182,65 @@ fix); Python full suite (946 passed, 1 skipped, 11 deselected) and
 `ruff check`/`ruff format --check` reconfirmed clean since round 434,
 unaffected by this round's Rust-only change.
 
+## Round 436: `~/.sarva` had no environment-variable override anywhere -- found by this project's own testing practice tripping over it
+
+Continuing live execution testing, this time via a genuinely
+unglamorous but real discovery: running `sarva sessions list` against
+this development machine's REAL, unmodified `~/.sarva` (not a sandbox)
+turned up dozens of test-named sessions (`session-1` through
+`session-15`, `shared-session` with 96 messages, ...) that should never
+have persisted there.
+
+**Confirmed live**: this project's own development practice across
+several earlier rounds this session had assumed a `SARVA_HOME`
+environment variable would sandbox real `sarva serve`/`sarva chat`
+invocations away from the actual user's home directory during testing.
+It silently did nothing -- `grep -rn "SARVA_HOME" core/` returned zero
+matches. `sarva.config.DEFAULT_CONFIG_PATH`, `sarva.memory.session.
+DEFAULT_SESSIONS_DIR`, `sarva.memory.vector.DEFAULT_MEMORY_DB_PATH`,
+and `sarva.memory.longterm.DEFAULT_LONGTERM_MEMORY_DIR` each
+independently hardcoded `Path.home() / ".sarva" / <subpath>`, with no
+way to redirect any of them. The same exposure applies to anyone else
+testing Sarva locally, running it in CI, or wanting an isolated
+profile -- an ordinary need, not unique to this session's own workflow.
+
+**Fixed** with one shared function, `sarva.paths.sarva_home()` (new
+module, matching `sarva.atomic_write`'s own precedent for small,
+focused, cross-cutting helpers): returns `Path(os.environ["SARVA_HOME"])`
+if set, else `Path.home() / ".sarva"` exactly as before. All four call
+sites now go through it, checked once at each module's own import time
+-- the same moment their constants were always computed, so every
+existing test that monkeypatches those constants directly is
+unaffected -- so one `SARVA_HOME` redirects sessions, vector memory,
+long-term memory, and config together as one coherent profile.
+
+**Verified two ways**: a direct unit test of `sarva_home()` (env set/
+unset), and a genuinely fresh `subprocess` invocation confirming all
+four defaults land under a given `SARVA_HOME` in one real process --
+an in-process `CliRunner` call reusing already-imported modules could
+not observe this, since the four constants are computed once per
+process, the same way a real `sarva` CLI run works. **Verified with a
+genuine revert-and-check**: moved the new `sarva/paths.py` aside and
+reverted the four call sites, watched the new tests fail at collection
+time with `ModuleNotFoundError: No module named 'sarva.paths'` --
+about as decisive a failure as this project's revert-and-check
+discipline has produced -- restored both.
+
+**Also cleaned up the real, live consequence this round's own
+discovery surfaced**: removed the unambiguously test-named session
+files this session's own earlier live-testing rounds had left in this
+machine's actual `~/.sarva/sessions/` (`session-1` through `session-15`
+and their `-t0` variants, `shared-session`, `test-session-1/2`, plus
+matching `.lock` files) -- confirmed by exact match against this
+session's own test-script naming conventions before deleting anything;
+left `default.json`/`demo.json`/`demo2.json`/`web.json` untouched since
+their origin (weeks-old timestamps, unrelated naming) couldn't be
+confirmed as this session's own artifacts.
+
+4 new tests, 958 -> 962 Python tests. Full suite: 950 passed, 1
+skipped, 11 deselected. `ruff check`/`ruff format --check` both clean.
+`docs/memory.md`'s opening extended with a new section covering all
+four affected modules at once, since no existing narrative covered this
+exact cross-cutting pattern.
+
 **Next:** continuing the hardening sweep, module by module.

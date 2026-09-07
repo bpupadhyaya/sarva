@@ -38,7 +38,11 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_MEMORY_DB_PATH = Path.home() / ".sarva" / "memory.db"
+from sarva.paths import sarva_home
+
+# See sarva.paths' own module docstring: a SARVA_HOME environment
+# variable override, checked once here at import time.
+DEFAULT_MEMORY_DB_PATH = sarva_home() / "memory.db"
 
 _TOKEN_PATTERN = re.compile(r"\w+")
 

@@ -30,8 +30,11 @@ from pathlib import Path
 
 from sarva.atomic_write import atomic_write_text
 from sarva.file_lock import exclusive_lock
+from sarva.paths import sarva_home
 
-DEFAULT_LONGTERM_MEMORY_DIR = Path.home() / ".sarva" / "memory"
+# See sarva.paths' own module docstring: a SARVA_HOME environment
+# variable override, checked once here at import time.
+DEFAULT_LONGTERM_MEMORY_DIR = sarva_home() / "memory"
 
 # A real bug found by a fresh-eyes sweep, the identical "ASCII-only
 # normalization pattern" shape already found and fixed once for
