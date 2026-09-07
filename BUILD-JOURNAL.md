@@ -23386,4 +23386,51 @@ test, 963 -> 964 Python tests. Full suite: 952 passed, 1 skipped, 11
 deselected. `ruff check`/`ruff format --check` both clean.
 `docs/memory.md`'s `SARVA_HOME` section extended with this follow-up.
 
+## Round 440: the desktop app's `events.ts` had a SECOND instance of the exact drift bug already found and fixed once in the same file
+
+Continuing the fresh-eyes sweep of the desktop frontend (round 435
+covered the Rust sidecar; this round the TypeScript side), applying
+this project's own established "compare a hand-mirrored type against
+its sibling SDK mirror directly" lens -- the identical method the
+file's own docstring already documents finding a missing `spend` field
+with.
+
+**Confirmed live**: `apps/desktop/src/events.ts`'s `ToolCall` was a
+minimal stub (`id`/`name`/`arguments`, no `type`), and `tool_finished`'s
+own `result` field was `{ is_error: boolean }` only. The real
+`sarva.multimodal.content.ToolCallBlock`/`ToolResultBlock` Pydantic
+models -- what actually crosses `/ws/chat`'s wire -- also carry `type`,
+and `ToolResultBlock` additionally carries `tool_call_id` and `content`
+(the tool's actual output). `sdks/typescript/src/types.ts`'s own
+versions of the same two types already modeled all of this completely;
+only this app's independent, never-reconciled copy had drifted again.
+`App.tsx` only reads `.name`/`.arguments`/`.is_error` today, so nothing
+was visibly broken -- but a future feature showing what a tool actually
+returned (not just an ok/error marker) would have hit fields this
+"typed mirror" claimed didn't exist, even though the server has always
+sent them.
+
+**Fixed** by adding the missing fields: a new local `ToolResult`
+interface (`type`, `tool_call_id`, `content`, `is_error`) and a minimal
+`ContentBlock` type matching the SDK's own honest "partial, not
+guessed" scoping for the same union, plus `type: "tool_call"` on
+`ToolCall` itself.
+
+**Verified with a genuine compile-time revert-and-check** -- the right
+kind of "test" for a pure type-accuracy fix with no current runtime
+consumer, matching the precedent the file's own first drift fix (the
+missing `spend` field) already set with no dedicated vitest test
+either: a temporary probe added to `App.tsx` reading `event.result.
+tool_call_id`/`.content` was confirmed to fail `tsc -b` against the old
+type (`Property 'tool_call_id' does not exist on type '{ is_error:
+boolean }'`), then confirmed to compile cleanly with the fix, before
+the probe itself was removed (not a real feature, just this fix's own
+decisiveness check). `npm run build`/`npm test` both clean (32 tests,
+unchanged); `dist/` output byte-identical to before (same content-
+hashed filenames), confirming zero runtime behavior change, so
+`core/sarva/server/static/` needed no re-sync.
+
+No Python files touched this round. `docs/packaging.md`'s existing
+`AgentEvent`-mirror-drift narrative extended with this second instance.
+
 **Next:** continuing the hardening sweep, module by module.

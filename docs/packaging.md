@@ -291,6 +291,35 @@ touching any of them); the compiled `dist/` output is byte-identical
 fix with zero runtime behavior change, so `core/sarva/server/static/`
 needed no re-sync.
 
+**A second instance of the identical drift class, found this session
+by comparing this file against the SDK's own mirror directly rather
+than trusting its own claim to be accurate a second time**: `ToolCall`
+here was a minimal stub (`id`/`name`/`arguments`, no `type`), and
+`tool_finished`'s own `result` field was `{ is_error: boolean }` only
+— but the real `sarva.multimodal.content.ToolCallBlock`/
+`ToolResultBlock` Pydantic models (what actually crosses the wire)
+also carry `type`, and `ToolResultBlock` additionally carries
+`tool_call_id` and `content` (the tool's actual output text/data) —
+fields `sdks/typescript/src/types.ts`'s own versions of the same two
+types already modeled completely. `App.tsx` only ever reads `.name`/
+`.arguments`/`.is_error` today, so nothing was visibly broken — but a
+future feature actually showing what a tool returned (not just an ok/
+error marker) would have hit fields this "typed mirror" claimed didn't
+exist, even though the server has always sent them, the identical
+"TypeScript actively rejects real data the server provides" shape both
+prior instances of this bug class share. Fixed the same way: added the
+missing fields (a new local `ToolResult` interface, plus a minimal
+`ContentBlock` type matching the SDK's own honest "partial, not
+guessed" scoping for the same union). Verified with a genuine
+compile-time revert-and-check — a temporary probe reading `event.
+result.tool_call_id`/`.content` in `App.tsx` was confirmed to fail
+`tsc -b` with the exact old, incomplete type (`Property 'tool_call_id'
+does not exist on type '{ is_error: boolean }'`) and compile cleanly
+with the fix, before the probe itself was removed (not a real feature
+being added, just this fix's own decisiveness check). `npm run build`/
+`npm test` both clean (32 tests, unchanged); `dist/` output byte-
+identical again, confirming zero runtime behavior change.
+
 - **`speak TEXT [--out speech.wav] [--voice NAME]`** — local
   text-to-speech, no API key, no network. See "Local speech" below.
 - **`transcribe AUDIO_FILE [--model-size tiny]`** — local speech-to-text
