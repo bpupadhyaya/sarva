@@ -22997,5 +22997,41 @@ NOT RAISE ValueError`), restored. 1 new test, 954 -> 955 Python tests.
 Full suite: 943 passed, 1 skipped, 11 deselected. `ruff check`/`ruff
 format --check` both clean. `docs/foundry/transformer.md`'s existing
 `Projector` description extended with this fix.
+---
+
+## Round 432: `WarmupCosineSchedule.lr_at()` had no guard of its own against a negative step, resting entirely on `Trainer`'s own already-fixed validation
+
+Continuing the sweep, gave `sarva_foundry.train.schedule` -- a module
+whose `Trainer.load_checkpoint` call site was already fixed once for
+this exact symptom -- a fresh-eyes pass on the schedule class itself,
+applying the same "centralize instead of resting on caller discipline"
+lens that already found the `VectorMemoryStore.search` gap.
+
+**Confirmed live**: `Trainer` never lets `self.step` go negative (starts
+at 0, only increments, and `load_checkpoint` already validates a loaded
+step before assigning it) -- but `lr_at()`, a genuinely public method,
+had no guard of its own. Calling `lr_at(-200)` directly -- bypassing
+`Trainer` entirely, the way any future direct caller of this public
+method would -- returned `-0.0199`, a negative learning rate LARGER in
+magnitude than that schedule's own configured `peak_lr` (`0.01`),
+reproducing the exact symptom `Trainer.load_checkpoint`'s own fix
+already closed at its one call site, just reachable again from
+underneath it. `Trainer` can't hit this today; a future direct caller
+(an ablation script, a notebook computing a custom schedule) could.
+
+**Fixed** by rejecting a negative `step` directly inside `lr_at()`,
+matching the same "don't rest correctness on every caller re-deriving
+the same validation" reasoning `sarva.atomic_write`'s consolidation and
+`VectorMemoryStore.search`'s own `top_k` guard already apply elsewhere
+in this project -- the next caller of this public method inherits the
+fix for free.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (`DID NOT RAISE
+ValueError`), restored; confirmed ordinary non-negative steps are
+unaffected. 1 new test, 955 -> 956 Python tests. Full suite: 944
+passed, 1 skipped, 11 deselected. `ruff check`/`ruff format --check`
+both clean. `docs/foundry/training.md`'s existing `peak_lr`/`min_lr`
+validation narrative extended with this follow-up section.
 
 **Next:** continuing the hardening sweep, module by module.

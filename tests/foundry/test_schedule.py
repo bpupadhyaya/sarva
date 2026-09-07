@@ -68,6 +68,21 @@ def test_rejects_negative_warmup_steps():
         _schedule(warmup_steps=-1)
 
 
+def test_lr_at_rejects_a_negative_step():
+    # A real gap found by a fresh-eyes sweep, one layer below where this
+    # class's own only real caller (Trainer, which never lets self.step
+    # go negative) already guards the identical value: lr_at() itself
+    # had no guard of its own. Confirmed live: lr_at(-200) returned
+    # -0.0199 -- a negative learning rate LARGER in magnitude than this
+    # exact schedule's own peak_lr -- reproducing the literal symptom
+    # Trainer.load_checkpoint's own fix already closed at that one call
+    # site, just reachable again from underneath it via any future
+    # direct caller of this public method.
+    sched = _schedule()
+    with pytest.raises(ValueError, match="step"):
+        sched.lr_at(-200)
+
+
 def test_rejects_total_steps_not_exceeding_warmup_steps():
     with pytest.raises(ValueError, match="total_steps"):
         _schedule(warmup_steps=100, total_steps=100)

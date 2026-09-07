@@ -239,6 +239,27 @@ literal old bug's own shape: `DID NOT RAISE ValueError` for a
 non-positive/non-finite `peak_lr` and a negative/non-finite `min_lr`.
 2 new tests, 877 → 879 Python tests.
 
+**A much later fresh-eyes sweep found that fix had never been
+centralized into `lr_at()` itself.** `Trainer` never lets `self.step`
+go negative (it starts at 0, only ever increments, and
+`Trainer.load_checkpoint`'s own already-fixed validation, right above
+this section, guards the one place an untrusted on-disk value could
+set it) -- but `lr_at()`, a genuinely public method, still had no
+guard of its own for a directly-supplied negative step. Confirmed live:
+calling `lr_at(-200)` directly (bypassing `Trainer` entirely) returned
+`-0.0199` -- a negative learning rate LARGER in magnitude than that
+same schedule's own configured `peak_lr` (`0.01`) -- reproducing the
+exact symptom `Trainer.load_checkpoint`'s own fix already closed at
+that one call site, just reachable again from underneath it via any
+future direct caller of this public method (an ablation script, a
+notebook computing a custom schedule). Fixed by rejecting a negative
+`step` inside `lr_at()` itself, matching the same "don't rest
+correctness on every caller re-deriving the same validation" reasoning
+`sarva.atomic_write`'s consolidation and `VectorMemoryStore.search`'s
+own `top_k` guard already apply elsewhere in this project. Verified by
+reverting and watching the new test fail with `DID NOT RAISE
+ValueError`. 1 new test, 955 → 956 Python tests.
+
 ## Try it
 
 ```bash

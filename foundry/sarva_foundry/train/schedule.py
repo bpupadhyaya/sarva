@@ -68,7 +68,28 @@ class WarmupCosineSchedule:
         min_lr over the remaining steps, holding at min_lr past
         `total_steps` (a run that overshoots its planned length degrades
         gracefully to the floor rather than the schedule going undefined
-        or, worse, cosine's periodicity silently ramping back up)."""
+        or, worse, cosine's periodicity silently ramping back up).
+
+        A real gap found by a fresh-eyes sweep, one layer below where
+        this class's own only real caller (`Trainer`, which never lets
+        `self.step` go negative -- it starts at 0, only ever increments,
+        and `load_checkpoint` already validates a loaded step before
+        assigning it) already guards the identical value: this method
+        itself has no guard of its own. Confirmed live: `lr_at(-200)`
+        returns `-0.0199` -- a negative learning rate LARGER in
+        magnitude than this exact schedule's own configured
+        `peak_lr` (0.01) -- reproducing the literal symptom
+        `Trainer.load_checkpoint`'s own fix (see `trainer.py`) already
+        closed at that one call site, just reachable again from
+        underneath it. `Trainer` can't hit this today, but a future
+        direct caller of this public method (an ablation script, a
+        notebook computing a custom schedule) could. Fixed by rejecting
+        a negative `step` here too, matching the same "don't rest
+        correctness on every caller re-deriving the same validation"
+        reasoning `sarva.atomic_write`'s consolidation and
+        `VectorMemoryStore.search`'s own `top_k` guard already apply."""
+        if step < 0:
+            raise ValueError(f"step must be non-negative, got {step}")
         if step < self.warmup_steps:
             if self.warmup_steps == 0:
                 return self.peak_lr
