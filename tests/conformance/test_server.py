@@ -1284,6 +1284,51 @@ def test_websocket_tool_confirmation_approved_runs_the_tool(tmp_path, monkeypatc
     assert events[-1]["state"] == "done"
 
 
+def test_websocket_write_file_resolves_relative_to_an_explicit_serve_workdir_not_the_process_cwd(
+    tmp_path, monkeypatch
+):
+    # A real bug found by actually following this project's own README
+    # quickstart verbatim (`cd sarva && uv run sarva serve`), then asking
+    # a real local model to write a file through the web UI: the file
+    # landed directly inside the cloned Sarva repository's own root.
+    # Neither `/chat` nor `/ws/chat` ever passed `workdir` to `AgentLoop`,
+    # so both fell through to its default, resolved against the SERVER
+    # PROCESS's own current working directory -- confirmed by this
+    # exact file's own pre-existing sibling test immediately below,
+    # `test_websocket_tool_confirmation_approved_runs_the_tool`, whose
+    # own comment says outright "write_file resolves relative to the
+    # server's cwd" and works around it with `monkeypatch.chdir`. Unlike
+    # `sarva run` (has always taken an explicit `--workdir`), `sarva
+    # serve` had no way to configure or restrict this at all.
+    #
+    # Deliberately does NOT chdir here -- the whole point is proving an
+    # explicit `workdir` passed to `create_app` wins regardless of
+    # whatever directory the server process actually happens to be
+    # running from, the fix `serve`'s new `--workdir` CLI option relies
+    # on (cli.py).
+    call = ToolCallBlock(id="c1", name="write_file", arguments={"path": "hi.txt", "content": "hi"})
+    _use_scripted_mock(
+        monkeypatch,
+        script=[ScriptedTurn(tool_calls=[call]), ScriptedTurn(text="wrote it")],
+    )
+
+    client = TestClient(create_app(workdir=str(tmp_path)))
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "write a file for me", "auto": True})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    finished = [e for e in events if e["type"] == "tool_finished"]
+    assert len(finished) == 1
+    assert finished[0]["result"]["is_error"] is False
+    assert (tmp_path / "hi.txt").read_text() == "hi"
+    assert events[-1]["state"] == "done"
+
+
 def test_websocket_tool_confirmation_denied_skips_the_tool(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     call = ToolCallBlock(id="c1", name="write_file", arguments={"path": "hi.txt", "content": "hi"})

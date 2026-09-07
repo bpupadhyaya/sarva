@@ -528,6 +528,46 @@ Verified the new tests are real: reverted the fix and watched the
 cross-origin test fail with `DID NOT RAISE WebSocketDisconnect` (the
 connection was still fully accepted) before re-applying.
 
+### `sarva serve` had no `--workdir` at all — every session's file/shell tools shared one unconfigurable boundary: wherever the operator happened to launch it from
+
+A related but distinct gap from the CSWSH finding above — that one was
+about *who* could drive `/ws/chat`'s tools; this one is about *where*
+those tools were allowed to reach, once a legitimate caller is already
+driving them. Found by actually following this project's own README
+quickstart verbatim (`cd sarva && uv run sarva serve`), then using the
+web UI to ask a real local model to write a file. **Confirmed live: the
+file landed directly inside the cloned Sarva repository's own root.**
+Neither `/chat` nor `/ws/chat` ever passed a `workdir` to `AgentLoop`,
+so both fell through to its default (`"."`), which `_within_workdir`
+(`core/sarva/agent/tools.py`) resolves against the *server process's*
+own current working directory — confirmed independently by this
+project's own pre-existing test suite: `test_websocket_tool_
+confirmation_approved_runs_the_tool` (`tests/conformance/test_server.
+py`) already worked around this exact behavior with `monkeypatch.
+chdir(tmp_path)`, its own comment stating outright "write_file resolves
+relative to the server's cwd," treated as an unremarkable fact of the
+code rather than a gap worth closing.
+
+Unlike `sarva run` — which has always taken an explicit `--workdir`
+(see this doc's own command reference above) — `sarva serve` had no way
+to configure or restrict this at all. `_within_workdir` itself still
+correctly blocks escaping that boundary via `../..`; the gap was the
+boundary's own *default* being the entire project checkout, for anyone
+following the documented quickstart exactly, not a path-traversal hole
+in the existing sandboxing. Combined with the CSWSH gap this doc already
+covers (now fixed), the realistic pre-fix exposure was severe: any
+webpage a user had open, on a machine where `sarva serve` was running
+from its own repo checkout, could have driven real file writes/edits/
+shell execution anywhere under that checkout with zero user interaction.
+
+Fixed by threading an explicit `workdir` parameter through `create_app`
+(default `"."`, so every existing caller — including this file's own
+pre-existing tests — keeps its current behavior unchanged) into both
+`AgentLoop` construction sites, and adding a `--workdir` option to
+`serve` itself, matching `run`'s own. Verified with a genuine revert-
+and-check: reverted, watched the new test fail with `TypeError:
+create_app() got an unexpected keyword argument 'workdir'`, restored.
+
 ### The confirmation-reply read itself had no timeout and no shape validation — a crash and a hang, one layer deeper than every previous `/ws/chat` fix
 
 `ws_confirm`'s own `reply = await websocket.receive_json(); return

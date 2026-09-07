@@ -1186,13 +1186,25 @@ def transcribe(
 def serve(
     host: str = typer.Option("127.0.0.1", help="Host to bind."),
     port: int = typer.Option(8000, help="Port to bind."),
+    workdir: str = typer.Option(
+        ".",
+        help="Working directory for file/shell tools -- every /chat and /ws/chat "
+        "session shares this one boundary (matches `sarva run`'s own --workdir). "
+        "A real bug found by actually following this project's own README "
+        "quickstart (`cd sarva && uv run sarva serve`): with no way to restrict "
+        "this, the web UI's file/shell tools defaulted to the server process's "
+        "own launch directory -- the entire cloned repository, for anyone "
+        "following the documented quickstart exactly. Defaults to the current "
+        "directory for backward compatibility; set this explicitly to scope a "
+        "real deployment to an intended project directory.",
+    ),
 ) -> None:
     """Run the REST + WebSocket server — the surface a web UI or desktop app uses."""
     import uvicorn
 
     from sarva.server.app import create_app
 
-    uvicorn.run(create_app(), host=host, port=port)
+    uvicorn.run(create_app(workdir=workdir), host=host, port=port)
 
 
 if __name__ == "__main__":

@@ -170,7 +170,29 @@ def _extra_content_blocks(
     return []
 
 
-def create_app() -> FastAPI:
+def create_app(workdir: str = ".") -> FastAPI:
+    # A real bug found by actually following this project's own README
+    # quickstart verbatim: `cd sarva && uv run sarva serve`, then using
+    # the web UI at http://127.0.0.1:8000 to ask a real local model to
+    # write a file. Confirmed live: the file landed directly inside the
+    # cloned Sarva repository's own root -- neither `/chat` nor `/ws/chat`
+    # ever passed a `workdir` to `AgentLoop`, so both fell through to its
+    # default (`"."`), which `_within_workdir` (agent/tools.py) resolves
+    # against the SERVER PROCESS's own current working directory. Unlike
+    # `sarva run`, which has always taken an explicit `--workdir` option,
+    # `sarva serve` had no way to configure or restrict this at all --
+    # every `/chat`/`/ws/chat` session's file/shell tools (WriteFileTool,
+    # EditFileTool, RunShellTool, ...) shared one, unconfigurable
+    # boundary: wherever the operator happened to launch the server from.
+    # `_within_workdir` itself still correctly blocks escaping that
+    # boundary via `../..` -- the gap was the boundary's own default
+    # being the entire project checkout for anyone following the
+    # documented quickstart exactly, not a path-traversal hole in the
+    # existing sandboxing. Fixed by accepting an explicit `workdir` here
+    # (threaded from `serve`'s own new `--workdir` option, cli.py) and
+    # passing it to both `AgentLoop` construction sites below -- default
+    # unchanged (`"."`) so every existing caller of `create_app()` keeps
+    # today's behavior exactly, only now genuinely opt-out-able.
     app = FastAPI(
         title="Sarva",
         description="An open, all-in-one multimodal AGI tool.",
@@ -350,6 +372,7 @@ def create_app() -> FastAPI:
                         providers=providers,
                         tools=[],
                         confirm=always_allow,
+                        workdir=workdir,
                         degraders=default_degraders(),
                         verify=req.verify,
                     )
@@ -707,6 +730,7 @@ def create_app() -> FastAPI:
                             providers=providers,
                             tools=BUILTIN_TOOLS,
                             confirm=always_allow if auto else ws_confirm,
+                            workdir=workdir,
                             degraders=default_degraders(),
                             verify=verify,
                         )

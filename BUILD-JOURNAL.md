@@ -23083,4 +23083,50 @@ clean. `docs/agent-loop.md`'s existing pruning-race narrative (the
 mkdir-race and event-loop-freeze fixes to this exact function) extended
 with this third variant.
 
+## Round 434: `sarva serve` had no `--workdir` at all -- every session's file/shell tools shared one unconfigurable boundary, the server process's own launch directory
+
+Continuing live execution testing (this session's most productive
+method): actually followed this project's own README quickstart
+verbatim, `cd sarva && uv run sarva serve`, pulled a real local Ollama
+model (`qwen3:8b`, the exact one this project's own registry already
+names) to get genuine tool-calling through the full real stack, then
+asked it through the web UI's WebSocket path to write a file.
+
+**Confirmed live**: the file landed directly inside the cloned Sarva
+repository's own root. Neither `/chat` nor `/ws/chat` ever passed a
+`workdir` to `AgentLoop`, so both fell through to its default (`"."`),
+resolved by `_within_workdir` (`core/sarva/agent/tools.py`) against the
+SERVER PROCESS's own current working directory -- confirmed
+independently by this project's own pre-existing test suite:
+`test_websocket_tool_confirmation_approved_runs_the_tool` already
+worked around this exact behavior with `monkeypatch.chdir(tmp_path)`,
+its own comment stating outright "write_file resolves relative to the
+server's cwd," treated as an unremarkable fact rather than a gap.
+Unlike `sarva run` (has always taken an explicit `--workdir`), `sarva
+serve` had no way to configure or restrict this at all -- every
+`/chat`/`/ws/chat` session's file/shell tools shared one boundary:
+wherever the operator happened to launch the server from. Combined with
+the CSWSH gap this project already found and fixed (docs/packaging.md),
+the realistic pre-fix exposure was severe: any webpage a user had open,
+on a machine running `sarva serve` from its own repo checkout (the
+documented quickstart's exact path), could drive real file writes/
+edits/shell execution anywhere under that checkout with zero user
+interaction. `_within_workdir` itself still correctly blocked escaping
+the configured boundary via `../..` -- the gap was the boundary's own
+default being the entire project checkout, not a path-traversal hole in
+the existing sandboxing.
+
+**Fixed** by threading an explicit `workdir` parameter through
+`create_app` (default `"."`, so every existing caller keeps today's
+behavior unchanged) into both `AgentLoop` construction sites, and
+adding a `--workdir` option to `serve` itself, matching `run`'s own.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with `TypeError: create_app() got an unexpected keyword
+argument 'workdir'`, restored. 1 new test, 957 -> 958 Python tests.
+Full suite: 946 passed, 1 skipped, 11 deselected. `ruff check`/`ruff
+format --check` both clean. `docs/packaging.md`'s existing CSWSH
+server-security narrative extended with this related-but-distinct
+finding.
+
 **Next:** continuing the hardening sweep, module by module.
