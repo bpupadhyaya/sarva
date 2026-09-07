@@ -67,6 +67,7 @@ from sarva.multimodal.content import (
     degrade_message,
     required_modalities,
 )
+from sarva.paths import sarva_home
 from sarva.providers.base import (
     DoneEvent,
     GenerateRequest,
@@ -259,7 +260,30 @@ class AgentLoop:
         budget: Budget | None = None,
         task_class: TaskClass = TaskClass.MAIN,
         workdir: str = ".",
-        run_root: str = ".sarva/runs",
+        # A real bug found live, one layer under round 434's `sarva serve`
+        # --workdir fix: `run_root`'s own default was `.sarva/runs`, a bare
+        # relative path resolved against the PROCESS's own current working
+        # directory -- completely independent of `workdir` above (which
+        # only scopes file/shell TOOL execution) and independent of
+        # `SARVA_HOME` (sarva.paths, which scopes config/sessions/memory).
+        # Confirmed live: running ordinary `sarva run`/`sarva chat`
+        # invocations from this project's own repository checkout -- the
+        # exact directory the README's own quickstart says to `cd` into
+        # first -- silently accumulated 200+ real run-transcript
+        # directories directly inside the repo's own `.sarva/runs/`
+        # (gitignored, never actually committed, but still real local
+        # disk clutter mixed into a source checkout with no connection to
+        # either explicit scoping mechanism this project already has).
+        # Fixed by defaulting into the SAME `SARVA_HOME` profile
+        # `sarva.paths.sarva_home()` already unifies config/sessions/
+        # memory under, rather than a third, independent, CWD-relative
+        # concept -- a run's transcript is Sarva's own state, not
+        # something that belongs mixed into whatever directory a command
+        # happened to be invoked from. Still fully overridable (every
+        # existing test already passes this explicitly), so this only
+        # changes the two real callers that never did: `sarva.cli`'s
+        # `_chat`/`_run` and `sarva.server.app`'s `/chat`/`/ws/chat`.
+        run_root: str = str(sarva_home() / "runs"),
         degraders: dict[Modality, Degrader] | None = None,
         verify: bool = False,
     ):

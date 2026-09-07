@@ -23292,4 +23292,53 @@ Docs/help-text-only change (no new source behavior to regression-test);
 full suite reconfirmed green (950 passed, 1 skipped, 11 deselected),
 `ruff check`/`ruff format --check` both clean.
 
+## Round 438: `AgentLoop`'s own `run_root` default was a third, independent path-scoping concept -- never connected to `--workdir` or the just-added `SARVA_HOME`
+
+Immediate follow-up to round 436's `SARVA_HOME` fix, asking the natural
+next question while investigating a `run_code` tool test: does the
+run-retention system (`run_root`, `_prune_old_runs`,
+`_MAX_RETAINED_RUNS`) actually live under either real scoping mechanism
+this project now has (`--workdir`, `SARVA_HOME`)? Noticed only because
+a `run_code` test's transcript search under an isolated `SARVA_HOME`
+came back empty -- the transcript wasn't there.
+
+**Confirmed live**: `AgentLoop.__init__`'s `run_root` parameter
+defaulted to the bare relative string `.sarva/runs`, resolved against
+the PROCESS's own current working directory -- a third, independent
+concept from `workdir` (scopes tool execution) and from `SARVA_HOME`
+(scopes config/sessions/memory). Checking this project's own repo
+checkout directly: `.sarva/runs/` held exactly `_MAX_RETAINED_RUNS`
+(200) real run-transcript directories, silently accumulated from this
+session's own ordinary `sarva run`/`sarva chat` testing invoked from
+the repo root -- the exact directory the README's own quickstart says
+to `cd` into. Gitignored, never committed, so no data reached the
+public repository -- but real local disk clutter mixed into a source
+checkout for the identical CWD-relative reason `sarva serve`'s missing
+`--workdir` existed at all (round 434).
+
+**Fixed** by defaulting `run_root` into the same `SARVA_HOME` profile
+`sarva.paths.sarva_home()` already unifies config/sessions/memory
+under (`sarva_home() / "runs"`), rather than a third, independent,
+CWD-relative concept. Still fully overridable -- every existing test
+already passes `run_root` explicitly (confirmed: full suite green with
+zero changes needed to any of them) -- so this changed exactly the two
+real callers that never did: `sarva.cli`'s `_chat`/`_run` and
+`sarva.server.app`'s `/chat`/`/ws/chat`.
+
+**Verified with a genuinely fresh subprocess** (the default is computed
+once at `sarva.agent.loop`'s own module import time, the same moment
+every other `SARVA_HOME`-aware default already is), run from a
+directory unrelated to the given `SARVA_HOME` to rule out the old bug's
+exact shape reappearing by coincidence. **Verified with a genuine
+revert-and-check**: reverted, watched the new test fail with the
+literal old shape (`'.sarva/runs'` instead of the given home's own
+`runs` subdirectory), restored. Also cleaned up the real 200-directory
+`.sarva/runs/` clutter this round's own investigation found in this
+project's actual repo checkout.
+
+1 new test, 962 -> 963 Python tests. Full suite: 951 passed, 1 skipped,
+11 deselected. `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md`'s existing run-retention narrative cluster
+extended with this finding.
+
 **Next:** continuing the hardening sweep, module by module.

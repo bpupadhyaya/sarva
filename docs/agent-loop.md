@@ -283,6 +283,48 @@ Verified by reverting and watching the new test fail with the literal
 old shape (no `encoding` kwarg reaching the spy at all). 1 new test,
 918 → 919 Python tests.
 
+### `run_root`'s own default was a third, independent path-scoping concept — never connected to `--workdir` or to `SARVA_HOME`
+
+Much later, immediately after fixing `sarva serve`'s missing `--workdir`
+and adding the `SARVA_HOME` environment variable override (see
+`docs/memory.md`), a natural follow-up question: does the run-retention
+system this whole section documents — `run_root`, `_prune_old_runs`,
+`_MAX_RETAINED_RUNS` — actually live under either of those two now-real
+scoping mechanisms? It didn't. `AgentLoop.__init__`'s own `run_root`
+parameter defaulted to the bare relative string `".sarva/runs"`,
+resolved against the *process's own current working directory* — a
+third, completely independent concept from `workdir` (which only scopes
+file/shell *tool* execution) and from `SARVA_HOME` (which, until this
+fix, only scoped config/sessions/memory).
+
+**Confirmed live**: running ordinary `sarva run`/`sarva chat`
+invocations from this project's own repository checkout — the exact
+directory the README's own quickstart says to `cd` into first — this
+session's own testing had silently accumulated exactly `_MAX_RETAINED_
+RUNS` (200) real run-transcript directories directly inside the repo's
+own `.sarva/runs/`. Gitignored, never actually committed, so no data
+ever reached the public repository — but still real local disk clutter
+mixed into a source checkout, with no connection to either explicit
+scoping mechanism this project already provides, for the same
+CWD-relative reason `sarva serve`'s missing `--workdir` existed at all.
+
+Fixed by defaulting `run_root` into the same `SARVA_HOME` profile
+`sarva.paths.sarva_home()` already unifies config/sessions/memory
+under — `sarva_home() / "runs"` — rather than a third, independent,
+CWD-relative concept: a run's transcript is Sarva's own state, not
+something that belongs mixed into whatever directory a command happened
+to be invoked from. Still fully overridable (every existing test
+already passes `run_root` explicitly), so this changed exactly the two
+real callers that never did: `sarva.cli`'s `_chat`/`_run` and
+`sarva.server.app`'s `/chat`/`/ws/chat`. Verified with a genuinely fresh
+subprocess (the default is computed once at `sarva.agent.loop`'s own
+module import time, the same moment every other `SARVA_HOME`-aware
+default already is) run from a directory unrelated to the given
+`SARVA_HOME`, ruling out the old bug's exact shape reappearing by
+coincidence. Verified by reverting and watching the new test fail with
+the literal old shape (`'.sarva/runs'` instead of the given home's own
+`runs` subdirectory). 1 new test, 962 → 963 Python tests.
+
 ## Tool use: concurrent, typed, gated by one policy
 
 A `Tool` is a small, explicit contract:

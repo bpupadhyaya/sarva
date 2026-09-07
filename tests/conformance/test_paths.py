@@ -90,3 +90,49 @@ def test_a_fresh_subprocess_honors_sarva_home_for_config_and_memory_together(tmp
         str(home / "memory.db"),
         str(home / "memory"),
     ]
+
+
+def test_a_fresh_subprocess_scopes_agentloops_default_run_root_under_sarva_home_not_the_process_cwd(
+    tmp_path,
+):
+    # A real bug found live, one layer under the sarva-serve --workdir
+    # fix (see BUILD-JOURNAL.md): AgentLoop's own `run_root` default was
+    # a bare relative path, `.sarva/runs`, resolved against the SERVER/
+    # CLI PROCESS's own current working directory -- completely
+    # independent of `--workdir` (only scopes file/shell tool execution)
+    # and of SARVA_HOME (only scoped config/sessions/memory until this
+    # fix). Confirmed live: running ordinary `sarva run`/`sarva chat`
+    # invocations from this project's own repository checkout -- the
+    # exact directory the README's own quickstart says to `cd` into --
+    # silently accumulated 200+ real run-transcript directories directly
+    # inside the repo's own `.sarva/runs/`. This test proves the fix the
+    # one way that actually matters: a genuinely fresh process (the
+    # default is computed once at AgentLoop's own module import time, the
+    # same moment every other SARVA_HOME-aware default already is), run
+    # from a DIFFERENT cwd than the given SARVA_HOME, to rule out the
+    # old bug's own exact shape reappearing by coincidence.
+    home = tmp_path / "sandboxed-home"
+    unrelated_cwd = tmp_path / "unrelated-cwd"
+    unrelated_cwd.mkdir()
+    env = dict(os.environ)
+    env["SARVA_HOME"] = str(home)
+    core_src = str(Path(__file__).resolve().parent.parent.parent / "core")
+    env["PYTHONPATH"] = core_src
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import inspect\n"
+            "from sarva.agent.loop import AgentLoop\n"
+            "print(inspect.signature(AgentLoop.__init__).parameters['run_root'].default)\n",
+        ],
+        cwd=str(unrelated_cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(home / "runs")
