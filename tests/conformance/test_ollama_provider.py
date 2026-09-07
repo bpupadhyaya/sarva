@@ -330,6 +330,38 @@ async def test_generate_yields_a_clean_stream_error_on_a_mid_stream_error_chunk(
 
 
 @pytest.mark.asyncio
+async def test_generate_yields_a_clean_stream_error_on_a_dropped_connection_mid_stream():
+    # A real bug found live, one layer below this file's own existing
+    # `except httpx.ConnectError`/`except httpx.TimeoutException`
+    # handlers: those cover only two of `httpx.RequestError`'s many
+    # subtypes. Found by giving `google_provider.py`'s own broader
+    # `except httpx.RequestError` fix (see that module's docstring) a
+    # fresh-eyes sweep against this file, the one other adapter that
+    # also talks to httpx directly. `httpx.RemoteProtocolError` is a
+    # genuinely ordinary scenario this adapter is uniquely exposed to
+    # more than any other: the local `ollama serve` process itself
+    # crashing, restarting, or getting OOM-killed mid-response, dropping
+    # the connection before a complete message arrives. Confirmed live
+    # with a real `MockTransport` whose handler raises it: propagated
+    # completely uncaught before this fix.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body"
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OllamaProvider(client=client)
+
+    events = [e async for e in provider.generate(_req())]
+
+    assert len(events) == 1
+    assert isinstance(events[0], StreamErrorEvent)
+    assert events[0].code == "network"
+    assert events[0].retryable is True
+    assert "peer closed connection" in events[0].detail
+
+
+@pytest.mark.asyncio
 async def test_interleaved_text_and_tool_calls_keep_their_chronological_order():
     # A real bug found by a fresh-eyes sweep, the identical gap already
     # found and fixed in google_provider.py, just never propagated here:

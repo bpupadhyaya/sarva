@@ -505,6 +505,40 @@ honestly open until this fix identified it by reading the transport
 layer directly instead of trusting the SDK's own documented exception
 surface.**
 
+### The Google fix immediately surfaced the identical, narrower gap in the ONE OTHER adapter that also talks to `httpx` directly — Ollama
+
+A fresh-eyes sweep of `ollama_provider.py`, prompted directly by the
+Google fix just above: this is the only other real adapter that talks
+to `httpx` itself rather than going through a provider SDK, so does it
+have the same class of gap? It already had `except httpx.
+ConnectError`/`except httpx.TimeoutException` — but those are only two
+of `httpx.RequestError`'s many subtypes, the identical narrower-than-
+it-looks shape the Google fix's own broader `except httpx.RequestError`
+closed completely.
+
+**Confirmed live** with a real `httpx.MockTransport` whose handler
+raises `httpx.RemoteProtocolError` — a genuinely ordinary scenario for
+*this* adapter specifically, more than any other one in this project:
+the local `ollama serve` process itself crashing, restarting, or
+getting OOM-killed mid-response, dropping the connection before a
+complete message arrives. It propagated completely uncaught before
+this fix, the identical shape to the Google gap, just a narrower miss
+(two subtypes covered, not zero) rather than a total absence.
+
+**Fixed** with a third `except httpx.RequestError` clause added after
+the two existing specific ones, deliberately not replacing them —
+`ConnectError`'s own more detailed "cannot reach Ollama at {host}"
+message stays exactly as useful as before for the case that already
+had one; the new clause only ever catches what neither existing one
+already does. Verified with a genuine revert-and-check: reverted,
+watched the new test (a `MockTransport` handler raising `httpx.
+RemoteProtocolError`) fail with the raw exception propagating straight
+out of `generate()`, restored. 1 new test, 965 → 966 Python tests.
+**Between this and the Google fix directly above, both of this
+project's own httpx-direct adapters now handle the FULL
+`httpx.RequestError` family, not just the two subtypes each happened
+to have already named.**
+
 ### Malformed tool-call-arguments JSON silently became an empty dict, with no signal anywhere — the one OpenAI-specific accumulation gap the interleaving test above didn't cover
 
 The tool-call streaming shape named earlier in this chapter — OpenAI

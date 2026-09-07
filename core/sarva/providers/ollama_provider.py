@@ -14,6 +14,25 @@ test_ollama_terminal_event_law` run (see `OLLAMA_TEST_MODEL` there for
 overriding the pulled model) plus direct streaming and tool-call checks
 against the real running server — all passed. See BUILD-JOURNAL.md for
 the full verification record.
+
+`generate()`'s own `except httpx.ConnectError`/`except httpx.
+TimeoutException` only ever covered two of `httpx.RequestError`'s many
+subtypes — found by giving `google_provider.py`'s own, much broader
+`except httpx.RequestError` fix (see that module's docstring) a
+fresh-eyes sweep against this file, the one other adapter that also
+talks to `httpx` directly. Confirmed live with a `MockTransport` whose
+handler raises `httpx.RemoteProtocolError` (a genuinely ordinary local
+scenario this adapter is uniquely exposed to, more than any other
+adapter here: the local `ollama serve` process itself crashing,
+restarting, or getting OOM-killed mid-response, dropping the
+connection with no complete message) -- it propagated completely
+uncaught, identical in shape to the Google gap just closed. Now caught
+by a third, broader `except httpx.RequestError` clause after the two
+existing specific ones (unchanged, so their own more detailed messages
+stay exactly as before) -- catches every other transport-level failure
+(`ReadError`, `WriteError`, `RemoteProtocolError`, `PoolTimeout`, ...)
+this adapter's own local-server exposure makes ordinary, not just
+theoretical.
 """
 
 from __future__ import annotations
@@ -458,6 +477,24 @@ class OllamaProvider:
             )
             return
         except httpx.TimeoutException as e:
+            yield StreamErrorEvent(code="network", detail=str(e), retryable=True)
+            return
+        except httpx.RequestError as e:
+            # A real bug found live, one layer below the two specific
+            # handlers above: `ConnectError`/`TimeoutException` are only
+            # two of `httpx.RequestError`'s many subtypes -- confirmed
+            # live with a `MockTransport` raising `httpx.
+            # RemoteProtocolError` (the local `ollama serve` process
+            # itself crashing/restarting mid-response, an ordinary
+            # scenario for a local server, not a contrived one): it
+            # propagated completely uncaught before this fix, the
+            # identical shape `google_provider.py`'s own broader
+            # `httpx.RequestError` fix closed for the same reason (see
+            # that module's docstring). Deliberately kept as a third,
+            # separate clause after the two specific ones rather than
+            # replacing them -- `ConnectError`'s own more detailed
+            # "cannot reach Ollama at {host}" message stays exactly as
+            # useful as before for the case that already had one.
             yield StreamErrorEvent(code="network", detail=str(e), retryable=True)
             return
 
