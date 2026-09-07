@@ -131,11 +131,42 @@ pub fn run() {
                     .build(),
             )?;
 
+            // A real bug found by giving the CLI's own equivalent gap
+            // (core/sarva/cli.py's `serve` command, see BUILD-JOURNAL.md)
+            // a fresh-eyes sweep here too: with no `--workdir` passed,
+            // the sidecar's file/shell tools defaulted to whatever
+            // directory the OS happened to launch this app process from
+            // -- for a one-click desktop app (this is the one surface
+            // whose entire T4 definition of done is "no terminal," so
+            // there's no `cd` for a user to have gotten right even in
+            // principle), that's not a deliberate, chosen boundary at
+            // all, just ambient OS behavior a non-developer has no way
+            // to reason about or control. Fixed by resolving a
+            // dedicated, per-app workspace directory (Tauri's own
+            // `app_data_dir()`, the platform-appropriate location every
+            // other well-behaved desktop app already uses for its own
+            // files) and passing it explicitly via `--workdir` -- the
+            // same flag `sarva serve`'s own fix just added, reused here
+            // rather than duplicated, so both surfaces share one real
+            // fix instead of the desktop app needing its own separate
+            // one later.
+            let workspace_dir = app
+                .path()
+                .app_data_dir()
+                .expect("could not resolve the app data directory")
+                .join("workspace");
+            std::fs::create_dir_all(&workspace_dir)
+                .expect("could not create the sarva-server workspace directory");
+            let workspace_dir_str = workspace_dir
+                .to_str()
+                .expect("workspace directory path is not valid UTF-8")
+                .to_string();
+
             let (mut rx, child) = app
                 .shell()
                 .sidecar("sarva-server")
                 .expect("sarva-server sidecar not found — run scripts/freeze-server.sh first")
-                .args(["serve"])
+                .args(["serve", "--workdir", &workspace_dir_str])
                 .spawn()
                 .expect("failed to spawn sarva-server sidecar");
 

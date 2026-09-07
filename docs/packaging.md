@@ -1340,6 +1340,41 @@ also has no Windows machine to verify runtime behavior on, only CI's
 `windows-latest` `cargo check` job, which confirms the code compiles
 correctly for the target, not that it behaves correctly at runtime.
 
+**The sidecar spawn itself had no `--workdir` either, the identical gap
+`sarva serve` (the CLI command it wraps) had until this same session
+fixed it.** Found immediately after that fix, by asking the natural
+follow-up question: does the ONE surface whose entire T4 definition of
+done is "no terminal" — meaning there's no `cd` for a user to have
+gotten right even in principle — actually pass the new `--workdir` flag
+its own sidecar now supports? It didn't: `.sidecar("sarva-server")
+.args(["serve"])` still left the sidecar's file/shell tools scoped to
+whatever directory the OS happened to launch the app process from —
+ambient, unpredictable behavior for exactly the audience least able to
+reason about or control it, worse in kind than the CLI gap since a
+developer running `sarva serve` from a terminal at least chose that
+directory deliberately. Fixed by resolving a dedicated, per-app
+directory via Tauri's own `app_data_dir()` API (the platform-
+appropriate location — e.g. `~/Library/Application Support/
+io.github.bpupadhyaya.sarva` on macOS — every well-behaved desktop app
+already uses for its own files, not a new convention invented for this),
+creating a `workspace` subdirectory under it, and passing that path
+explicitly via the same `--workdir` flag rather than duplicating the
+fix. **Verified in two, honestly distinct ways, not conflated:**
+`cargo check` (with CI's own placeholder-sidecar-binary trick, since
+tauri-build's own build script validates `bundle.externalBin` exists on
+disk even for a compile-only check) confirms this compiles correctly;
+separately, the exact CLI invocation the sidecar makes —
+`sarva-server serve --workdir <path>` — was live-verified end to end
+with a real `sarva serve` subprocess and a real local Ollama model
+(`qwen3:8b`) writing a file through `/ws/chat`, landing correctly under
+the given workdir. **What this does NOT verify, the same honest gap the
+Windows caveat right above already draws for a different reason:**
+whether `app.path().app_data_dir()` actually resolves and the sidecar
+actually receives the resulting argument inside a real, running GUI
+app — this sandbox has no display to launch one, so that specific
+wiring is reasoned from Tauri's own documented `PathResolver` behavior
+(source-verified, not assumed) rather than observed live.
+
 **`scripts/freeze-server.sh`'s one shipped artifact silently depended
 on which venv happened to freeze it — a real, live-confirmed size
 regression, not a hypothetical one.** A fresh-eyes sweep of this

@@ -23129,4 +23129,57 @@ format --check` both clean. `docs/packaging.md`'s existing CSWSH
 server-security narrative extended with this related-but-distinct
 finding.
 
+## Round 435: the desktop app's own sidecar spawn had the identical missing-`--workdir` gap round 434 had just fixed for `sarva serve` itself
+
+Immediate follow-up to round 434's finding, asking the natural next
+question: does the ONE surface whose entire T4 definition of done is
+"no terminal" -- the one-click desktop app -- actually use the new
+`--workdir` flag its own sidecar (a real `sarva-server serve` process)
+now supports?
+
+**Confirmed by reading, not live GUI-tested (no display in this
+sandbox -- see below for exactly what WAS live-verified)**:
+`apps/desktop/src-tauri/src/lib.rs`'s sidecar spawn was still
+`.sidecar("sarva-server").args(["serve"])`, no `--workdir` passed --
+the sidecar's file/shell tools stayed scoped to whatever directory the
+OS happened to launch the app process from. Arguably worse than the
+CLI gap round 434 fixed: a developer typing `sarva serve` in a terminal
+at least chose that directory deliberately; a non-developer double-
+clicking a desktop app has no `cd` to have gotten right even in
+principle -- ambient OS behavior, not a deliberate boundary.
+
+**Fixed** by resolving a dedicated, per-app directory via Tauri's own
+`app_data_dir()` API (the platform-appropriate location every other
+well-behaved desktop app already uses for its own files -- e.g.
+`~/Library/Application Support/io.github.bpupadhyaya.sarva` on macOS),
+creating a `workspace` subdirectory under it (`std::fs::create_dir_
+all`), and passing that path via the same `--workdir` flag rather than
+inventing a separate mechanism.
+
+**Verified in two honestly distinct ways**: `cargo check` (using CI's
+own placeholder-sidecar-binary trick -- tauri-build's build script
+validates `bundle.externalBin` exists on disk even for a compile-only
+check) confirms this compiles correctly. Separately, the exact CLI
+invocation the sidecar makes -- `sarva-server serve --workdir <path>`
+-- was live-verified end to end with a real `sarva serve` subprocess
+and a real local Ollama model (`qwen3:8b`) writing a file through
+`/ws/chat`, landing correctly under the given workdir. What this does
+NOT verify: whether `app.path().app_data_dir()` resolves correctly and
+the sidecar actually receives the argument inside a real, running GUI
+app -- reasoned from Tauri's own documented `PathResolver` source
+(read directly, not assumed) rather than observed live, since this
+sandbox has no display to launch one. Recorded honestly rather than
+claimed as fully live-verified, matching this file's own existing
+Windows-caveat precedent one paragraph above in docs/packaging.md.
+
+No Rust test infrastructure exists anywhere in this crate to extend
+(zero `#[test]` functions in either `.rs` file) -- consistent with
+every prior Rust fix in this exact file, verified by compile-check plus
+manual runtime confirmation rather than an automated suite.
+`docs/packaging.md`'s existing sidecar-management narrative extended
+with this finding. No BUILD-JOURNAL Python test count change (Rust-only
+fix); Python full suite (946 passed, 1 skipped, 11 deselected) and
+`ruff check`/`ruff format --check` reconfirmed clean since round 434,
+unaffected by this round's Rust-only change.
+
 **Next:** continuing the hardening sweep, module by module.
