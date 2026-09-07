@@ -23563,4 +23563,63 @@ this project's own httpx-direct adapters now handle the FULL
 `httpx.RequestError` family, not just the two subtypes each happened
 to have already named.**
 
+## Round 444: `AgentState.INTERRUPTED` -- right there in the state diagram since day one -- was completely unreachable, violating this project's own frozen spec-03 invariant #1
+
+A cross-check against this project's original, frozen spec documents
+(spec-01/02/03, written before most of the current ~966-test codebase
+existed) rather than the code alone: spec-03's own invariant #1 says
+"exactly one terminal state per run; exactly one RunDoneEvent, last in
+the stream." A `grep` for every actual `transition(AgentState.
+INTERRUPTED)` call site across the entire codebase came back with zero
+results -- `INTERRUPTED` has been a legal state in `AgentState.LEGAL`
+since the state machine was designed, but nothing anywhere ever
+transitioned into it.
+
+**Confirmed live**: opened a real WebSocket session against a real
+`sarva serve`, took a few real streamed events from a real local
+model's response (`ollama/qwen3:8b`), then abruptly closed the
+connection -- an entirely ordinary trigger (a closed browser tab, a
+dropped phone connection), not a contrived one. `ws_chat`'s own
+`websocket.send_text(...)` then raises `WebSocketDisconnect` on the
+next event, propagating out of the `async for` loop consuming
+`AgentLoop.run()`'s generator; the generator becomes unreferenced and
+is eventually closed via `GeneratorExit`, raised at whatever `yield` it
+was suspended on. The on-disk `transcript.jsonl` simply stopped at
+whatever event was last successfully yielded -- no `RunDoneEvent` ever
+written, the run permanently incomplete with no signal anywhere that it
+ever ended, let alone how. A direct, live-confirmed violation of the
+frozen spec's own invariant.
+
+**Fixed, honestly scoped to what's actually possible**: yielding from
+inside `except GeneratorExit` handling is explicitly forbidden by the
+async generator protocol (`RuntimeError: async generator ignored
+GeneratorExit`) -- there is no way to hand a final event to a caller
+that has already gone, so this can only repair the *on-disk* record,
+never deliver a live one. `run()`'s own wrapper (already structured
+with a `try`/`finally` around `_run_impl` for `.active`-marker cleanup)
+now tracks whether `_run_impl` ever reached its own terminal
+`RunDoneEvent`, and if not, appends one directly to the transcript file
+in `finally` -- `state=INTERRUPTED` (this state's first real use
+anywhere in the codebase) and a zeroed `Spend` (the real accumulated
+spend lives inside `_run_impl`'s own local scope, invisible to this
+wrapper -- an honest "we don't know the exact cost" beats no closing
+record at all). The write itself was extracted from `_run_impl`'s own
+`_append_transcript_line` closure to a module-level function so both
+call sites share the identical, already-hardened UTF-8-explicit write
+rather than duplicating it.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test (closing the generator directly via `.aclose()` after taking two
+events mid-stream, the same mechanism a real disconnect triggers) fail
+with the transcript's last line still `model_stream` instead of a
+closing `run_done`, restored -- then re-verified live against the real
+server with the exact same disconnect scenario that found the bug,
+now ending with `run_done`/`state=interrupted` on disk. 1 new test, 966
+-> 967 Python tests. Full suite run three times in a row (cancellation-
+adjacent code, the same class of area this project's own persistent
+memory already flags as hazardous) with zero flakiness across all
+three runs. `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md`'s opening state-machine section extended with this
+finding, right where `INTERRUPTED` is first named in the diagram.
+
 **Next:** continuing the hardening sweep, module by module.

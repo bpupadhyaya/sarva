@@ -235,6 +235,23 @@ async def _prune_old_runs(run_root: Path, keep: int) -> None:
         await asyncio.to_thread(_rmtree_all, prunable)
 
 
+def _append_transcript_line(path: Path, line: str) -> None:
+    # encoding="utf-8" explicit, not locale-default: a real, systemic gap
+    # already found and fixed at 9+ read-path call sites in this codebase
+    # (SessionStore.load, ReadFileTool, config.py, providers/registry.py,
+    # ...), just never checked on this WRITE path. `open(path, "a")` with
+    # no `encoding=` uses `locale.getpreferredencoding(False)`, not UTF-8
+    # -- genuinely locale-dependent on this project's own minimum Python
+    # (3.12), e.g. on musl-libc containers (Alpine), Windows without
+    # UTF-8 mode, or PYTHONCOERCECLOCALE=0. Extracted to module level
+    # (rather than kept as `_run_impl`'s own closure, its original home)
+    # so `run()`'s own wrapper can append a best-effort closing event to
+    # the same file when a caller disconnects mid-run without duplicating
+    # this exact write -- see `run()`'s own comment for why.
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def _required_modalities(messages: list[Message]) -> set[Modality]:
     """What the routed model must support, computed from what's actually in
     the conversation so far. Always includes TEXT — every current model
@@ -357,6 +374,8 @@ class AgentLoop:
         run_dir.mkdir(parents=True, exist_ok=True)
         active_marker = run_dir / ".active"
         active_marker.touch()
+        transcript_path = run_dir / "transcript.jsonl"
+        saw_run_done = False
         try:
             async for event in self._run_impl(
                 task,
@@ -367,9 +386,60 @@ class AgentLoop:
                 session_id=session_id,
                 run_id=run_id,
             ):
+                if event.type == "run_done":
+                    saw_run_done = True
                 yield event
         finally:
             active_marker.unlink(missing_ok=True)
+            # A real, live-confirmed violation of spec-03's own frozen
+            # invariant #1 ("exactly one terminal state per run; exactly
+            # one RunDoneEvent, last in the stream"), found by actually
+            # opening a real WebSocket session against a real running
+            # `sarva serve`, taking a few streamed events, then abruptly
+            # closing the connection mid-response -- an entirely ordinary
+            # real-world trigger (a closed browser tab, a dropped phone
+            # connection), not a contrived one. `ws_chat`'s own
+            # `websocket.send_text(...)` then raises `WebSocketDisconnect`
+            # on the next event, which propagates out of the `async for`
+            # loop consuming this generator; the generator itself becomes
+            # unreferenced and is eventually closed by `GeneratorExit`,
+            # raised at whatever `yield` it was suspended on. Confirmed
+            # live: the on-disk `transcript.jsonl` simply stopped at
+            # whatever event was last successfully yielded -- no
+            # `RunDoneEvent` ever written, the run permanently incomplete
+            # with no signal anywhere (not even an `INTERRUPTED` state,
+            # despite that state already existing in `AgentState` for
+            # exactly this situation) that it ever ended, let alone how.
+            #
+            # `_run_impl`'s own body can't fix this itself: yielding a
+            # closing event from inside a `except GeneratorExit` clause is
+            # explicitly forbidden by the async generator protocol itself
+            # (raises `RuntimeError: async generator ignored GeneratorExit`
+            # the moment a `yield` inside GeneratorExit handling is
+            # attempted) -- there is no way to hand this event to a caller
+            # that has already gone. So this can only ever be a best-
+            # effort repair of the ON-DISK record, not a live event: if
+            # `_run_impl` never reached its own terminal `RunDoneEvent`
+            # (tracked by `saw_run_done` above), one is appended directly
+            # to the transcript file here, `state=INTERRUPTED` (giving
+            # that already-defined-but-until-now-unreachable state its
+            # first real use) and a zeroed `Spend` (the real accumulated
+            # spend lives inside `_run_impl`'s own local scope, invisible
+            # to this wrapper -- an honest "we don't know the exact cost"
+            # is a real improvement over no closing record at all, not a
+            # false one). Matches every other disk-write in this file in
+            # dispatching to a thread rather than blocking the event loop,
+            # even though this is a rare, one-shot cleanup path rather
+            # than a hot one.
+            if not saw_run_done:
+                closing_event = RunDoneEvent(
+                    state=AgentState.INTERRUPTED, final_message=None, spend=Spend()
+                )
+                await asyncio.to_thread(
+                    _append_transcript_line,
+                    transcript_path,
+                    closing_event.model_dump_json() + "\n",
+                )
 
     async def _run_impl(
         self,
@@ -460,29 +530,18 @@ class AgentLoop:
         # same duration. Fixed by dispatching the append itself to a
         # thread, mirroring _prune_old_runs's own narrow "wrap just the
         # blocking part" fix rather than making emit() do anything else
-        # differently.
-        def _append_transcript_line(line: str) -> None:
-            # encoding="utf-8" explicit, not locale-default: a real,
-            # systemic gap already found and fixed at 9+ read-path call
-            # sites in this codebase (SessionStore.load, ReadFileTool,
-            # config.py, providers/registry.py, ...), just never checked
-            # on this WRITE path. `open(path, "a")` with no `encoding=`
-            # uses `locale.getpreferredencoding(False)`, not UTF-8 --
-            # genuinely locale-dependent on this project's own minimum
-            # Python (3.12), e.g. on musl-libc containers (Alpine),
-            # Windows without UTF-8 mode, or PYTHONCOERCECLOCALE=0.
-            # `emit()` runs this for EVERY event of EVERY real turn, and
-            # `event.model_dump_json()` routinely carries entirely
-            # ordinary non-ASCII text (a non-English user message, or
-            # just a model's own em-dash/curly-quote output) -- confirmed
-            # live: writing such a line via `open(path, "a",
-            # encoding="ascii")`, standing in for a genuinely non-UTF-8
-            # locale, raised UnicodeEncodeError.
-            with transcript_path.open("a", encoding="utf-8") as f:
-                f.write(line)
-
+        # differently. The write itself (including its own explicit
+        # encoding="utf-8", a real, systemic gap already found and fixed
+        # at 9+ read-path call sites in this codebase before this write
+        # path) now lives in the module-level `_append_transcript_line`
+        # above rather than as this function's own closure -- extracted
+        # so `run()`'s wrapper can reuse the identical write for its own
+        # best-effort closing event on an early-disconnected run, see
+        # that function's own comment.
         async def emit(event: AgentEvent) -> AgentEvent:
-            await asyncio.to_thread(_append_transcript_line, event.model_dump_json() + "\n")
+            await asyncio.to_thread(
+                _append_transcript_line, transcript_path, event.model_dump_json() + "\n"
+            )
             return event
 
         messages: list[Message] = list(history or []) + [

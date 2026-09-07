@@ -34,6 +34,58 @@ on that decision, and looping back to `CALLING_MODEL` afterward — with
 the tool results appended to the conversation — is how the model
 verifies what just happened and decides whether it's actually done.
 
+### `INTERRUPTED`, right there in the state diagram above, was completely unreachable — no path anywhere in the codebase ever transitioned into it
+
+A much later cross-check against this project's own original, frozen
+spec document (`spec-03-agent-loop.md`'s own invariant #1: "exactly one
+terminal state per run; exactly one `RunDoneEvent`, last in the
+stream") rather than the code alone: `AgentState.INTERRUPTED` has been
+a legal transition target since the state diagram above was written —
+but a `grep` for every actual `transition(AgentState.INTERRUPTED)` call
+site across the entire codebase came back with zero results. Nothing
+anywhere ever moved the loop into this state.
+
+**Confirmed live**: opened a real WebSocket session against a real
+`sarva serve`, took a few real streamed events from a real local
+model's response, then abruptly closed the connection — an entirely
+ordinary trigger (a closed browser tab, a dropped phone connection),
+not a contrived one. `ws_chat`'s own `websocket.send_text(...)` then
+raises `WebSocketDisconnect` on the next event; this propagates out of
+the `async for` loop consuming `AgentLoop.run()`'s generator, which
+becomes unreferenced and is eventually closed via `GeneratorExit`,
+raised at whatever `yield` it was suspended on. The on-disk
+`transcript.jsonl` simply stopped at whatever event was last
+successfully yielded — no `RunDoneEvent` ever written, the run
+permanently incomplete with no signal anywhere, not even
+`INTERRUPTED`, that it ever ended or how. A direct, live-confirmed
+violation of the frozen spec's own invariant #1.
+
+**Fixed, honestly scoped to what's actually possible**: yielding a
+closing event from inside `except GeneratorExit` handling is explicitly
+forbidden by the async generator protocol itself (`RuntimeError: async
+generator ignored GeneratorExit` the moment a `yield` is attempted) —
+there's no way to hand a final event to a caller that has already gone.
+So this can only ever repair the *on-disk* record, not deliver a live
+event: `run()`'s own wrapper (already structured with a `try`/`finally`
+around `_run_impl` for the `.active`-marker cleanup, see below) now
+tracks whether `_run_impl` ever reached its own terminal `RunDoneEvent`,
+and if not, appends one directly to the transcript file in the
+`finally` block — `state=INTERRUPTED` (this already-defined state's
+first real use anywhere), `spend=Spend()` zeroed out (the real
+accumulated spend lives inside `_run_impl`'s own local scope, invisible
+to this wrapper — an honest "we don't know the exact cost" is a real
+improvement over no closing record at all, not a false one).
+
+Verified with a genuine revert-and-check: reverted, watched the new
+test (closing the generator directly via `.aclose()` after taking two
+events mid-stream, the same mechanism a real disconnect triggers) fail
+with the transcript's last line still `model_stream` instead of a
+closing `run_done`, restored — then re-verified live against the real
+server, the exact same disconnect scenario that found the bug in the
+first place, now ending with `run_done`/`state=interrupted` on disk. 1
+new test, 966 → 967 Python tests. Full suite run three times in a row
+(cancellation-adjacent code) with zero flakiness across all three runs.
+
 ### Every run's transcript directory used to live forever — a real resource leak in any long-running `sarva serve`
 
 A round-43 sweep, looking specifically for "resources that accumulate

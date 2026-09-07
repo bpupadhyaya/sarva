@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import shutil
 from pathlib import Path
 
@@ -442,6 +443,57 @@ async def test_transcript_is_replayable(run_root):
     assert len(run_dirs) == 1
     lines = (run_dirs[0] / "transcript.jsonl").read_text().splitlines()
     assert len(lines) == len(events)
+
+
+@pytest.mark.asyncio
+async def test_a_caller_closing_the_generator_mid_run_still_leaves_a_terminal_run_done_on_disk(
+    run_root,
+):
+    # A real, live-confirmed violation of spec-03's own frozen invariant
+    # #1 ("exactly one terminal state per run; exactly one RunDoneEvent,
+    # last in the stream"), found by actually opening a real WebSocket
+    # session against a real running `sarva serve`, taking a few
+    # streamed events, then abruptly closing the connection -- an
+    # entirely ordinary real-world trigger (a closed browser tab, a
+    # dropped phone connection), not a contrived one. `ws_chat`'s own
+    # `websocket.send_text(...)` then raises `WebSocketDisconnect` on
+    # the next event, which propagates out of the `async for` loop
+    # consuming this generator; the generator itself becomes
+    # unreferenced and is eventually closed via `GeneratorExit`, raised
+    # at whatever `yield` it was suspended on. Confirmed live: the
+    # on-disk `transcript.jsonl` simply stopped at whatever event was
+    # last successfully yielded -- no `RunDoneEvent` ever written, the
+    # run permanently incomplete with no signal anywhere (not even an
+    # `INTERRUPTED` state, despite that state already existing in
+    # `AgentState` for exactly this situation) that it ever ended.
+    #
+    # Reproduced directly at the AgentLoop level (matching the real
+    # mechanism exactly -- `.aclose()` on the async generator, the same
+    # cleanup Python performs when a `/ws/chat` caller's generator goes
+    # out of scope) rather than through the full ASGI/WebSocket stack:
+    # `run_root` isn't independently test-isolated for the real server
+    # path (`AgentLoop`'s own `run_root` default is computed once at
+    # module import time, respecting `SARVA_HOME` -- see sarva.paths),
+    # so this is both the more direct and the more decisive way to
+    # prove the fix.
+    provider = MockProvider(script=[ScriptedTurn(text="one two three four five")])
+    loop = AgentLoop(router=_router(), providers={"mock": provider}, run_root=run_root)
+
+    gen = loop.run("hello")
+    seen = []
+    for _ in range(2):
+        seen.append(await gen.__anext__())
+    assert not any(e.type == "run_done" for e in seen)  # genuinely still mid-stream
+    await gen.aclose()
+
+    run_dirs = list(Path(run_root).iterdir())
+    assert len(run_dirs) == 1
+    lines = (run_dirs[0] / "transcript.jsonl").read_text().splitlines()
+    events_on_disk = [json.loads(line) for line in lines]
+
+    assert events_on_disk[-1]["type"] == "run_done"
+    assert events_on_disk[-1]["state"] == "interrupted"
+    assert sum(1 for e in events_on_disk if e["type"] == "run_done") == 1
 
 
 @pytest.mark.asyncio
