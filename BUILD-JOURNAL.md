@@ -23034,4 +23034,53 @@ passed, 1 skipped, 11 deselected. `ruff check`/`ruff format --check`
 both clean. `docs/foundry/training.md`'s existing `peak_lr`/`min_lr`
 validation narrative extended with this follow-up section.
 
+## Round 433: `_select_dirs_to_prune`'s own atomicity claim had a gap -- true against a sibling coroutine, false against a sibling's own deletion thread
+
+Pivoted back to live execution testing after an extended clean-sweep
+streak of code-reading-only rounds found nothing further -- this
+session's historically most productive method. Ran 16 genuine
+concurrent WebSocket `/ws/chat` sessions against a real `sarva serve`
+process (mixed shared and distinct session names, the mock provider).
+14-16 of 16 completed cleanly per trial; the rest intermittently raised
+`ConnectionClosedOK`/connection-reset client-side, with no indication
+of why -- confirmed only by reading the server's own log directly, per
+this project's own "verify live before concluding, especially for
+ambiguous anomalies" discipline (the same discipline that correctly
+ruled out an unrelated moondream/Ollama empty-response finding as a
+non-bug one round earlier).
+
+**Confirmed live**: the server log showed an uncaught
+`FileNotFoundError: [Errno 2] No such file or directory:
+'.sarva/runs/<hash>'` from `p.stat()` inside
+`core/sarva/agent/loop.py`'s `_select_dirs_to_prune`, crashing the
+whole ASGI websocket handler mid-run on 8 of the trials' worth of log
+output. That function's own docstring reasons it's "atomic ... the way
+a genuinely separate OS thread could [observe it]" isn't possible for a
+sibling *coroutine* -- true, since cooperative asyncio scheduling only
+switches at an `await`. What it missed: `_prune_old_runs` (the caller)
+dispatches the actual deletions to exactly such a genuinely separate OS
+thread, via `asyncio.to_thread(_rmtree_all, ...)` -- and while that
+thread is mid-delete for one concurrent session's prune, a
+*different* concurrent session's own `_select_dirs_to_prune` call can
+list a directory via `iterdir()` and then find it gone by the time its
+sort key calls `.stat()` on it moments later, since nothing protects
+the gap between those two calls against a sibling's own background
+thread.
+
+**Fixed** by no longer trusting a listed directory still exists by the
+time its turn to be statted comes up: each `p.stat()` call is now
+individually guarded, and a directory that vanishes between listing and
+statting is simply dropped from consideration rather than left to
+raise -- it needs no help being pruned by us, since a sibling's own
+thread is already removing it.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (`FileNotFoundError`
+from `p.stat()`, at the identical line the live server log showed),
+restored. 1 new test, 956 -> 957 Python tests. Full suite: 945 passed,
+1 skipped, 11 deselected. `ruff check`/`ruff format --check` both
+clean. `docs/agent-loop.md`'s existing pruning-race narrative (the
+mkdir-race and event-loop-freeze fixes to this exact function) extended
+with this third variant.
+
 **Next:** continuing the hardening sweep, module by module.

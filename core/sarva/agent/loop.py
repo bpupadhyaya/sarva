@@ -168,8 +168,31 @@ def _select_dirs_to_prune(run_root: Path, keep: int) -> list[Path]:
     # ever deleting something still in use; it self-corrects once they
     # finish.
     prunable = [p for p in run_dirs if not (p / ".active").exists()]
-    prunable.sort(key=lambda p: p.stat().st_mtime)
-    return prunable[: len(run_dirs) - keep]
+    # A real bug found via live concurrent-load testing: 16 genuine
+    # simultaneous /ws/chat sessions against a real `sarva serve` process,
+    # each triggering its own prune. This function's own docstring above
+    # reasons that it's "atomic with respect to a concurrent sibling"
+    # because coroutines only switch at an `await` -- true, but that
+    # reasoning has a gap it doesn't cover: `_prune_old_runs` runs a
+    # SIBLING call's actual deletions (`_rmtree_all`) on a real OS thread
+    # via `asyncio.to_thread`, and that thread keeps running while THIS
+    # function executes on the event loop thread. Confirmed live: several
+    # sessions crashed with an uncaught FileNotFoundError from `p.stat()`
+    # below -- `run_dirs` had already listed a directory that a sibling's
+    # in-flight background `shutil.rmtree` deleted a moment later, before
+    # this function got around to statting it -- which crashed the whole
+    # ASGI websocket handler mid-run and tore down the client's
+    # connection. A directory a sibling is actively deleting needs no
+    # help being pruned by us too, so a vanished stat is simply dropped
+    # from consideration here rather than left to raise.
+    stamped: list[tuple[Path, float]] = []
+    for p in prunable:
+        try:
+            stamped.append((p, p.stat().st_mtime))
+        except OSError:
+            continue
+    stamped.sort(key=lambda item: item[1])
+    return [p for p, _ in stamped][: len(run_dirs) - keep]
 
 
 def _rmtree_all(dirs: list[Path]) -> None:

@@ -1892,6 +1892,56 @@ async def test_pruning_never_deletes_a_still_running_siblings_run_dir(run_root, 
     assert "ok=True" in finished[0].result.content[0].text
 
 
+def test_select_dirs_to_prune_tolerates_a_directory_vanishing_mid_scan(run_root, monkeypatch):
+    # A real bug found via live concurrent-load testing: 16 genuine
+    # simultaneous /ws/chat sessions against a real `sarva serve` process,
+    # several of which crashed mid-run and tore down the client's
+    # connection. _prune_old_runs splits into a synchronous "decide" phase
+    # (_select_dirs_to_prune) and a threaded "delete" phase (_rmtree_all,
+    # run via asyncio.to_thread) specifically so the decide phase can't be
+    # preempted by a SIBLING COROUTINE mid-way -- but a sibling's own
+    # DELETE phase really does run on a separate OS thread, and can delete
+    # a directory this function already listed before it gets around to
+    # statting it. Confirmed live via the server log: an uncaught
+    # FileNotFoundError from `p.stat()` on a directory a concurrent
+    # session's own prune had just removed.
+    import sarva.agent.loop as loop_module
+
+    run_root_path = Path(run_root)
+    run_root_path.mkdir(parents=True, exist_ok=True)
+    keep_dir = run_root_path / "keep"
+    keep_dir.mkdir()
+    vanishing_dir = run_root_path / "vanishing"
+    vanishing_dir.mkdir()
+
+    # `p.stat()` is called on every run dir twice before pruning decides
+    # anything -- once inside the initial `is_dir()` filter, once inside
+    # the `.active`-marker check -- and `is_dir()` swallows a vanished
+    # path's FileNotFoundError internally (returns False), so deleting on
+    # that first hit would be silently absorbed there instead of
+    # reaching the real, unguarded stat call this test targets. Deleting
+    # on the second hit against `vanishing_dir` itself lands the race at
+    # the same point the live bug did: inside the sort key.
+    real_stat = Path.stat
+    match_count = 0
+
+    def stat_that_deletes_on_second_hit(self, *args, **kwargs):
+        nonlocal match_count
+        if self == vanishing_dir:
+            match_count += 1
+            if match_count == 2:
+                vanishing_dir.rmdir()
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_that_deletes_on_second_hit)
+
+    # Must not raise, even though `vanishing_dir` disappears mid-scan.
+    prunable = loop_module._select_dirs_to_prune(run_root_path, keep=0)
+
+    assert keep_dir in prunable
+    assert vanishing_dir not in prunable
+
+
 class _CancelSpawnTool:
     spec = ToolSpec(
         name="cancel_spawn",

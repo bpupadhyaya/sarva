@@ -160,6 +160,53 @@ repro now shows the event loop staying responsive throughout, and the
 30-trial sibling-deletion stress run came back clean (0/30) on the
 combined fix. 1 new test, 753 → 754 Python tests.
 
+### The synchronous/threaded split above closed the freeze and the mkdir race, but missed a third way a sibling's own thread could reach in
+
+Much later, live concurrent-load testing — 16 genuine simultaneous
+`/ws/chat` sessions against a real `sarva serve` process, not a
+synthetic repro — surfaced a third variant of this same file's
+recurring pruning race, one layer underneath the fix directly above.
+That fix's own reasoning was: keep `_select_dirs_to_prune` synchronous
+so nothing can observe `run_root` mid-computation "the way a genuinely
+separate OS thread could" — correctly ruling out a sibling *coroutine*
+racing the decision, since cooperative scheduling only switches at an
+`await`. What it didn't account for: `_prune_old_runs` dispatches the
+*deletions* (`_rmtree_all`) to exactly the kind of genuinely separate
+OS thread that reasoning warns about, via `asyncio.to_thread` — and
+that thread keeps running while a **different**, concurrently-invoked
+`_prune_old_runs` call executes its own `_select_dirs_to_prune` on the
+event loop thread at the same moment.
+
+**Confirmed live**: with 16 real concurrent WebSocket sessions each
+triggering their own prune, several crashed with an uncaught
+`FileNotFoundError` from `p.stat()` inside `_select_dirs_to_prune`'s
+sort key — `run_root.iterdir()` had listed a directory that a sibling
+session's own in-flight background `shutil.rmtree` thread deleted a
+moment later, before this function's sort got around to statting it.
+Unlike the mkdir race above (which stayed inside `_select_dirs_to_prune`
+and only ever corrupted the *decision*), this crashed the whole ASGI
+websocket handler mid-run, tearing down the client's connection with no
+`run_done` ever sent — visible client-side only as an unexplained
+`ConnectionClosedOK`/connection-reset on 2 of 16 sessions, no error
+message pointing back at pruning at all until the server's own log was
+read directly.
+
+**Fixed** by no longer trusting that a listed directory still exists by
+the time its turn to be statted comes up: each `p.stat()` call in
+`_select_dirs_to_prune` is now individually guarded, and a directory
+that vanishes between listing and statting is simply dropped from
+consideration rather than left to raise — it needs no help being
+pruned by us, since a sibling's own thread is already removing it.
+`_prune_old_runs`'s and `_select_dirs_to_prune`'s existing docstrings
+still hold for what they were actually proving (safe from a sibling
+*coroutine* racing the decision); this fix is additive, for the
+separate case of a sibling's own deletion *thread* doing so instead.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old bug's own shape (`FileNotFoundError`
+from `p.stat()`, at the identical line the live server log showed),
+restored. 1 new test, 956 → 957 Python tests.
+
 ### `_prune_old_runs` turned out not to be the only unwrapped blocking call in this file after all — `emit()` itself, the single hottest I/O call in the whole loop, was still fully synchronous
 
 A round-131 fresh-eyes sweep, applying this same chapter's own lens one
