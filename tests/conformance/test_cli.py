@@ -1291,6 +1291,38 @@ def test_config_set_writes_and_config_show_reflects_it(monkeypatch, tmp_path):
     assert "not set" in show_result.stdout
 
 
+def test_config_set_and_unset_report_the_real_path_the_file_actually_used(monkeypatch, tmp_path):
+    # A real bug found live: with SARVA_HOME set (sarva.paths), `config
+    # set`/`config unset`'s own success messages still hardcoded the
+    # literal string "~/.sarva/config.json" -- confirmed live, the file
+    # correctly landed under SARVA_HOME while the message kept claiming
+    # the real, unmodified default location regardless. Fixed by reading
+    # `config_module.DEFAULT_CONFIG_PATH` at print time rather than a
+    # hardcoded string (or a `from sarva.config import
+    # DEFAULT_CONFIG_PATH` copy, which would silently reintroduce the
+    # identical mismatch under this exact test's own isolation below,
+    # since `_isolate_config` patches the constant on `config_module`,
+    # not on a separately-imported name in `cli.py`). This test's own
+    # `tmp_path / "config.json"` -- deliberately NOT the real
+    # `~/.sarva/config.json` -- is exactly what proves the message
+    # reflects the actual path used, not a hardcoded assumption.
+    _isolate_config(monkeypatch, tmp_path)
+    expected_path = str(tmp_path / "config.json")
+
+    # Rich wraps console output at a fixed width with no real terminal
+    # attached (CliRunner) -- a long path (this one, under pytest's own
+    # deeply-nested tmp_path) can land split by a line break mid-path, so
+    # the decisive check strips ALL whitespace from both sides first,
+    # rather than asserting against the raw, possibly-wrapped bytes.
+    set_result = runner.invoke(app, ["config", "set", "--anthropic-api-key", "sk-ant-real-test"])
+    assert set_result.exit_code == 0
+    assert "".join(expected_path.split()) in "".join(set_result.stdout.split())
+
+    unset_result = runner.invoke(app, ["config", "unset", "--anthropic-api-key"])
+    assert unset_result.exit_code == 0
+    assert "".join(expected_path.split()) in "".join(unset_result.stdout.split())
+
+
 def test_config_set_google_api_key_writes_and_config_show_reflects_it(monkeypatch, tmp_path):
     # A real bug found by a fresh-eyes sweep: --google-api-key was
     # missing entirely from `config set`/`config unset` -- GOOGLE_API_KEY

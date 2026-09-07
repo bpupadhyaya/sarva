@@ -19,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
+import sarva.config as config_module
 from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, Tool, always_allow
 from sarva.atomic_write import atomic_write_bytes
@@ -1003,7 +1004,21 @@ def config_set(
     except ConfigError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
-    console.print(f"saved {', '.join(sorted(non_empty))} to ~/.sarva/config.json")
+    # A real bug found live: with SARVA_HOME set (sarva.paths), this
+    # message's own hardcoded "~/.sarva/config.json" no longer matches
+    # where the file actually went -- confirmed live, `save_config`
+    # correctly wrote to the SARVA_HOME-scoped path while this message
+    # kept claiming the real, unmodified default location regardless.
+    # Read via `config_module.DEFAULT_CONFIG_PATH` (not a `from ... import
+    # DEFAULT_CONFIG_PATH` copy) deliberately: this project's own tests
+    # isolate config storage via `monkeypatch.setattr(config_module,
+    # "DEFAULT_CONFIG_PATH", ...)`, which only reaches code that reads the
+    # name off the module at call time -- a copied import binding would
+    # keep reporting the real, unpatched path even under test isolation,
+    # a second version of the exact bug this fix exists to close.
+    console.print(
+        f"saved {', '.join(sorted(non_empty))} to {escape(str(config_module.DEFAULT_CONFIG_PATH))}"
+    )
 
 
 @config_app.command("show")
@@ -1096,7 +1111,12 @@ def config_unset(
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from e
     if removed:
-        console.print(f"removed {', '.join(sorted(removed))} from ~/.sarva/config.json")
+        # Same real bug, the unset side: see `set`'s own identical fix
+        # just above for the live-confirmed repro with SARVA_HOME set,
+        # and for why this reads `config_module.DEFAULT_CONFIG_PATH`
+        # rather than a copied import binding.
+        path_str = escape(str(config_module.DEFAULT_CONFIG_PATH))
+        console.print(f"removed {', '.join(sorted(removed))} from {path_str}")
     else:
         console.print("nothing to do -- none of those were saved")
 

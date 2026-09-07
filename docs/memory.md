@@ -55,6 +55,29 @@ constants are computed once per real process, the same way every actual
 imported modules could not observe this) confirming all four defaults
 land under a given `SARVA_HOME` in one real process.
 
+**A follow-up gap in the same feature, found immediately after
+shipping it:** `config set`/`config unset`'s own success messages
+still hardcoded the literal string `"~/.sarva/config.json"` — confirmed
+live, with `SARVA_HOME` set, `save_config` correctly wrote to the
+redirected path while the printed message kept claiming the real,
+unmodified default location regardless. A second, more subtle version
+of the identical mistake surfaced while fixing the first: the natural
+fix, `from sarva.config import DEFAULT_CONFIG_PATH`, copies the
+constant's value into `cli.py`'s own namespace at import time — this
+project's own test isolation (`monkeypatch.setattr(config_module,
+"DEFAULT_CONFIG_PATH", ...)`) patches the constant *on the module*,
+which a copied import binding never observes, so the message would
+have kept reporting the real, unpatched path even under a test's own
+isolated `tmp_path`. Fixed by importing the module itself (`import
+sarva.config as config_module`) and reading `config_module.
+DEFAULT_CONFIG_PATH` at print time instead, matching the exact pattern
+this project's tests already rely on. Verified with a genuine
+revert-and-check (the reverted message printed the literal old string)
+and a test that deliberately isolates config storage first, so a
+correct fix and a superficially-plausible-but-wrong one (the copied
+import) are distinguishable, not just "does it work against the real
+home directory."
+
 ## Session persistence: plain files
 
 `sarva.memory.session.SessionStore` is a saved conversation — one JSON

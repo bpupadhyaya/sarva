@@ -23341,4 +23341,49 @@ project's actual repo checkout.
 `docs/agent-loop.md`'s existing run-retention narrative cluster
 extended with this finding.
 
+## Round 439: `config set`/`config unset`'s own success messages still hardcoded "~/.sarva/config.json" -- and the obvious fix had a second, subtler version of the identical bug
+
+Immediate follow-up to round 436's `SARVA_HOME` fix, checking whether
+every user-facing surface actually reflects it. A final sweep for any
+remaining `Path.home()`/`~/.sarva` references turned up two REAL
+print statements (not just docstrings/help text) in `cli.py`.
+
+**Confirmed live**: with `SARVA_HOME` set, `sarva config set
+--anthropic-api-key ...` correctly wrote the file to the redirected
+path, but printed "saved ANTHROPIC_API_KEY to ~/.sarva/config.json" --
+a literal, hardcoded string, factually wrong about where the file
+actually went. Same gap on the `unset` side.
+
+**A second, subtler version of the identical bug found while fixing
+the first**: the natural fix, `from sarva.config import
+DEFAULT_CONFIG_PATH`, copies the constant's CURRENT VALUE into
+`cli.py`'s own namespace at import time. This project's own test
+isolation (`_isolate_config`, used by every `config set`/`unset` test)
+patches the constant via `monkeypatch.setattr(config_module,
+"DEFAULT_CONFIG_PATH", tmp_path / "config.json")` -- which only
+affects code that reads the name OFF THE MODULE at call time. A copied
+import binding would have kept reporting the real, unpatched default
+path even under a test's own isolated `tmp_path`, silently
+reintroducing the exact same mismatch this fix exists to close, just
+one layer more subtle (and only visible under test isolation, not
+against a real un-isolated run -- confirmed by writing the naive fix
+first, then finding the gap by asking what an existing test would
+actually observe).
+
+**Fixed** properly: `import sarva.config as config_module` (matching
+this project's own test-patching convention exactly) instead of a
+copied name import, with both messages reading `config_module.
+DEFAULT_CONFIG_PATH` at print time.
+
+**Verified with a genuine revert-and-check**: reverted, watched the new
+test fail with the literal old hardcoded string appearing where the
+real isolated `tmp_path` should have, restored. The test itself
+deliberately isolates config storage first (`_isolate_config`), so it
+distinguishes a correct fix from the superficially-plausible-but-wrong
+copied-import version, not just "does it work against the real home
+directory" (which the naive version would have passed too). 1 new
+test, 963 -> 964 Python tests. Full suite: 952 passed, 1 skipped, 11
+deselected. `ruff check`/`ruff format --check` both clean.
+`docs/memory.md`'s `SARVA_HOME` section extended with this follow-up.
+
 **Next:** continuing the hardening sweep, module by module.
