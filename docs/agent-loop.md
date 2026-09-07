@@ -1276,6 +1276,23 @@ a normal terminal state with a full `Spend` summary attached to
 runaway agent stops itself cleanly, with a receipt of exactly how much
 it spent before stopping.
 
+**`max_cost_usd` only actually protects spend on Anthropic today — a
+real, easy-to-miss gap found by comparing all three real provider
+adapters directly, not assumed consistent from one.** Only
+`AnthropicProvider` computes a real, non-zero `cost_usd`, from a
+verified-current `models.yaml` pricing entry (see `providers.md`'s own
+cache-token pricing narrative). `OpenaiProvider`/`GoogleProvider` both
+deliberately, unconditionally report `cost_usd=0.0` — this project has
+no verified-current pricing for either, and reports an honest "unknown"
+rather than a guessed number (each module's own docstring explains
+why). The consequence one layer up, invisible from either provider
+file alone: `Spend.exceeded()`'s cost check can never trip for an
+OpenAI- or Google-routed run, no matter how many real, billed calls it
+makes. A caller relying on `max_cost_usd` specifically to cap real
+dollar spend on those two providers gets no such protection —
+`max_model_calls`/`max_wall_seconds` are the dimensions that actually
+bound a runaway run against them today, not `max_cost_usd`.
+
 ### The turn that tips spend over budget used to vanish from history entirely
 
 A real bug found by a fresh-eyes sweep: `messages.append(done.message)`

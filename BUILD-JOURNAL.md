@@ -23433,4 +23433,50 @@ hashed filenames), confirming zero runtime behavior change, so
 No Python files touched this round. `docs/packaging.md`'s existing
 `AgentEvent`-mirror-drift narrative extended with this second instance.
 
+## Round 441: `max_cost_usd` only ever actually protects spend on Anthropic -- a real, easy-to-miss gap found by comparing all three provider adapters directly
+
+Continuing the "sibling has the fix, this one doesn't" sweep, this time
+across `providers/anthropic_provider.py`/`openai_provider.py`/
+`google_provider.py` together rather than one at a time, prompted by
+round 429's own `cache_read_tokens` pricing fix (Anthropic-only) --
+does the same cost-accounting logic exist consistently across all
+three real adapters?
+
+**Confirmed by reading, not assumed**: only `AnthropicProvider`
+computes a real, non-zero `cost_usd`, from a verified-current
+`models.yaml` pricing entry. `OpenaiProvider`/`GoogleProvider` each
+independently, deliberately, and honestly report `cost_usd=0.0`
+unconditionally -- both module docstrings already explain why (no
+verified-current pricing for either, an honest "unknown" rather than a
+guessed number, matching this project's own "don't fabricate"
+discipline). That part is intentional and correct on its own.
+
+**The gap is the consequence one layer up, invisible from any single
+provider file**: `Spend.exceeded()`'s cost check (`self.cost_usd >=
+b.max_cost_usd`) can never trip for an OpenAI- or Google-routed run, no
+matter how many real, billed calls it makes, since `spend.cost_usd`
+never leaves 0. `Budget.max_cost_usd`'s own comment only warned it was
+"irrelevant when only local/mock models run" -- true, but the far more
+surprising and consequential case (silently non-functional against the
+two real, paid providers whose runaway-spend risk this dimension exists
+to guard against in the first place) was undocumented anywhere. A
+caller who sets a tight `max_cost_usd` specifically to cap real dollar
+exposure on OpenAI/Google gets a false sense of protection: the field
+exists, is accepted, and simply never fires for either.
+
+**Fixed by documentation, not new runtime behavior** -- there's nothing
+to "fix" in the sense of code logic (fabricating a cost number would be
+a worse outcome than reporting 0 honestly, and no verified-current
+pricing exists to compute a real one from). Expanded `Budget.
+max_cost_usd`'s own comment to name both cases precisely (Anthropic:
+enforced; local/mock: genuinely irrelevant; OpenAI/Google: silently
+non-functional, not irrelevant) and added a matching note to
+`docs/agent-loop.md`'s own Budget section, so a caller relying on this
+dimension for OpenAI/Google spend protection can see the actual, honest
+scope of what it covers before being surprised by a real bill.
+
+No test suite changes (pure documentation/comment accuracy, no runtime
+behavior changed) -- full suite reconfirmed green (952 passed, 1
+skipped, 11 deselected), `ruff check`/`ruff format --check` both clean.
+
 **Next:** continuing the hardening sweep, module by module.
