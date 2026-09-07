@@ -235,6 +235,31 @@ def test_projector_output_shape():
     assert out.shape == (2, 16, 24)
 
 
+def test_projector_rejects_non_positive_dims():
+    # A real bug found by a fresh-eyes sweep, the identical shape
+    # VisionEncoderConfig.__post_init__ (above, in the same module) has
+    # already been hardened against eight separate times, never
+    # propagated to this sibling class. Confirmed live, worse than that
+    # class's own worst case: `vision_dim=0`/`vision_dim=-8` raise a
+    # confusing raw RuntimeError from nn.Linear with no mention of which
+    # argument was at fault, and `text_dim=0`/`hidden_dim=0` are worse
+    # still -- they construct AND run forward() successfully, silently
+    # projecting every input through a zero-width bottleneck (an
+    # always-zero output for hidden_dim=0, a zero-feature output for
+    # text_dim=0), indistinguishable from a working projector without
+    # inspecting actual output values.
+    import pytest
+
+    with pytest.raises(ValueError, match="vision_dim"):
+        Projector(vision_dim=0, text_dim=24)
+    with pytest.raises(ValueError, match="vision_dim"):
+        Projector(vision_dim=-8, text_dim=24)
+    with pytest.raises(ValueError, match="text_dim"):
+        Projector(vision_dim=32, text_dim=0)
+    with pytest.raises(ValueError, match="hidden_dim"):
+        Projector(vision_dim=32, text_dim=24, hidden_dim=0)
+
+
 def test_projector_is_nonlinear_not_a_disguised_linear_layer():
     # A 2-layer MLP with a real nonlinearity in between must NOT be
     # expressible as a single linear map -- confirms the GELU is

@@ -22961,5 +22961,41 @@ suite: 942 passed, 1 skipped, 11 deselected. `ruff check`/`ruff format
 server.py blocking-call pattern in prose form, so none was extended,
 matching the established precedent for several other server.py fixes
 in this same file.
+---
+
+## Round 431: `Projector`'s constructor had none of the dimension validation its sibling `VisionEncoderConfig` was already hardened with eight times over
+
+Continuing the sweep, gave `sarva_foundry.model.vision` -- a module
+whose `VisionEncoderConfig.__post_init__` already carries eight
+documented sibling-parameter validation fixes -- one more fresh-eyes
+pass, checking whether the OTHER class in the same file, `Projector`,
+got the identical treatment.
+
+**Confirmed live**: `Projector.__init__` had zero validation on
+`vision_dim`/`text_dim`/`hidden_dim`, all three feeding straight into
+`nn.Linear` construction, the exact shape already hardened eight times
+in the sibling class one screen up. Three distinct failure modes,
+worse than that class's own worst case: `vision_dim=0`/`vision_dim=-8`
+raise a confusing raw `RuntimeError` ("mat1 and mat2 shapes cannot be
+multiplied" / "Trying to create tensor with negative dimension") with
+no mention of which argument was at fault; `text_dim=0` and
+`hidden_dim=0` are worse still -- both construct AND run `forward()`
+successfully, silently projecting every input through a zero-width
+bottleneck (`hidden_dim=0` produces an ALWAYS-ZERO output regardless of
+input, since a matmul through a zero-dimensional hidden layer destroys
+all information passing through it; `text_dim=0` produces a real
+tensor with zero features per position) -- indistinguishable from a
+working projector without inspecting actual output values, the exact
+"successful-looking but silently corrupt" failure this project treats
+as more severe than an outright crash elsewhere.
+
+**Fixed** by adding the identical positive-value checks the sibling
+class already has, raising a clean `ValueError` naming the actual
+offending argument. Verified with a genuine revert-and-check: reverted,
+watched the new test fail with the literal old bug's own shape (`DID
+NOT RAISE ValueError`), restored. 1 new test, 954 -> 955 Python tests.
+Full suite: 943 passed, 1 skipped, 11 deselected. `ruff check`/`ruff
+format --check` both clean. `docs/foundry/transformer.md`'s existing
+`Projector` description extended with this fix.
 
 **Next:** continuing the hardening sweep, module by module.

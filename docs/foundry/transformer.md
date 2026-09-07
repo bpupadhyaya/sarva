@@ -322,7 +322,15 @@ parallel implementation:
   `test_projector_is_nonlinear_not_a_disguised_linear_layer` checks
   directly: fit the best possible *linear* map to a few samples and
   confirm it does NOT predict fresh samples the way the real, nonlinear
-  `Projector` does).
+  `Projector` does). A later fresh-eyes sweep found `Projector`'s own
+  constructor had none of the dimension validation
+  `VisionEncoderConfig` above was already hardened with — confirmed
+  live, `vision_dim<=0` raised a confusing raw `RuntimeError` from
+  inside `nn.Linear`, and `text_dim=0`/`hidden_dim=0` were worse still:
+  both constructed AND ran `forward()` successfully, silently
+  projecting every input through a zero-width bottleneck (an
+  always-zero output for `hidden_dim=0`) with no error anywhere.
+  `test_projector_rejects_non_positive_dims` pins the fix.
 
 `DecoderOnlyTransformer.forward_multimodal(token_ids, image_embeds,
 image_token_id)` is the splice point: every occurrence of

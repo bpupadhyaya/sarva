@@ -223,9 +223,41 @@ class VisionEncoder(nn.Module):
 
 
 class Projector(nn.Module):
-    """Maps vision encoder output dim to the text decoder's dim."""
+    """Maps vision encoder output dim to the text decoder's dim.
+
+    A real bug found by a fresh-eyes sweep, the identical shape
+    `VisionEncoderConfig.__post_init__` (above, in this same module) has
+    already been hardened against eight separate times, just never
+    propagated to this sibling class -- a plain `nn.Module`, not a
+    dataclass with its own `__post_init__`, but with the exact same
+    "unvalidated dimension feeds straight into nn.Linear" shape.
+    Confirmed live, three distinct failure modes, worse than the
+    sibling class's own worst case: `vision_dim=0` raises a confusing
+    raw `RuntimeError` ("mat1 and mat2 shapes cannot be multiplied")
+    from inside a later `forward()` call with no mention of
+    `vision_dim` anywhere; `vision_dim=-8` raises an equally opaque
+    "Trying to create tensor with negative dimension" from inside
+    construction. Worse still, silent rather than crashing:
+    `text_dim=0` or `hidden_dim=0` both construct AND run `forward()`
+    successfully, but project every input through a zero-width
+    bottleneck -- `text_dim=0` returns a real tensor with zero features
+    per position, and `hidden_dim=0` returns a correctly-shaped but
+    ALWAYS-ZERO tensor regardless of input, since a matrix multiply
+    through a zero-dimensional hidden layer destroys every bit of
+    information passing through it. Both are indistinguishable from a
+    working projector until someone inspects the actual output values
+    or shapes -- exactly the "successful-looking but silently corrupt"
+    failure this project treats as more severe than an outright crash
+    elsewhere (e.g. the RL sandbox's own reward-hacking fixes, the
+    session-file interrupted-write fix)."""
 
     def __init__(self, vision_dim: int, text_dim: int, hidden_dim: int | None = None):
+        if vision_dim <= 0:
+            raise ValueError(f"vision_dim must be positive, got {vision_dim}")
+        if text_dim <= 0:
+            raise ValueError(f"text_dim must be positive, got {text_dim}")
+        if hidden_dim is not None and hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         super().__init__()
         hidden_dim = hidden_dim or text_dim
         self.fc1 = nn.Linear(vision_dim, hidden_dim)
