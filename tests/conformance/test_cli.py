@@ -16,6 +16,7 @@ import json
 import shutil
 import stat
 import sys
+import wave
 from contextlib import asynccontextmanager
 
 import pytest
@@ -339,6 +340,64 @@ def test_run_with_a_valid_document_completes_successfully(tmp_path, monkeypatch)
 
     assert result.exit_code == 0
     assert "what does this document say?" in result.stdout
+
+
+def test_chat_with_an_audio_file_of_the_wrong_type_fails_cleanly(tmp_path, monkeypatch):
+    # The identical "built, unreachable by any real user" gap --document
+    # closed for DocumentToTextDegrader, found one modality over:
+    # AudioToTextDegrader does real local faster-whisper transcription
+    # when sarva[audio] is installed, but nothing ever constructed an
+    # AudioBlock from a real chat/run turn (sarva speak/transcribe are
+    # separate, standalone TTS/STT commands, not part of this attachment
+    # path). Restricted to audio/*, matching --image's own restrictive
+    # validation rather than --document's permissive one.
+    _clear_provider_env(monkeypatch)
+    not_audio = tmp_path / "notes.txt"
+    not_audio.write_text("hello")
+
+    result = runner.invoke(app, ["chat", "what does this say?", "--audio", str(not_audio)])
+
+    assert result.exit_code != 0
+    assert "cannot determine an audio media type" in result.output
+
+
+def test_chat_with_a_nonexistent_audio_path_fails_cleanly_not_a_traceback(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["chat", "what does this say?", "--audio", "/nonexistent/clip.wav"])
+
+    assert result.exit_code != 0
+    assert "cannot read audio file" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_run_with_a_valid_audio_file_completes_successfully(tmp_path, monkeypatch):
+    # A real, decodable WAV, not placeholder bytes: with no cloud key
+    # and no reachable Ollama, mock is the only available model, and
+    # mock doesn't declare audio support, so this run genuinely
+    # exercises the degradation-fallback path this --audio flag exists
+    # to reach for the first time. Not asserting on the specific
+    # degraded/transcribed content: AudioToTextDegrader's real
+    # faster-whisper transcription only runs when sarva[audio] happens
+    # to be installed in whatever environment this test runs in (see
+    # stt_extra_installed's own gate) -- either way (real transcription
+    # or the honest metadata-only fallback), the run itself must still
+    # complete successfully, the same loose assertion the analogous
+    # document test above already uses.
+    _clear_provider_env(monkeypatch)
+    audio_path = tmp_path / "clip.wav"
+    with wave.open(str(audio_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(8000)
+        wav_file.writeframes(b"\x00\x00" * 8000)
+
+    result = runner.invoke(
+        app, ["run", "what does this audio say?", "--audio", str(audio_path), "--auto"]
+    )
+
+    assert result.exit_code == 0
+    assert "what does this audio say?" in result.stdout
 
 
 def test_run_with_model_forces_that_exact_model(monkeypatch, tmp_path):

@@ -698,6 +698,61 @@ fail), restored. Full frontend suite green (36 passed, up from 32),
 `tsc --noEmit` clean, the TypeScript SDK's own `npm test` (`tsc
 --noEmit` + `vitest run`, 22 tests) green after the type-mirror update.
 
+### The identical "built, unreachable" gap, one modality further: `AudioToTextDegrader` was never reachable from a real chat/run turn either
+
+The exact shape `--document` closed, found by applying the same
+"is `<Block>Type>(` constructed anywhere real" grep to `AudioBlock`
+next: nowhere in this project's own source outside tests.
+`AudioToTextDegrader` does real local `faster-whisper` transcription
+when `sarva[audio]` is installed (see this file's own earlier section
+on that), but `sarva speak`/`sarva transcribe` are separate, standalone
+TTS/STT commands — neither constructs an `AudioBlock` for a chat/run
+turn. Fixed by adding `--audio` to both `chat`/`run`, mirroring
+`_load_document`'s structure but restricted to `audio/*` like
+`_load_image` (not `_load_document`'s permissive "anything mimetypes
+recognizes"): an "attach audio" flag silently accepting a non-audio
+file would be a surprising, wrong-shaped attachment in a way "attach a
+document" isn't, since documents already span several genuinely
+different formats by design.
+
+**A real, separate bug caught before it ever shipped**, found the
+moment the new `--help` output was actually looked at rather than
+assumed correct: the help text's own literal `sarva[audio]` substring
+silently vanished, rendering as bare `sarva` — Typer's Rich-backed help
+formatter parses `[...]` in help strings as markup tags, exactly the
+same "a literal square bracket vanishes unless escaped" class this
+project had already found and fixed once for `doctor`'s own dynamic
+check-detail rendering (`console.print(f"\\[{mark}] ...")`, see that
+fix's own comment). That prior fix covered direct `console.print()`
+calls; this is the first time it bit a *static* `typer.Option(help=...)`
+string, a code path the earlier fix never touched. Fixed identically —
+`sarva\\[audio]`, the same double-backslash escape Rich's markup parser
+expects — verified live: `sarva chat --help`/`sarva run --help` both
+now render the literal `[audio]` instead of silently dropping it.
+
+Verified live end to end, chaining two real local ML pipelines with no
+mocking at any point: generated a real WAV via `sarva speak` (real
+local TTS), then attached it with `sarva chat --audio speech.wav
+"what is the secret code word?"` and no explicit `--model` — correctly
+routed through degradation, real `faster-whisper` transcription ran,
+and the model correctly extracted the planted code word from the
+transcribed text. An explicit `--model` override instead produces the
+identical "cannot translate an AudioBlock" error the document fix's
+own override case already established as intended behavior.
+
+The CLI's own "valid run completes" test deliberately doesn't assert
+on the specific transcribed/degraded content — `stt_extra_installed()`
+gates whether real transcription is even attempted, so whichever CI
+environment runs this test might or might not have `sarva[audio]`
+installed; either the real transcription path or the honest
+metadata-only fallback must still complete the run successfully,
+mirroring the identical loose-assertion style the document test above
+already uses for the same reason.
+
+Verified with a genuine revert-and-check: reverted, all three new
+tests failed with the exact old behavior (no `--audio` flag existed),
+restored. 3 new tests, full suite green.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

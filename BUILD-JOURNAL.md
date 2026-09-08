@@ -23991,3 +23991,41 @@ type-mirror update. `docs/multimodal.md` extended directly after round
 452's own section.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 454: `AudioToTextDegrader` had the identical "built, unreachable" gap `--document` closed one modality over
+
+Applied the same "is `<Block>(` constructed anywhere real" grep that
+found round 451's document gap to `AudioBlock` next: nowhere in this
+project's own source outside tests. `AudioToTextDegrader` does real
+local `faster-whisper` transcription when `sarva[audio]` is installed,
+but `sarva speak`/`sarva transcribe` are separate, standalone TTS/STT
+commands -- neither constructs an `AudioBlock` for a chat/run turn.
+Fixed by adding `--audio` to both `chat`/`run`, restricted to
+`audio/*` (matching `--image`'s restrictive validation, not
+`--document`'s permissive one).
+
+A real, separate bug caught before shipping: the new help text's own
+literal `sarva[audio]` substring silently vanished in `--help` output
+-- Typer's Rich-backed formatter parses `[...]` as markup, the same
+"a literal bracket vanishes unless escaped" class already fixed once
+for `doctor`'s own dynamic output, just never hit a *static*
+`typer.Option(help=...)` string before. Fixed identically with the
+double-backslash escape Rich expects.
+
+Verified live end to end, chaining two real local ML pipelines with no
+mocking: generated a real WAV via `sarva speak`, attached it with
+`sarva chat --audio speech.wav "what is the secret code word?"` and no
+explicit `--model` -- correctly routed through degradation, real
+faster-whisper transcription ran, and the model correctly extracted
+the planted code word from the transcribed text.
+
+Verified with a genuine revert-and-check: reverted, all three new
+tests failed, restored. 3 new tests, full suite green (968 passed, 1
+skipped, 11 deselected -- the same pre-existing, unrelated
+Podman-environment failure as prior rounds), `ruff check`/`ruff format
+--check` both clean. `docs/multimodal.md` extended directly after
+round 453's own section.
+
+**Next:** continuing the hardening sweep, module by module.
