@@ -548,23 +548,34 @@ temporarily reverting `_kill_container` to a naive client-only
 predicted shape (no `kill` command ever issued), confirming the test
 catches the real bug, before re-applying the fix.
 
-**Honestly scoped, not silently assumed correct:** neither Docker nor
-Podman is installed in the environment this tool was built and tested
-in, and the CI job that runs this test suite (`core`, `macos-latest`)
-does not have Docker preinstalled either — so while the command
+**Genuine end-to-end container execution, verified live once a real
+Podman install became available in this environment.** The command
 construction (every isolation flag above), the "no runtime available"
-error path, and the timeout/truncation/kill logic are all verified —
-the command construction via mocking `asyncio.create_subprocess_exec`
-and asserting on the real argv, the "no runtime" path against this
-environment's own real, unmocked absence of Docker/Podman — genuine
-end-to-end container execution (actually running code inside a real
-container and confirming its isolation from the inside) has **not**
-been verified live. This is a named, honest gap, not swept under the
-"tests pass" claim — the same discipline this project already applies
-to `uv.lock` regeneration (round 205) and Windows-specific runtime
-behavior (the desktop app's sidecar shutdown path): flagged for a
-maintainer with a real Docker install to verify before this tool's
-isolation should be fully trusted in production.
+error path, and the timeout/truncation/kill logic were always tested —
+via mocking `asyncio.create_subprocess_exec` and asserting on the real
+argv, and via the "no runtime" path against a genuine absence of
+Docker/Podman — but actually running code inside a real container and
+confirming its isolation from the inside had never been done, honestly
+named as a gap for a future maintainer with a real install. With
+Podman now installed and reachable here, ran the tool directly (not
+through a mocked subprocess) against four real cases: (1) ordinary
+execution — a real `python:3.12-slim` container, correct interpreter
+version, correct output; (2) network isolation — a real socket
+connect attempt to `8.8.8.8:53` from inside the container fails with
+`OSError: [Errno 101] Network is unreachable`, confirming `--network
+none` actually holds; (3) filesystem isolation — the container's `/`
+shows no host files (no working-directory mount), and a write attempt
+to the container's own root filesystem fails with `OSError: [Errno 30]
+Read-only file system`, confirming `--read-only` actually holds; (4)
+the timeout/kill path — a genuinely infinite-looping submission is
+killed at the real 30s deadline (elapsed: 30.2s), and `podman ps -a`
+immediately after shows zero containers, confirming `_kill_container`
+actually stops the real container the daemon owns, not just the local
+client process, with no orphan left running. The previously-flagged
+gap (this project already applies the same "flag it, don't assume it"
+discipline to `uv.lock` regeneration (round 205) and Windows-specific
+sidecar shutdown) is now closed with real evidence rather than
+inference from the command construction alone.
 
 A later, fresh-eyes sweep found `sarva doctor`/`GET /doctor` never
 reported whether `run_code` would actually work — every OTHER optional

@@ -24216,4 +24216,50 @@ unrelated Podman-environment failure as prior rounds -- confirmed
 unrelated by reproducing it identically on a clean, unmodified tree).
 `ruff check`/`ruff format --check` clean.
 
+## Round 460: fixed a real test-isolation bug, then used the same real Podman install to close RunCodeTool's long-flagged live-verification gap
+
+`test_run_code_returns_a_clear_error_when_no_container_runtime_is_available`
+was "deliberately NOT mocked," relying on this dev environment
+genuinely lacking both Docker and Podman -- a real assumption that
+quietly stopped holding the moment Podman was installed here for live
+testing (see round 450's own Ollama-reachability fix for the identical
+shape of bug: a test silently depending on unstated ambient
+environment state rather than a controlled condition). The test kept
+"passing" in the sense of not crashing, but had stopped testing the
+no-runtime path at all -- it was now actually running the given code
+in a real container and asserting success, with the `assert
+result.is_error` line failing to catch the drift only because nobody
+had run the suite locally since the install. Fixed by mocking
+`shutil.which` to genuinely return neither binary, the same pattern
+the very next test in the file already uses for its own "no real
+install to test this against" case. Genuine revert-and-check: reverted
+just this test, confirmed it fails on this machine with the exact
+"should never run" output actually appearing (proving the drift was
+real, not hypothetical), restored.
+
+With a real, reachable Podman install on hand, went further and closed
+a second, older, honestly-named gap in the same tool:
+`docs/agent-loop.md`'s own `RunCodeTool` section had flagged since it
+shipped that genuine end-to-end container execution -- actually
+running code inside a real container and confirming isolation from the
+inside -- had never been verified live, only inferred from mocked
+argv assertions. Ran the tool directly against four real cases: (1)
+ordinary execution in a real `python:3.12-slim` container; (2) network
+isolation -- a real socket connect to `8.8.8.8:53` failed with `OSError:
+[Errno 101] Network is unreachable`; (3) filesystem isolation -- no
+host files visible inside the container, and a write to the
+container's own root filesystem failed with `OSError: [Errno 30]
+Read-only file system`; (4) the timeout/kill path -- an infinite-loop
+submission was killed at the real 30s deadline and `podman ps -a`
+showed zero containers immediately after, confirming `_kill_container`
+genuinely stops the daemon-owned container with no orphan left behind.
+All four held exactly as designed. `docs/agent-loop.md` updated to
+replace the honest "not verified live" gap with this real evidence.
+
+Full suite green (985 passed, 1 skipped, 11 deselected -- the
+container-runtime false-negative from before this round's fix is now
+gone), `ruff check`/`ruff format --check` clean. No product code
+changed this round -- test-isolation fix plus a documentation-backed
+live verification, both real, both worth recording.
+
 **Next:** continuing the hardening sweep, module by module.

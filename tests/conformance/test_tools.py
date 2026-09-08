@@ -705,15 +705,26 @@ async def test_run_code_rejects_an_unsupported_language(ctx):
 
 
 @pytest.mark.asyncio
-async def test_run_code_returns_a_clear_error_when_no_container_runtime_is_available(ctx):
-    # Deliberately NOT mocked: this dev environment genuinely has
-    # neither Docker nor Podman installed, so this exercises the real
-    # `_find_container_runtime` path against real reality, the same way
-    # test_web_fetch_blocks_loopback_addresses needs no mocking to test
-    # a real, always-true local condition. The decisive property this
-    # tool exists for: no unsandboxed fallback, ever -- confirmed here
-    # by asserting the tool refuses rather than silently running the
-    # code directly on the host.
+async def test_run_code_returns_a_clear_error_when_no_container_runtime_is_available(
+    ctx, monkeypatch
+):
+    # A real test-isolation bug found by actually installing Podman on a
+    # dev machine for live testing (see this project's own Ollama-
+    # reachability fix, the identical "this test's assumption about the
+    # ambient environment quietly stopped being true" shape): this test
+    # used to rely on the real environment genuinely lacking Docker AND
+    # Podman, which held in CI but stopped holding the moment a real
+    # local Podman install landed here -- the test then started actually
+    # running the given code in a real container instead of exercising
+    # the no-runtime path it exists to cover, silently testing something
+    # else entirely with no failure to signal the drift. Mocking
+    # `shutil.which` to genuinely return neither binary (the same
+    # pattern `test_find_container_runtime_distinguishes_installed_from_
+    # actually_reachable` right below already uses for its own "no real
+    # install to test this against" case) makes this test assert what it
+    # always meant to, regardless of what's actually installed on
+    # whatever machine runs it.
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     tool = RunCodeTool()
     result = await tool.run({"language": "python", "code": "print('should never run')"}, ctx)
     assert result.is_error
