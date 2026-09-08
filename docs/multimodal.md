@@ -878,6 +878,58 @@ real hand-built PDF, real TTS-generated WAVs transcribed via real
 `faster-whisper`, and a real PyAV-encoded MP4 whose sampled frames
 recursively degrade to text. No loose ends remain in this sequence.
 
+### `--image`/`--document`/`--audio`/`--video` now accept URLs, not just local paths
+
+The last "built, unreachable by any real user" gap in this arc, found
+by applying the same lens to a different dimension: not *content
+type* (document/audio/video, all closed above) but *source type*.
+`_MediaBlock`'s `url` source, and the SSRF-guarded fetch behind it
+(`resolve_media_bytes` → `fetch_bytes`, redirect-revalidating and
+private-address-rejecting on every hop), have existed since this
+project's fetch layer shipped — every real provider adapter and
+degrader already calls the one function that resolves all three
+sources uniformly. But nothing on the input side ever constructed a
+`url=`-sourced block: not this CLI (all four loaders only ever read a
+local path), not the server schema, not the MCP content converter, not
+`WebFetchTool` (which only ever returns extracted text, never a media
+block). Confirmed live: `sarva chat "..." --image "https://..."`
+failed with a raw local-filesystem "No such file or directory" error,
+silently treating a URL as a nonexistent path.
+
+Fixed by adding URL detection to each of the four CLI loaders — an
+`http`/`https` scheme (matching `fetch_bytes`'s own allowlist exactly,
+so a non-web scheme like `s3://...` correctly falls through to the
+existing local-path behavior rather than being silently misrouted)
+constructs the block with `url=path` instead of reading local bytes;
+the actual fetch, and all of its SSRF-guarding, happens later through
+the same `resolve_media_bytes` path every degrader already uses.
+
+A second, independently real bug surfaced while wiring this up: all
+four CLI options were typed `Path | None`, and Typer/Click's own
+`Path` conversion runs *before* the loader ever sees the string —
+`pathlib.Path("https://host/x.png")` silently collapses the double
+slash to `https:/host/x.png`, a corrupted URL no scheme check would
+ever recognize. Caught by asserting the exact string `fetch_bytes`
+receives in a test, not just the run's exit code — an exit-code-only
+assertion would have passed against the corrupted URL just as easily,
+since `fetch_bytes`'s own scheme check treats an empty scheme
+(`https:/host` has none, `://` never appears) as unsupported and fails
+the same way a rejected scheme would, for a different reason. Fixed by
+typing all four options `str | None` instead, deferring the
+local-path-vs-URL decision entirely to `_load_*`'s own scheme check.
+
+Verified live end to end: `sarva chat --image` against a real
+`https://` URL now completes a real fetch (confirmed against a real
+rate limit response from a real host, then against a real successful
+fetch+describe against a different host); a loopback and a cloud
+metadata address are both still correctly rejected by the existing
+SSRF guard; existing local-path behavior (valid image, wrong media
+type, nonexistent path) is unchanged. Verified with a genuine
+revert-and-check: reverted just the CLI fix, 4 of 5 new tests failed
+with the exact old behavior (the 5th, the non-`http(s)`-scheme
+boundary case, is correctly identical either way), restored. Full
+suite green.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

@@ -18,12 +18,14 @@ import stat
 import sys
 import wave
 from contextlib import asynccontextmanager
+from typing import Any
 
 import av
 import pytest
 import sarva.cli as cli_module
 import sarva.config as config_module
 import sarva.memory.session as session_module
+import sarva.multimodal.fetch as fetch_module
 import sarva.runtime as runtime
 import typer
 from PIL import Image
@@ -474,6 +476,114 @@ def test_run_with_a_valid_video_file_completes_successfully(tmp_path, monkeypatc
 
     assert result.exit_code == 0
     assert "what does this video show?" in result.stdout
+
+
+def _mock_fetch_bytes(monkeypatch, content: bytes) -> list[str]:
+    """Patches `resolve_media_bytes`'s own `fetch_bytes` call so these
+    tests never touch the real network -- `fetch_bytes` itself already
+    has direct, network-free coverage in test_fetch.py (an
+    `httpx.MockTransport`), so this is testing something upstream and
+    genuinely different: that a URL passed to `sarva chat`/`run --image`
+    (etc.) reaches `fetch_bytes` at all, and reaches it byte-for-byte
+    unmodified. Returns the list of urls this fake was actually called
+    with, so a test can assert on the exact string that arrived -- the
+    real regression this closes was `typer.Option(..., Path)` silently
+    collapsing `https://host/x` to `https:/host/x` (Path's own `//`
+    normalization) before it ever reached _load_image, invisible to any
+    test that only checks the run's exit code."""
+    seen_urls: list[str] = []
+
+    async def _fake_fetch_bytes(url: str, **kwargs: Any) -> bytes:
+        seen_urls.append(url)
+        return content
+
+    monkeypatch.setattr(fetch_module, "fetch_bytes", _fake_fetch_bytes)
+    return seen_urls
+
+
+def test_run_with_a_url_sourced_image_fetches_it_instead_of_reading_a_local_path(monkeypatch):
+    # A real gap found by the same "built, unreachable by any real user"
+    # lens that drove --document/--audio/--video: `_MediaBlock`'s `url`
+    # source (and its SSRF-guarded fetch through resolve_media_bytes) has
+    # existed since fetch.py shipped, but every `_load_*` loader in this
+    # file only ever read a local path -- confirmed live, `sarva chat
+    # --image "https://..."` failed with a raw "No such file or
+    # directory", treating the URL as a nonexistent filesystem path.
+    _clear_provider_env(monkeypatch)
+    buf = io.BytesIO()
+    Image.new("RGB", (12, 8), color=(0, 128, 255)).save(buf, format="PNG")
+    seen_urls = _mock_fetch_bytes(monkeypatch, buf.getvalue())
+    url = "https://example.com/a/photo.png"
+
+    result = runner.invoke(app, ["run", "what's in this image?", "--image", url, "--auto"])
+
+    assert result.exit_code == 0
+    assert "what's in this image?" in result.stdout
+    # The exact string, not a Path-normalized variant -- this is the
+    # specific shape of the regression above (typer.Option(..., Path)
+    # collapsing "https://" to "https:/" before _load_image ever saw it).
+    assert seen_urls == [url]
+
+
+def test_run_with_a_url_sourced_document_fetches_it_instead_of_reading_a_local_path(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    seen_urls = _mock_fetch_bytes(monkeypatch, b"The quarterly revenue figure is $42,000.")
+    url = "https://example.com/report.txt"
+
+    result = runner.invoke(
+        app, ["run", "what does this document say?", "--document", url, "--auto"]
+    )
+
+    assert result.exit_code == 0
+    assert "what does this document say?" in result.stdout
+    assert seen_urls == [url]
+
+
+def test_run_with_a_url_sourced_audio_file_fetches_it_instead_of_reading_a_local_path(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(8000)
+        wav_file.writeframes(b"\x00\x00" * 8000)
+    seen_urls = _mock_fetch_bytes(monkeypatch, wav_buf.getvalue())
+    url = "https://example.com/clip.wav"
+
+    result = runner.invoke(app, ["run", "what does this audio say?", "--audio", url, "--auto"])
+
+    assert result.exit_code == 0
+    assert "what does this audio say?" in result.stdout
+    assert seen_urls == [url]
+
+
+def test_run_with_a_url_sourced_video_file_fetches_it_instead_of_reading_a_local_path(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    seen_urls = _mock_fetch_bytes(monkeypatch, _synthetic_video_bytes_for_test())
+    url = "https://example.com/clip.mp4"
+
+    result = runner.invoke(app, ["run", "what does this video show?", "--video", url, "--auto"])
+
+    assert result.exit_code == 0
+    assert "what does this video show?" in result.stdout
+    assert seen_urls == [url]
+
+
+def test_chat_with_a_non_http_scheme_is_not_treated_as_a_url(monkeypatch):
+    # `_is_url` only recognizes http/https, matching fetch_bytes's own
+    # scheme allowlist (fetch.py's `_ALLOWED_SCHEMES`) -- anything else
+    # (a bare "s3://..." string, say) falls through to the existing
+    # local-path behavior rather than being silently misrouted, and fails
+    # with the same clean "no such file" message a real nonexistent local
+    # path already gets, not a confusing fetch-layer error about a path
+    # that was never actually a URL from this file's own point of view.
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["chat", "look at this", "--image", "s3://some-bucket/photo.png"])
+
+    assert result.exit_code != 0
+    assert "cannot read image file" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_run_with_model_forces_that_exact_model(monkeypatch, tmp_path):

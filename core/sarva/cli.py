@@ -14,6 +14,7 @@ import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -160,10 +161,29 @@ def _write_bytes_or_exit(path: Path, data: bytes, description: str) -> None:
         raise typer.Exit(1) from e
 
 
+def _is_url(path: str) -> bool:
+    # A real gap found by the same "built, unreachable by any real user"
+    # lens that drove --document/--audio/--video: `_MediaBlock`'s `url`
+    # source (core/sarva/multimodal/content.py) has been a documented,
+    # first-class, SSRF-protected source since `resolve_media_bytes` grew
+    # its own `fetch_bytes` path (fetch.py), but every `_load_*` loader
+    # below only ever read a local path -- confirmed live, `sarva chat
+    # --image "https://..."` failed with a raw "No such file or
+    # directory" from `Path().read_bytes()`, treating the URL as a
+    # (nonexistent) filesystem path instead of fetching it. Scheme
+    # validation and SSRF-guarding both already live in `fetch_bytes`
+    # (only http/https, `ensure_public_host` on the resolved address) --
+    # this only needs to recognize a URL and hand it off unread, exactly
+    # like `WebFetchTool` already does for the exact same http(s) source.
+    return urlparse(path).scheme in ("http", "https")
+
+
 def _load_image(path: str) -> ImageBlock:
     media_type, _ = mimetypes.guess_type(path)
     if media_type is None or not media_type.startswith("image/"):
         raise typer.BadParameter(f"cannot determine an image media type for {path!r}")
+    if _is_url(path):
+        return ImageBlock(media_type=media_type, url=path)
     return ImageBlock(media_type=media_type, data=_read_bytes_or_exit(Path(path), "image file"))
 
 
@@ -187,6 +207,8 @@ def _load_document(path: str) -> DocumentBlock:
     media_type, _ = mimetypes.guess_type(path)
     if media_type is None:
         raise typer.BadParameter(f"cannot determine a media type for {path!r}")
+    if _is_url(path):
+        return DocumentBlock(media_type=media_type, url=path)
     return DocumentBlock(
         media_type=media_type, data=_read_bytes_or_exit(Path(path), "document file")
     )
@@ -209,6 +231,8 @@ def _load_audio(path: str) -> AudioBlock:
     media_type, _ = mimetypes.guess_type(path)
     if media_type is None or not media_type.startswith("audio/"):
         raise typer.BadParameter(f"cannot determine an audio media type for {path!r}")
+    if _is_url(path):
+        return AudioBlock(media_type=media_type, url=path)
     return AudioBlock(media_type=media_type, data=_read_bytes_or_exit(Path(path), "audio file"))
 
 
@@ -227,6 +251,8 @@ def _load_video(path: str) -> VideoBlock:
     media_type, _ = mimetypes.guess_type(path)
     if media_type is None or not media_type.startswith("video/"):
         raise typer.BadParameter(f"cannot determine a video media type for {path!r}")
+    if _is_url(path):
+        return VideoBlock(media_type=media_type, url=path)
     return VideoBlock(media_type=media_type, data=_read_bytes_or_exit(Path(path), "video file"))
 
 
@@ -283,29 +309,35 @@ def _parse_mcp_env(values: list[str]) -> dict[str, str]:
 @app.command()
 def chat(
     message: str = typer.Argument(..., help="Message to send."),
-    image: Path | None = typer.Option(
-        None, "--image", help="Attach an image file (requires a vision-capable model)."
+    image: str | None = typer.Option(
+        None,
+        "--image",
+        help="Attach an image file (requires a vision-capable model) -- a local "
+        "path, or an http(s):// URL fetched the same SSRF-safe way as the "
+        "web_search/web_fetch tools.",
     ),
-    document: Path | None = typer.Option(
+    document: str | None = typer.Option(
         None,
         "--document",
-        help="Attach a document file (PDF or plain text/markdown/csv/html/json). "
-        "Extracted to real text if a model can't take documents directly -- "
-        "never a fabricated summary.",
+        help="Attach a document file (PDF or plain text/markdown/csv/html/json) -- "
+        "a local path, or an http(s):// URL. Extracted to real text if a model "
+        "can't take documents directly -- never a fabricated summary.",
     ),
-    audio: Path | None = typer.Option(
+    audio: str | None = typer.Option(
         None,
         "--audio",
-        help="Attach an audio file. Really transcribed via local faster-whisper "
-        "if a model can't take audio directly and sarva\\[audio] is installed -- "
-        "otherwise a real, honest metadata report, never a fabricated transcript.",
+        help="Attach an audio file -- a local path, or an http(s):// URL. Really "
+        "transcribed via local faster-whisper if a model can't take audio "
+        "directly and sarva\\[audio] is installed -- otherwise a real, honest "
+        "metadata report, never a fabricated transcript.",
     ),
-    video: Path | None = typer.Option(
+    video: str | None = typer.Option(
         None,
         "--video",
-        help="Attach a video file. Really sampled into real decoded frames via "
-        "local PyAV if a model can't take video directly -- degrading further "
-        "to text if it can't take images either, never a fabricated description.",
+        help="Attach a video file -- a local path, or an http(s):// URL. Really "
+        "sampled into real decoded frames via local PyAV if a model can't take "
+        "video directly -- degrading further to text if it can't take images "
+        "either, never a fabricated description.",
     ),
     model: str | None = typer.Option(
         None,
@@ -335,10 +367,10 @@ def chat(
 
 async def _chat(
     message: str,
-    image: Path | None,
-    document: Path | None,
-    audio: Path | None,
-    video: Path | None,
+    image: str | None,
+    document: str | None,
+    audio: str | None,
+    video: str | None,
     model: str | None,
     session: str | None,
     verify: bool,
@@ -359,13 +391,13 @@ async def _chat(
             history = _load_session_history(store, session)
             extra_content: list[ContentBlock] = []
             if image:
-                extra_content.append(_load_image(str(image)))
+                extra_content.append(_load_image(image))
             if document:
-                extra_content.append(_load_document(str(document)))
+                extra_content.append(_load_document(document))
             if audio:
-                extra_content.append(_load_audio(str(audio)))
+                extra_content.append(_load_audio(audio))
             if video:
-                extra_content.append(_load_video(str(video)))
+                extra_content.append(_load_video(video))
 
             loop = AgentLoop(
                 router=_build_router(),
@@ -434,29 +466,35 @@ async def _chat(
 def run(
     task: str = typer.Argument(..., help="Task for the agent to complete."),
     workdir: str = typer.Option(".", help="Working directory for file/shell tools."),
-    image: Path | None = typer.Option(
-        None, "--image", help="Attach an image file (requires a vision-capable model)."
+    image: str | None = typer.Option(
+        None,
+        "--image",
+        help="Attach an image file (requires a vision-capable model) -- a local "
+        "path, or an http(s):// URL fetched the same SSRF-safe way as the "
+        "web_search/web_fetch tools.",
     ),
-    document: Path | None = typer.Option(
+    document: str | None = typer.Option(
         None,
         "--document",
-        help="Attach a document file (PDF or plain text/markdown/csv/html/json). "
-        "Extracted to real text if a model can't take documents directly -- "
-        "never a fabricated summary.",
+        help="Attach a document file (PDF or plain text/markdown/csv/html/json) -- "
+        "a local path, or an http(s):// URL. Extracted to real text if a model "
+        "can't take documents directly -- never a fabricated summary.",
     ),
-    audio: Path | None = typer.Option(
+    audio: str | None = typer.Option(
         None,
         "--audio",
-        help="Attach an audio file. Really transcribed via local faster-whisper "
-        "if a model can't take audio directly and sarva\\[audio] is installed -- "
-        "otherwise a real, honest metadata report, never a fabricated transcript.",
+        help="Attach an audio file -- a local path, or an http(s):// URL. Really "
+        "transcribed via local faster-whisper if a model can't take audio "
+        "directly and sarva\\[audio] is installed -- otherwise a real, honest "
+        "metadata report, never a fabricated transcript.",
     ),
-    video: Path | None = typer.Option(
+    video: str | None = typer.Option(
         None,
         "--video",
-        help="Attach a video file. Really sampled into real decoded frames via "
-        "local PyAV if a model can't take video directly -- degrading further "
-        "to text if it can't take images either, never a fabricated description.",
+        help="Attach a video file -- a local path, or an http(s):// URL. Really "
+        "sampled into real decoded frames via local PyAV if a model can't take "
+        "video directly -- degrading further to text if it can't take images "
+        "either, never a fabricated description.",
     ),
     model: str | None = typer.Option(
         None,
@@ -587,10 +625,10 @@ def _print_run_failure(state: str, detail: str | None) -> None:
 async def _run(
     task: str,
     workdir: str,
-    image: Path | None,
-    document: Path | None,
-    audio: Path | None,
-    video: Path | None,
+    image: str | None,
+    document: str | None,
+    audio: str | None,
+    video: str | None,
     model: str | None,
     auto: bool,
     session: str | None,
@@ -612,13 +650,13 @@ async def _run(
             history = _load_session_history(store, session)
             extra_content: list[ContentBlock] = []
             if image:
-                extra_content.append(_load_image(str(image)))
+                extra_content.append(_load_image(image))
             if document:
-                extra_content.append(_load_document(str(document)))
+                extra_content.append(_load_document(document))
             if audio:
-                extra_content.append(_load_audio(str(audio)))
+                extra_content.append(_load_audio(audio))
             if video:
-                extra_content.append(_load_video(str(video)))
+                extra_content.append(_load_video(video))
             confirm = always_allow if auto else _confirm_prompt
             headers = _parse_mcp_headers(mcp_headers)
             env = _parse_mcp_env(mcp_envs)

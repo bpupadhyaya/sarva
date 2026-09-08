@@ -24170,4 +24170,50 @@ full CLI -> server API (REST + WebSocket) -> frontend UI -> TypeScript
 SDK chain, live-verified at every layer with genuine artifacts. No
 loose ends remain in this sequence.
 
+## Round 459: `--image`/`--document`/`--audio`/`--video` now accept URLs, not just local paths
+
+The same "built, unreachable by any real user" lens applied to a new
+dimension: source type, not content type. `_MediaBlock`'s `url` source
+and its SSRF-guarded fetch (`resolve_media_bytes` -> `fetch_bytes`)
+have existed since the fetch layer shipped, and every real provider
+adapter/degrader already resolves all three sources uniformly -- but
+no input surface ever constructed a `url=`-sourced block. Confirmed
+live: `sarva chat --image "https://..."` failed with a raw local-file
+"No such file or directory" error, silently treating a URL as a
+nonexistent path. Checked and ruled out CLI, server schema, the MCP
+content converter, and `WebFetchTool` (text-only, never constructs a
+media block) as existing reachability paths before concluding this was
+a genuine, new gap.
+
+Fixed by adding scheme detection (`http`/`https`, matching
+`fetch_bytes`'s own allowlist) to all four `_load_*` CLI loaders --
+constructs the block with `url=path` instead of reading local bytes,
+deferring the actual fetch and its SSRF-guarding entirely to the same
+`resolve_media_bytes` path every degrader already uses. A second,
+independently real bug surfaced mid-fix: all four CLI options were
+typed `Path | None`, and Typer/Click's own conversion runs before the
+loader ever sees the string -- `pathlib.Path("https://host/x.png")`
+silently collapses the double slash to `https:/host/x.png`, a
+corrupted URL live-reproduced against a real host before being traced
+to its cause. Fixed by retyping all four options `str | None`.
+
+Verified live: a real `https://` URL now completes a real fetch
+(reproduced against both a real 429 rate-limit response and a real
+successful fetch+describe), a loopback and a cloud metadata address
+are both still correctly rejected by the existing SSRF guard, and
+existing local-path behavior (valid image, wrong media type,
+nonexistent path) is unchanged. 5 new tests (one per modality plus a
+non-`http(s)`-scheme boundary case), asserting on the exact URL string
+`fetch_bytes` received, not just the run's exit code -- an exit-code-
+only assertion would have passed against the corrupted URL too, since
+an empty/mangled scheme fails `fetch_bytes`'s own check the same way a
+genuinely rejected scheme would, for a different reason. Verified with
+a genuine revert-and-check: reverted just the CLI fix, 4 of 5 new
+tests failed with the exact old behavior (the 5th, the scheme-boundary
+case, is correctly identical either way), restored. Full suite green:
+989 passed, 1 skipped, 11 deselected, 1 failed (the same pre-existing,
+unrelated Podman-environment failure as prior rounds -- confirmed
+unrelated by reproducing it identically on a clean, unmodified tree).
+`ruff check`/`ruff format --check` clean.
+
 **Next:** continuing the hardening sweep, module by module.
