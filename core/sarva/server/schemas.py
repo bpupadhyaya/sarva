@@ -24,6 +24,11 @@ class ChatRequest(BaseModel):
     # this gap for chat/run; this closes it for /chat and /ws/chat.
     audio_base64: str | None = None
     audio_media_type: str | None = None
+    # Mirrors image/document/audio exactly. The CLI's own --video flag
+    # closed this gap for chat/run; this closes it for /chat and
+    # /ws/chat.
+    video_base64: str | None = None
+    video_media_type: str | None = None
     model: str | None = None
     verify: bool = False
 

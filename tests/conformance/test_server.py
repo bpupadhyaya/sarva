@@ -13,7 +13,14 @@ import pytest
 from fastapi.testclient import TestClient
 from sarva.memory import session as session_module
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import AudioBlock, DocumentBlock, ImageBlock, Modality, ToolCallBlock
+from sarva.multimodal.content import (
+    AudioBlock,
+    DocumentBlock,
+    ImageBlock,
+    Modality,
+    ToolCallBlock,
+    VideoBlock,
+)
 from sarva.providers.base import GenerateRequest, ModelCapabilities, ModelCost, ModelInfo
 from sarva.providers.mock import MockProvider, ScriptedTurn
 from sarva.providers.registry import Registry, Router, TaskClass, load_routing
@@ -160,6 +167,33 @@ def _use_capturing_audio_mock(monkeypatch) -> _CapturingProvider:
     provider = _CapturingProvider()
     monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
     monkeypatch.setattr(app_module, "build_router", _audio_capable_mock_router)
+    return provider
+
+
+def _video_capable_mock_router() -> Router:
+    """Same reasoning as `_document_capable_mock_router`, for VIDEO."""
+    model = ModelInfo(
+        id="mock",
+        provider="mock",
+        display_name="Video-capable mock (test-only)",
+        capabilities=ModelCapabilities(
+            modalities_in={Modality.TEXT, Modality.VIDEO},
+            modalities_out={Modality.TEXT},
+            tool_use=True,
+            thinking=False,
+            context_window=100_000,
+            max_output=8_000,
+        ),
+        cost=ModelCost(),
+    )
+    registry = Registry(models={"mock": model})
+    return Router(registry, routing={TaskClass.MAIN: ["mock"]}, available={"mock"})
+
+
+def _use_capturing_video_mock(monkeypatch) -> _CapturingProvider:
+    provider = _CapturingProvider()
+    monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
+    monkeypatch.setattr(app_module, "build_router", _video_capable_mock_router)
     return provider
 
 
@@ -924,6 +958,70 @@ def test_chat_with_an_attached_audio_file_reaches_the_provider_as_a_real_audio_b
     assert audios[0].media_type == "audio/wav"
 
 
+def test_chat_with_malformed_video_base64_fails_cleanly_not_a_500(monkeypatch):
+    # The identical bug shape already fixed for image_base64/
+    # document_base64/audio_base64, exercised here for video.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "hi",
+            "video_base64": "not valid base64!!!",
+            "video_media_type": "video/mp4",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert body["message"] is None
+
+
+def test_chat_with_video_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(monkeypatch):
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={"message": "hi", "video_base64": "aGVsbG8="},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert "video_base64" in body["detail"]
+    assert "video_media_type" in body["detail"]
+
+
+def test_chat_with_an_attached_video_file_reaches_the_provider_as_a_real_video_block(monkeypatch):
+    # Uses a video-capable test router -- the real production registry's
+    # mock entry declines VIDEO on purpose, so an all-mock available set
+    # would degrade any video away before it reaches the provider at
+    # all. This test is about the video_base64 -> VideoBlock wiring
+    # itself, not routing/degradation policy (see docs/multimodal.md's
+    # round-457 section for the live-verified degradation path via a
+    # real PyAV-encoded MP4 and real frame sampling).
+    provider = _use_capturing_video_mock(monkeypatch)
+    raw = b"real enough bytes for this test, not a genuine mp4 container"
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "what does this video show?",
+            "video_base64": base64.b64encode(raw).decode(),
+            "video_media_type": "video/mp4",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert provider.last_request is not None
+    user_msg = next(m for m in provider.last_request.messages if m.role == "user")
+    videos = [b for b in user_msg.content if isinstance(b, VideoBlock)]
+    assert len(videos) == 1
+    assert videos[0].data == raw
+    assert videos[0].media_type == "video/mp4"
+
+
 def test_websocket_streams_events_and_ends_with_run_done(monkeypatch):
     _force_mock_only(monkeypatch)
     client = _client()
@@ -1300,6 +1398,25 @@ def test_websocket_with_audio_base64_but_no_media_type_fails_cleanly_not_a_silen
     client = _client()
     with client.websocket_connect("/ws/chat") as ws:
         ws.send_json({"message": "hi", "audio_base64": "aGVsbG8="})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_video_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(
+    monkeypatch,
+):
+    # The WS counterpart to the identical /chat test above, exercised
+    # here for the new video_base64/video_media_type fields.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "video_base64": "aGVsbG8="})
         events = []
         while True:
             data = ws.receive_json()

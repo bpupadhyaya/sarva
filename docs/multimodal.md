@@ -842,6 +842,42 @@ server API/WebSocket and frontend UI extensions for video, mirroring
 what documents and audio both already received, remain a real,
 deliberately named, deferred gap for a future round.
 
+### Video's server, WebSocket, and frontend extensions, closed in the same session — all three modalities now uniformly complete
+
+Picked the deferred gap above back up immediately: `ChatRequest`
+gained `video_base64`/`video_media_type` mirroring image/document/
+audio exactly, `_extra_content_blocks` builds a real `VideoBlock` the
+same way, and the TypeScript SDK's own type mirror
+(`ChatRequest`/`WsChatRequest`) gained the same two fields. `App.tsx`
+gained a fourth attach button (🎬), restricted to `accept="video/*"`
+like the image/audio inputs.
+
+Verified live end to end against a real running `sarva serve`
+process: the same genuinely PyAV-encoded MP4 (15 frames, 1.5s @ 10fps)
+from the CLI fix above, POSTed to `/chat` as base64 with no explicit
+`model` — correctly routed through the full recursive degradation
+chain (video → sampled frames → text, since the fallback model can't
+take images either), returning the correct duration and frame count.
+Also confirmed the "both fields required together" validation error
+fires correctly for a mismatched pair.
+
+Verified with a genuine revert-and-check at both layers: server (4 new
+tests, all failed on revert with the exact old behavior, restored) and
+frontend (4 new tests mirroring the audio attachment tests exactly, 3
+of 4 failed on revert as predicted — the 4th, omitted-when-unset, is
+trivially true either way — restored). Full suites green: Python (979
+passed), frontend (44 passed, up from 40), TypeScript SDK (22 tests).
+`core/sarva/server/static/` rebuilt and included in this same commit,
+applying the lesson from round 453's CI failure correctly again.
+
+**The complete picture after rounds 451–458**: all three previously
+built-but-unreachable degraders (document, audio, video) now have the
+full CLI → server API (REST + WebSocket) → frontend UI → TypeScript
+SDK chain, live-verified at every layer with genuine artifacts — a
+real hand-built PDF, real TTS-generated WAVs transcribed via real
+`faster-whisper`, and a real PyAV-encoded MP4 whose sampled frames
+recursively degrade to text. No loose ends remain in this sequence.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

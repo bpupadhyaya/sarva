@@ -152,7 +152,8 @@ header h1 {
 
 .attached-image,
 .attached-document,
-.attached-audio {
+.attached-audio,
+.attached-video {
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -166,7 +167,8 @@ header h1 {
 
 .attached-image button,
 .attached-document button,
-.attached-audio button {
+.attached-audio button,
+.attached-video button {
   border: none;
   background: none;
   color: var(--muted);

@@ -42,6 +42,7 @@ from sarva.multimodal.content import (
     ImageBlock,
     Message,
     ToolCallBlock,
+    VideoBlock,
 )
 from sarva.multimodal.degraders import default_degraders
 from sarva.runtime import build_providers, build_router, run_diagnostics
@@ -150,6 +151,8 @@ def _extra_content_blocks(
     document_media_type: str | None = None,
     audio_base64: str | None = None,
     audio_media_type: str | None = None,
+    video_base64: str | None = None,
+    video_media_type: str | None = None,
 ) -> list[ContentBlock]:
     """Shared by /chat (a validated ChatRequest) and /ws/chat (a raw JSON
     frame with no schema of its own) so the two request paths can't drift
@@ -192,6 +195,10 @@ def _extra_content_blocks(
         blocks.append(AudioBlock(media_type=audio_media_type, data=base64.b64decode(audio_base64)))
     elif audio_base64 or audio_media_type:
         raise ValueError("audio_base64 and audio_media_type must both be set together, or neither")
+    if video_base64 and video_media_type:
+        blocks.append(VideoBlock(media_type=video_media_type, data=base64.b64decode(video_base64)))
+    elif video_base64 or video_media_type:
+        raise ValueError("video_base64 and video_media_type must both be set together, or neither")
     return blocks
 
 
@@ -389,6 +396,8 @@ def create_app(workdir: str = ".") -> FastAPI:
                     req.document_media_type,
                     req.audio_base64,
                     req.audio_media_type,
+                    req.video_base64,
+                    req.video_media_type,
                 )
 
                 try:
@@ -482,6 +491,8 @@ def create_app(workdir: str = ".") -> FastAPI:
         flag closed the identical CLI-side gap; this closes it here.
         Optional "audio_base64"/"audio_media_type" attach one audio file
         the same way -- the CLI's own --audio flag closed that gap too.
+        Optional "video_base64"/"video_media_type" attach one video file
+        the same way -- the CLI's own --video flag closed that gap too.
         Optional "model" forces a specific model
         id (same meaning as the CLI's own --model), bypassing the
         router's default selection entirely -- an unknown id surfaces as
@@ -757,6 +768,8 @@ def create_app(workdir: str = ".") -> FastAPI:
                             payload.get("document_media_type"),
                             payload.get("audio_base64"),
                             payload.get("audio_media_type"),
+                            payload.get("video_base64"),
+                            payload.get("video_media_type"),
                         )
                     except (ValueError, TypeError) as e:
                         await _send_failure(str(e))

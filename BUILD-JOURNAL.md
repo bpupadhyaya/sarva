@@ -24134,3 +24134,40 @@ API/WebSocket and frontend UI extensions for video remain a real,
 deliberately named, deferred gap for a future round.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 458: video's server, WebSocket, and frontend extensions -- all three modalities now uniformly complete
+
+Direct, same-session follow-up to round 457, closing the deferred gap
+immediately: `ChatRequest` gained `video_base64`/`video_media_type`
+mirroring image/document/audio exactly, `_extra_content_blocks` builds
+a real `VideoBlock` the same way, the TypeScript SDK's own type mirror
+gained the same two fields, and `App.tsx` gained a fourth attach
+button (video), restricted to `accept="video/*"`.
+
+Verified live end to end against a real running `sarva serve`
+process: the same genuinely PyAV-encoded MP4 from round 457's own
+verification, POSTed to `/chat` with no explicit model, correctly
+routed through the full recursive degradation chain (video -> sampled
+frames -> text) and returned the correct duration and frame count.
+Also confirmed the validation error fires correctly for a mismatched
+field pair.
+
+Verified with a genuine revert-and-check at both layers (server: 4 new
+tests, all failed on revert, restored; frontend: 4 new tests, 3 of 4
+failed on revert as predicted, restored). Full suites green: Python
+(979 passed, 1 skipped, 11 deselected -- the same pre-existing,
+unrelated Podman-environment failure as prior rounds), frontend (44
+passed, up from 40), TypeScript SDK (22 tests), `ruff check`/`ruff
+format --check` clean. `core/sarva/server/static/` rebuilt and
+included in this same commit -- the round-453 lesson applied correctly
+again.
+
+**The complete picture after rounds 451-458**: all three previously
+built-but-unreachable degraders (document, audio, video) now have the
+full CLI -> server API (REST + WebSocket) -> frontend UI -> TypeScript
+SDK chain, live-verified at every layer with genuine artifacts. No
+loose ends remain in this sequence.
+
+**Next:** continuing the hardening sweep, module by module.

@@ -46,6 +46,8 @@ export interface ChatRequest {
   document_media_type?: string | null;
   audio_base64?: string | null;
   audio_media_type?: string | null;
+  video_base64?: string | null;
+  video_media_type?: string | null;
   model?: string | null;
   verify?: boolean;
 }
@@ -133,6 +135,8 @@ export interface WsChatRequest {
   document_media_type?: string | null;
   audio_base64?: string | null;
   audio_media_type?: string | null;
+  video_base64?: string | null;
+  video_media_type?: string | null;
   model?: string | null;
   auto?: boolean;
   verify?: boolean;

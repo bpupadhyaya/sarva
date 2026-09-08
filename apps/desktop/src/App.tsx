@@ -31,6 +31,12 @@ interface AttachedAudio {
   name: string;
 }
 
+interface AttachedVideo {
+  base64: string;
+  mediaType: string;
+  name: string;
+}
+
 interface ModelInfo {
   id: string;
   display_name: string;
@@ -60,6 +66,7 @@ export default function App() {
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
   const [attachedDocument, setAttachedDocument] = useState<AttachedDocument | null>(null);
   const [attachedAudio, setAttachedAudio] = useState<AttachedAudio | null>(null);
+  const [attachedVideo, setAttachedVideo] = useState<AttachedVideo | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   // "" means auto (no override) -- the exact meaning omitting the CLI's
   // own --model flag has, kept consistent rather than inventing a
@@ -70,6 +77,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const documentInputRef = useRef<HTMLInputElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
 
   // null = still deciding (avoids a first-run screen flashing briefly for
   // an already-configured install while GET /doctor is in flight).
@@ -122,7 +130,8 @@ export default function App() {
     const image = attachedImage;
     const document = attachedDocument;
     const audio = attachedAudio;
-    const attachmentNames = [image?.name, document?.name, audio?.name]
+    const video = attachedVideo;
+    const attachmentNames = [image?.name, document?.name, audio?.name, video?.name]
       .filter(Boolean)
       .join(", ");
     setMessages((prev) => [
@@ -134,6 +143,7 @@ export default function App() {
     setAttachedImage(null);
     setAttachedDocument(null);
     setAttachedAudio(null);
+    setAttachedVideo(null);
     setStreaming(true);
     setError(null);
     setPending(null);
@@ -158,9 +168,10 @@ export default function App() {
       // an explicit Approve/Deny in the UI before it runs. See
       // core/sarva/server/app.py's ws_chat docstring for the protocol.
       // image_base64/image_media_type/document_base64/
-      // document_media_type/audio_base64/audio_media_type/model are
-      // omitted entirely (not sent as null) when unset, matching the
-      // REST /chat request schema's own optional-field shape.
+      // document_media_type/audio_base64/audio_media_type/video_base64/
+      // video_media_type/model are omitted entirely (not sent as null)
+      // when unset, matching the REST /chat request schema's own
+      // optional-field shape.
       ws.send(
         JSON.stringify({
           message: text,
@@ -170,6 +181,7 @@ export default function App() {
             ? { document_base64: document.base64, document_media_type: document.mediaType }
             : {}),
           ...(audio ? { audio_base64: audio.base64, audio_media_type: audio.mediaType } : {}),
+          ...(video ? { video_base64: video.base64, video_media_type: video.mediaType } : {}),
           ...(selectedModel ? { model: selectedModel } : {}),
         }),
       );
@@ -240,6 +252,7 @@ export default function App() {
     attachedImage,
     attachedDocument,
     attachedAudio,
+    attachedVideo,
     selectedModel,
     appendToLastAssistant,
   ]);
@@ -296,6 +309,22 @@ export default function App() {
     }
     const base64 = await fileToBase64(file);
     setAttachedAudio({ base64, mediaType: file.type, name: file.name });
+    setError(null);
+  }, []);
+
+  // Mirrors handleAudioFileChange's restrictive video/* validation, the
+  // same reasoning --video's own CLI-side restriction already
+  // established.
+  const handleVideoFileChange = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    if (!file.type.startsWith("video/")) {
+      setError(`"${file.name}" doesn't look like a video (${file.type || "unknown type"})`);
+      return;
+    }
+    const base64 = await fileToBase64(file);
+    setAttachedVideo({ base64, mediaType: file.type, name: file.name });
     setError(null);
   }, []);
 
@@ -363,6 +392,15 @@ export default function App() {
           <span>🎤 {attachedAudio.name}</span>
           <button type="button" onClick={() => setAttachedAudio(null)}>
             Remove audio
+          </button>
+        </div>
+      )}
+
+      {attachedVideo && (
+        <div className="attached-video">
+          <span>🎬 {attachedVideo.name}</span>
+          <button type="button" onClick={() => setAttachedVideo(null)}>
+            Remove video
           </button>
         </div>
       )}
@@ -438,6 +476,22 @@ export default function App() {
           aria-label="Attach audio"
         >
           🎤
+        </button>
+        <input
+          type="file"
+          accept="video/*"
+          ref={videoInputRef}
+          onChange={handleVideoFileChange}
+          style={{ display: "none" }}
+          data-testid="attach-video-input"
+        />
+        <button
+          type="button"
+          disabled={streaming}
+          onClick={() => videoInputRef.current?.click()}
+          aria-label="Attach video"
+        >
+          🎬
         </button>
         <input
           value={input}
