@@ -46,6 +46,84 @@ DEFAULT_MEMORY_DB_PATH = sarva_home() / "memory.db"
 
 _TOKEN_PATTERN = re.compile(r"\w+")
 
+# A real bug found live, not by reading the scoring math in isolation:
+# `search("tell me about the user's pet", ...)` against five real
+# memories ranked "The user's favorite programming language is
+# Python." ABOVE "The user's dog is named Max and is a golden
+# retriever." -- the wrong entry first, for a query naming the topic
+# ("pet") the second entry is actually about. The smoothed IDF formula
+# below (`log((n+1)/(freq+1)) + 1`, the same scikit-learn's own
+# TfidfVectorizer uses) deliberately never lets a term's weight hit
+# true zero even when it appears in every single document -- correct
+# behavior, but it means shared boilerplate ("the", "user's", "is")
+# across short, structurally similar memories still contributes real,
+# non-negligible cosine-similarity mass, especially favoring whichever
+# candidate is shortest (its vector has fewer terms diluting the
+# shared ones). A small, standard English stopword list -- not
+# invented for this one repro, the same short common-function-word set
+# most classical IR implementations filter before scoring -- removes
+# that noise at the source rather than leaving every future caller to
+# rediscover it the way `top_k`'s own negative-slice guard already had
+# to be centralized here once before.
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "being",
+        "by",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "he",
+        "her",
+        "hers",
+        "him",
+        "his",
+        "i",
+        "in",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "our",
+        "she",
+        "so",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "to",
+        "was",
+        "we",
+        "were",
+        "will",
+        "with",
+        "you",
+        "your",
+    }
+)
+
 
 def _tokenize(text: str) -> list[str]:
     # A real bug found by giving this module -- never fully swept in
@@ -70,7 +148,7 @@ def _tokenize(text: str) -> list[str]:
     # but that's no longer zero tokens: an exact or overlapping CJK
     # memory can now actually be found, which is the property this
     # store's own docstring promises and the old pattern silently broke.
-    return _TOKEN_PATTERN.findall(text.lower())
+    return [t for t in _TOKEN_PATTERN.findall(text.lower()) if t not in _STOPWORDS]
 
 
 def _tfidf_vector(tokens: list[str], idf: dict[str, float]) -> dict[str, float]:

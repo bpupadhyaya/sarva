@@ -43,6 +43,10 @@ def test_tokenize_does_not_drop_or_truncate_non_ascii_text():
     assert _tokenize("東京にラーメンを食べに行った") != []
 
 
+def test_tokenize_drops_common_english_stopwords():
+    assert _tokenize("The dog is in the yard") == ["dog", "yard"]
+
+
 def test_cosine_similarity_of_identical_vectors_is_one():
     vec = {"a": 1.0, "b": 2.0}
     assert _cosine_similarity(vec, vec) == pytest.approx(1.0)
@@ -103,6 +107,34 @@ def test_search_ranks_the_topically_relevant_entry_first(store):
     scores_by_text = {entry.text: score for entry, score in results}
     revenue_score = next(s for t, s in scores_by_text.items() if "revenue" in t)
     assert top_score > revenue_score
+
+
+def test_search_ignores_shared_stopwords_when_ranking_topical_relevance(store):
+    # A real bug found live, not by reading the scoring math in
+    # isolation: search("tell me about the user's pet", ...) against
+    # five real memories ranked "The user's favorite programming
+    # language is Python." ABOVE "The user's dog is named Max and is a
+    # golden retriever." -- the wrong entry first, for a query naming
+    # the topic ("pet") the second entry is actually about. The
+    # smoothed IDF formula never lets a term's weight hit true zero
+    # even when it appears in every document (correct on its own), so
+    # shared common-function-word overlap ("the", "is", "a") between a
+    # query and a topically unrelated memory still contributed real,
+    # non-negligible cosine-similarity mass. This is the clean,
+    # deterministic version of that repro: a memory built entirely out
+    # of stopwords now tokenizes to nothing (a zero-norm vector,
+    # scoring 0.0 against everything) instead of accumulating spurious
+    # similarity from words like "the"/"a"/"is"/"are" alone.
+    store.add("s1", "The cat sat on the mat while the dog ran in the yard.")
+    store.add("s1", "The the the a a a is is is are are are for for for.")
+
+    results = store.search("the a dog is running", top_k=2, session_id="s1")
+
+    scores_by_text = {entry.text: score for entry, score in results}
+    dog_score = next(s for t, s in scores_by_text.items() if "dog" in t)
+    stopword_only_score = next(s for t, s in scores_by_text.items() if "yard" not in t)
+    assert dog_score > 0.0
+    assert stopword_only_score == 0.0
 
 
 def test_search_can_find_a_non_ascii_memory_by_its_own_exact_text(store):

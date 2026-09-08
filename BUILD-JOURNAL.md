@@ -23793,3 +23793,43 @@ verification). `docs/packaging.md` extended with the same honest
 accounting.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 449: shared stopwords inflated a topically-unrelated memory's score in the semantic memory store
+
+Live-tested `sarva.memory.vector.VectorMemoryStore.search` with
+realistic phrasing rather than clean synthetic keyword-overlap text
+(every prior fresh-eyes round on this module had only ever tested with
+the latter). A query like "tell me about the user's pet" against five
+realistic saved memories ranked "The user's favorite programming
+language is Python." above "The user's dog is named Max and is a
+golden retriever." -- the wrong entry first, for a query naming the
+exact topic the second entry is actually about.
+
+Root cause: `_tokenize` had no stopword filtering at all, and the
+smoothed IDF formula (correct on its own terms) never lets a shared
+term's weight hit true zero even when it appears in every document --
+so common function words ("the", "user's", "is") shared between a
+query and a topically unrelated memory still contributed real,
+non-negligible similarity, especially on short, structurally similar
+memories.
+
+Fixed with a small, standard English stopword list applied in
+`_tokenize` -- the same set most classical IR implementations filter
+before scoring. Honestly scoped: this closes the stopword-only-overlap
+case cleanly, but does not and cannot make TF-IDF understand that
+"pet" and "dog" are related concepts -- that gap is the genuine
+synonym/semantic-understanding limitation this module's own docs
+already disclose as out of scope without a real embeddings provider.
+
+Verified with a genuine revert-and-check: reverted, both new tests
+failed (one on `_tokenize` no longer dropping stopwords, one on a
+stopword-only memory scoring a real nonzero value instead of `0.0`),
+restored. 2 new tests, full suite green (957 passed, 1 skipped, 11
+deselected -- the same pre-existing, unrelated Podman-environment
+failure as prior rounds), `ruff check`/`ruff format --check` both
+clean. `docs/memory.md`'s TF-IDF chapter extended with the same honest
+scoping.
+
+**Next:** continuing the hardening sweep, module by module.

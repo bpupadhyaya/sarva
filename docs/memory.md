@@ -665,6 +665,52 @@ correctness on every caller re-deriving the same validation" reasoning
 this project. Verified by reverting and watching the new test fail
 with `DID NOT RAISE ValueError`. 1 new test, 951 → 952 Python tests.
 
+### Shared stopwords inflated a topically-unrelated memory's score — found by actually querying the store with realistic phrasing, not synthetic keyword-overlap text
+
+Every prior fresh-eyes round on this module tested with text built
+around a small, deliberately clean shared vocabulary ("fox", "dog",
+"meadow" vs. "revenue", "software", "sales") — real content-word
+overlap or none at all, nothing in between. Live-testing with more
+natural phrasing surfaced a real gap that clean synthetic text never
+would: `search("tell me about the user's pet", ...)` against five
+realistic saved memories ranked "The user's favorite programming
+language is Python." *above* "The user's dog is named Max and is a
+golden retriever." — the wrong entry first, for a query naming the
+exact topic ("pet") the second entry is actually about.
+
+The smoothed IDF formula (`log((n+1)/(freq+1)) + 1`, the same
+scikit-learn's own `TfidfVectorizer` uses) is correct on its own terms
+— it deliberately never lets a term's weight hit true zero even when
+that term appears in every single document, avoiding a different,
+worse failure mode. But with no stopword filtering anywhere in
+`_tokenize`, common function words ("the", "user's", "is") shared
+between a query and a topically *unrelated* memory still contributed
+real, non-negligible cosine-similarity mass — on short, structurally
+similar memories (the common shape real saved facts about a user
+actually take), enough to outrank genuine topical relevance,
+especially favoring whichever candidate happens to be shortest (fewer
+terms diluting the shared ones).
+
+Fixed with a small, standard English stopword list — the same short
+common-function-word set most classical IR implementations filter
+before scoring, not invented for this one repro — applied in
+`_tokenize` itself so both indexing and querying stay consistent.
+Honestly scoped, not oversold: this closes the *stopword-only-overlap*
+case cleanly (a memory built entirely out of stopwords now tokenizes
+to nothing and scores `0.0` against everything, instead of
+accumulating spurious similarity), but it does not — cannot — make
+TF-IDF understand that "pet" and "dog" are related concepts; that's a
+genuine synonym/semantic-understanding gap only real embeddings could
+close, exactly the limitation this chapter's own "why TF-IDF, not
+neural embeddings" section already discloses. Verified live against
+the original realistic repro (the score gap between the two candidates
+meaningfully narrowed) and with a clean, deterministic test case where
+stopword filtering fully flips a wrong ranking, not just narrows it.
+Verified by reverting and watching both new tests fail — one on the
+literal `_tokenize` output no longer dropping "the"/"is", the other on
+a stopword-only memory scoring `0.6305...` instead of `0.0`. 2 new
+tests, full suite green.
+
 ## Long-term memory: plain markdown files, one per topic
 
 The design doc's own literal promise (§3.4): "long-term memory as plain
