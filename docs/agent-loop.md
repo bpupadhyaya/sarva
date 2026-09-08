@@ -401,6 +401,54 @@ same `Tool` protocol, which is why the loop never needs to know or
 care whether a given tool call is local Python or a round trip to a
 subprocess speaking MCP.
 
+### "Concurrent" cuts both ways — a real, live-confirmed "read-your-own-write" gap between the memory tools, not fixed but honestly documented
+
+This section's own header names the tool-dispatch model precisely:
+every tool call in one round runs concurrently, via `asyncio.gather`,
+with no ordering guarantee between them. That's the right default for
+independent tool calls (reading two unrelated files, running two
+unrelated shell commands) — but it has a real consequence when a model
+issues a *dependent* pair in one round, found by actually driving the
+loop with a real local model and an entirely ordinary instruction:
+"save a note, then search for it."
+
+**Confirmed live**: `ollama/qwen3:8b`, given exactly that instruction,
+requested `note` and `search_notes` together in one tool-call round —
+a natural, single-turn plan for a model, not a contrived one. `note`'s
+own write is dispatched via `asyncio.to_thread`; `search_notes`'
+own scan is too — with no ordering between the two threads, the search
+can complete first. It did: the model was told "no notes matched" for
+a note it had just asked to save one instant earlier, even though the
+write itself succeeded and the note was on disk moments later.
+Reproduced deterministically by artificially slowing the write (the
+same "slow the one specific call substantially" technique this
+project's own concurrency tests already use elsewhere) so the race
+reliably resolves the same way every time.
+
+**No data is lost or corrupted** — the write always completes, and any
+later search sees it; this is purely an ordering gap within a single
+round, not a correctness bug in either tool. `RememberTool`/
+`RecallMemoryTool` (semantic recall, backed by SQLite rather than
+markdown files) share the identical exposure, for the identical
+architectural reason — the underlying storage engine doesn't matter,
+since the race is about *when* each tool call's thread happens to run
+relative to the other, not about torn reads or corrupted writes within
+either store.
+
+**Not fixed, documented instead** — matching this project's own
+precedent (`Budget.max_cost_usd`'s documented-but-unenforced scope for
+OpenAI/Google): closing this robustly would mean either invasive
+changes to how `AgentLoop` schedules concurrent tool calls generically
+(a real risk, given this project's own experience with concurrency-
+adjacent changes elsewhere), or a bespoke synchronization primitive
+that would somehow need to anticipate an in-flight write to a
+not-yet-created file — before the write's own thread has even started,
+a lock on the file itself can't help, since there's nothing yet to
+lock. `NoteTool`/`SearchNotesTool`/`RememberTool`/`RecallMemoryTool`'s
+own docstrings now name this explicitly, so a caller hitting the same
+confusing "just saved it, can't find it" shape has an honest
+explanation rather than mistaking it for data loss.
+
 ### `RunCodeTool`: genuine sandbox isolation via Docker/Podman, no unsandboxed fallback ever
 
 Closed the second of the three completeness-audit backlog items (round

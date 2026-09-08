@@ -23622,4 +23622,55 @@ three runs. `ruff check`/`ruff format --check` both clean.
 `docs/agent-loop.md`'s opening state-machine section extended with this
 finding, right where `INTERRUPTED` is first named in the diagram.
 
+## Round 445: a real, live-confirmed "read-your-own-write" race between `note` and `search_notes` -- an inherent consequence of concurrent tool dispatch, documented rather than architecturally fixed
+
+Continuing live execution testing: drove a real `AgentLoop` with a
+real local model (`ollama/qwen3:8b`) and an entirely ordinary
+instruction -- "save a note under topic X, then search for it" -- the
+kind of natural single-turn plan a model routinely produces, not a
+contrived adversarial prompt.
+
+**Confirmed live**: the model requested `note` and `search_notes`
+together in ONE tool-call round. `AgentLoop` dispatches every tool call
+in a round concurrently via `asyncio.gather`, with no ordering
+guarantee between them -- already documented behavior (`loop.py`'s own
+"T1 simplifications" note), just never connected to this concrete
+consequence before. `search_notes` completed before `note`'s own
+`asyncio.to_thread`-dispatched write finished: the model was told "no
+notes matched" for a note it had just asked to save one instant
+earlier, even though the write itself succeeded and the note was on
+disk moments later. Reproduced deterministically (not just "sometimes
+flaky") by artificially slowing the write, the same technique this
+project's own concurrency tests already use elsewhere, confirming the
+race resolves identically every time under that condition.
+
+**Root-caused, not just observed**: no data is lost or corrupted -- the
+write always completes, and any later search sees it. This is purely
+an ordering gap within a single round, not a correctness bug in either
+tool. `RememberTool`/`RecallMemoryTool` (SQLite-backed semantic recall)
+share the identical exposure for the identical reason -- the race is
+about when each tool call's own thread happens to run relative to the
+other, not about torn reads or corrupted writes within either storage
+engine.
+
+**Not fixed, honestly documented instead**, matching this project's own
+precedent (round 441's `Budget.max_cost_usd` scope documentation):
+closing this robustly would need either invasive changes to how
+`AgentLoop` schedules concurrent tool calls generically (real risk,
+given this project's own experience with concurrency-adjacent code
+elsewhere -- see the persisted `RunShellTool` child-watcher hazard
+note), or a bespoke synchronization primitive that would somehow need
+to anticipate an in-flight write to a file that doesn't exist yet --
+before a write's own thread has even started, there is nothing yet to
+lock. `NoteTool`/`SearchNotesTool`/`RememberTool`/`RecallMemoryTool`'s
+own docstrings now name this explicitly, so a future caller hitting
+this exact confusing "just saved it, can't find it" shape has an
+honest explanation rather than mistaking it for real data loss.
+
+Docs-only change (no new source behavior; the concurrent-dispatch
+design itself is correct and intentional) -- full suite reconfirmed
+green (955 passed, 1 skipped, 11 deselected), `ruff check`/`ruff
+format --check` both clean. `docs/agent-loop.md`'s "Tool use: concurrent,
+typed, gated by one policy" section extended with this finding.
+
 **Next:** continuing the hardening sweep, module by module.

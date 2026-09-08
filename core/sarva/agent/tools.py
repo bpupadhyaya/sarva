@@ -1530,7 +1530,13 @@ class RememberTool:
     own `mkdir`) a real SQLite file at `~/.sarva/memory.db` as a side
     effect of merely *importing* this module, on every machine that ever
     imports `sarva.agent.tools` — including test/CI runs that never
-    otherwise touch the filesystem."""
+    otherwise touch the filesystem.
+
+    Shares `NoteTool`/`SearchNotesTool`'s own live-confirmed "read-your-
+    own-write" exposure when paired with `recall_memory` in the same
+    tool-call round -- see `NoteTool`'s own docstring for the real repro
+    and why it's an inherent consequence of `AgentLoop`'s concurrent
+    dispatch, not fixed here."""
 
     spec = ToolSpec(
         name="remember",
@@ -1703,7 +1709,36 @@ class NoteTool:
     `__init__` -- the same reason `RememberTool`'s docstring gives:
     `BUILTIN_TOOLS` below is a module-level list, so eager construction
     here would create real files on disk as a side effect of merely
-    *importing* this module."""
+    *importing* this module.
+
+    **A real, live-confirmed "read-your-own-write" gap, inherent to
+    `AgentLoop`'s own documented concurrent tool dispatch, not a defect
+    unique to this tool:** confirmed live by driving a real
+    `AgentLoop`/real `LongTermMemoryStore` with a real local model
+    (`ollama/qwen3:8b`) given the entirely ordinary instruction "save a
+    note, then search for it" -- the model requested `note` and
+    `search_notes` together in ONE tool-call round, and `AgentLoop`'s
+    own `asyncio.gather` dispatch (see `docs/agent-loop.md`'s own
+    "T1 simplifications" section) gives no ordering guarantee between
+    them. `search_notes` genuinely can, and in this live run did,
+    complete before `note`'s own `asyncio.to_thread(self._write, ...)`
+    call finished -- the model was told "no notes matched" for a note
+    it had just asked to save one instant earlier, even though the
+    write itself succeeded and the note was on disk moments later. No
+    data is lost or corrupted (the write always completes; a later
+    search sees it) -- this is purely an ordering gap within a single
+    round, not a correctness bug in either tool. `RememberTool`/
+    `RecallMemoryTool` share the identical exposure, for the identical
+    reason. Not fixed here: closing it robustly would mean either
+    invasive changes to how `AgentLoop` schedules concurrent tool calls
+    generically (real risk, given this project's own experience with
+    concurrency-adjacent changes elsewhere), or a bespoke, tool-specific
+    synchronization primitive that would need to somehow anticipate an
+    in-flight write to a not-yet-created file -- documented honestly
+    instead, matching this project's own precedent (`Budget.
+    max_cost_usd`'s documented-but-unenforced scope) for a real,
+    non-destructive limitation that isn't safely fixable without a
+    larger, separately-justified architectural change."""
 
     spec = ToolSpec(
         name="note",
@@ -1802,7 +1837,13 @@ class SearchNotesTool:
     long-term note. Deliberately not semantic (that's `recall_memory`'s
     job) -- the whole point of this tier is that it's plain, greppable
     text, so search matches that promise directly rather than
-    duplicating the other tier's own similarity ranking."""
+    duplicating the other tier's own similarity ranking.
+
+    Can race a concurrent `note` call in the same tool-call round and
+    see stale (pre-write) results -- see `NoteTool`'s own docstring for
+    the real, live-confirmed repro and why this is an inherent
+    consequence of `AgentLoop`'s concurrent dispatch, not a defect in
+    either tool."""
 
     spec = ToolSpec(
         name="search_notes",
