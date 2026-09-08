@@ -1412,6 +1412,53 @@ identical `Router.pick` call. Verified by reverting and watching the
 new test fail with the literal old `LookupError` reproducing itself.
 1 new test, 713 → 714 Python tests.
 
+### `main`'s own routing chain never included the one real local vision model this project already ships and verifies — found by testing with no `--model` at all, not by re-reading the chain itself
+
+The `audio` fix above closed a config-completeness gap where no better
+option existed to route to anyway (`mock` degrading a genuinely
+unreachable audio task down to a text answer is *already* the best
+available outcome with nothing else installed). This is a sharper
+version of the same shape, found by actually running `sarva chat
+--image photo.png "..."` with no explicit `--model` on a machine that
+already has `ollama/moondream:latest` pulled and verified working
+(see "Ollama vision" above) — the exact "zero-config, use what's
+locally available" setup this project's own design centers on. The
+request still fell through every candidate in `main`'s routing chain
+(`claude-opus-4-8` unavailable, `ollama/qwen3:8b` text-only) straight
+to `LookupError`, triggering `AgentLoop`'s degradation fallback and
+discarding the image entirely — even though a real, working,
+already-pulled vision-capable model was sitting unused the whole time.
+Confirmed live: the same image, same zero-config setup, went from a
+degraded "I currently cannot view or analyze images directly"
+text-only answer (`ollama/qwen3:8b`, after the image was stripped) to
+the model actually being asked to look at it, once `ollama/moondream:
+latest` was reachable.
+
+`TaskClass.VISION`'s own dedicated routing chain (`vision: [claude-
+opus-4-8, mock]`) was never the fix target here — as the audio section
+above and this project's own test suite already establish,
+`TaskClass.VISION`/`AUDIO` are defined but never actually passed by
+any real caller; `main` is the only chain `AgentLoop` ever consults for
+an ordinary top-level message. Fixed by adding `ollama/moondream:
+latest` to `main`'s own chain, positioned *after* `ollama/qwen3:8b` —
+`Router.pick()` returns the first candidate whose capabilities cover
+what's needed, so an ordinary text-only request still resolves to
+`qwen3:8b` first (moondream is never reached for it at all); it's only
+selected once a request actually needs image support and `qwen3:8b`'s
+text-only `modalities_in` can't cover that. `subtask`'s own chain was
+deliberately left untouched: `spawn_subagent`'s real, frozen signature
+(`subtask: str, task_class, budget`) has no way to attach an image at
+all, so there's no live-reachable path that would ever need a vision
+fallback there — extending it anyway would be speculative, not a fix
+for anything a real caller can hit.
+
+Verified with a genuine revert-and-check: reverted, the new test
+failed with the literal old `LookupError`, restored. A companion
+assertion in the same test guards the positioning itself — a
+text-only request against the same `available` set must still resolve
+to `ollama/qwen3:8b`, not regress toward the smaller, vision-focused
+model for ordinary chat. 1 new test, full suite green.
+
 ### Honestly named: no fabricated registry entries
 
 `OpenAIProvider` and `GoogleProvider` are both real, complete, tested

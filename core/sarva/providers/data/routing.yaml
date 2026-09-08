@@ -1,7 +1,23 @@
 # Sarva routing policy — ordered candidate models per task class.
 # `mock` is always last so the CLI and test suite work with zero config.
 routing:
-  main: [claude-opus-4-8, "ollama/qwen3:8b", mock]
+  # `ollama/moondream:latest` sits after the preferred text model, not
+  # before: Router.pick() returns the FIRST candidate whose
+  # capabilities cover what's needed, so an ordinary text-only request
+  # still resolves to `ollama/qwen3:8b` first (moondream is never
+  # reached for it) -- it's only ever selected when a request actually
+  # needs image support and qwen3:8b's text-only modalities_in can't
+  # cover that. Before this, a plain `sarva chat --image ... "..."`
+  # with no cloud API key and no explicit --model always fell through
+  # every candidate in this list straight to LookupError -> AgentLoop's
+  # degradation-fallback branch, discarding the image and answering
+  # from text alone -- even on a machine with a real, working, already-
+  # pulled local vision model sitting unused the whole time. Confirmed
+  # live: the same image, same zero-config setup, went from "I
+  # currently cannot view or analyze images directly" (qwen3:8b after
+  # degradation) to a real, correct visual description once moondream
+  # was actually in reach.
+  main: [claude-opus-4-8, "ollama/qwen3:8b", "ollama/moondream:latest", mock]
   subtask: [claude-haiku-4-5, "ollama/qwen3:8b", mock]
   escalation: [claude-fable-5, claude-opus-4-8, mock]
   vision: [claude-opus-4-8, mock]

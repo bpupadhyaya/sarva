@@ -188,6 +188,37 @@ def test_router_raises_rather_than_silently_using_mock_for_a_modality_it_cant_ha
         router.pick(TaskClass.MAIN, needs={Modality.TEXT, Modality.IMAGE})
 
 
+def test_router_prefers_a_real_local_vision_model_over_degrading_the_image_away():
+    # A real gap found live: on a completely ordinary "local Ollama
+    # only, no cloud key" setup with a real, working, already-pulled
+    # vision-capable model (ollama/moondream:latest) reachable, `sarva
+    # chat --image photo.png "..."` with no explicit --model still fell
+    # through every candidate in MAIN's own routing list to LookupError
+    # -> AgentLoop's degradation-fallback branch, discarding the image
+    # and answering from text alone -- even though a real vision model
+    # was sitting right there, unused, the whole time. Confirmed live:
+    # the exact same image, same zero-config setup, went from a
+    # degraded "I currently cannot view or analyze images directly"
+    # text-only answer to the model actually being asked to look at it.
+    # Fixed by adding ollama/moondream:latest to MAIN's own routing
+    # list, positioned AFTER ollama/qwen3:8b so an ordinary text-only
+    # request still resolves to qwen3:8b first -- verified by the
+    # companion assertion below, guarding against the regression this
+    # positioning exists to prevent.
+    registry = Registry.load(_DATA_DIR / "models.yaml")
+    routing = load_routing(_DATA_DIR / "routing.yaml")
+    router = Router(
+        registry, routing, available={"mock", "ollama/qwen3:8b", "ollama/moondream:latest"}
+    )
+
+    text_only = router.pick(TaskClass.MAIN, needs={Modality.TEXT})
+    assert text_only.id == "ollama/qwen3:8b"
+
+    vision = router.pick(TaskClass.MAIN, needs={Modality.TEXT, Modality.IMAGE})
+    assert vision.id == "ollama/moondream:latest"
+    assert Modality.IMAGE in vision.capabilities.modalities_in
+
+
 def test_router_raises_rather_than_silently_using_mock_for_audio_or_video():
     # This test used to assert the OPPOSITE: that mock resolving
     # TaskClass.AUDIO with zero config was itself the fix for a "zero-

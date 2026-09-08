@@ -23833,3 +23833,50 @@ clean. `docs/memory.md`'s TF-IDF chapter extended with the same honest
 scoping.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 450: `sarva chat --image` with no explicit --model never used the real local vision model this project already ships and verifies
+
+Live-tested `sarva chat --image photo.png "..."` with no explicit
+`--model`, on a completely ordinary zero-config setup that already has
+`ollama/moondream:latest` pulled and previously verified working. The
+request still fell through every candidate in `main`'s own routing
+chain to `LookupError`, triggering the degradation fallback and
+discarding the image entirely -- even though a real, working,
+vision-capable local model was sitting unused the whole time. Confirmed
+live: the exact same image and setup went from a degraded, image-free
+text answer to the model actually being asked to look at it, once
+`ollama/moondream:latest` was reachable from `main`'s chain.
+
+`TaskClass.VISION`'s own dedicated routing entry was never the right
+fix target -- it (and `AUDIO`) are defined but never actually passed
+by any real caller, a gap this project's own test suite already
+documents; `main` is the only chain `AgentLoop` ever consults for an
+ordinary message. Fixed by adding `ollama/moondream:latest` to
+`main`'s chain, positioned after `ollama/qwen3:8b` so an ordinary
+text-only request still resolves to `qwen3:8b` first -- verified by a
+companion assertion guarding against exactly that regression.
+`subtask`'s chain was deliberately left untouched: `spawn_subagent`'s
+real, frozen signature has no way to attach an image at all, so
+there's no live-reachable path there that would need this.
+
+Verified with a genuine revert-and-check: reverted, the new test
+failed with the literal old `LookupError`, restored. 1 new test, full
+suite green (958 passed, 1 skipped, 11 deselected -- the same
+pre-existing, unrelated Podman-environment failure as prior rounds),
+`ruff check`/`ruff format --check` both clean. `docs/providers.md`
+extended directly after its own prior `routing.yaml` audit section.
+
+Separately, live-testing this fix surfaced a real Ollama/moondream
+environment quirk unrelated to any Sarva code: raw `curl` calls
+straight to the local Ollama server (bypassing Sarva entirely) showed
+`moondream:latest` intermittently returning a genuinely empty response
+via both `/api/generate` and `/api/chat`, independent of GPU memory
+pressure, model reload, or which endpoint was used. Confirmed this is
+outside Sarva's control before shipping the routing fix -- the
+`Router.pick()` decision itself (which model gets selected) is fully
+deterministic and unit-tested independent of whether that model's own
+inference happens to succeed on a given call.
+
+**Next:** continuing the hardening sweep, module by module.
