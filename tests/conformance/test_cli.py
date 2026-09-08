@@ -19,6 +19,7 @@ import sys
 import wave
 from contextlib import asynccontextmanager
 
+import av
 import pytest
 import sarva.cli as cli_module
 import sarva.config as config_module
@@ -398,6 +399,81 @@ def test_run_with_a_valid_audio_file_completes_successfully(tmp_path, monkeypatc
 
     assert result.exit_code == 0
     assert "what does this audio say?" in result.stdout
+
+
+def _synthetic_video_bytes_for_test() -> bytes:
+    """A real, tiny, genuinely PyAV-decodable mp4, encoded with PyAV
+    itself -- not a fixture file, so this proves a real encode+decode
+    round trip. `av` is a base dependency (core/pyproject.toml), always
+    installed, unlike audio's optional sarva[audio] extra -- no
+    availability gate needed here."""
+    buf = io.BytesIO()
+    with av.open(buf, mode="w", format="mp4") as container:
+        stream = container.add_stream("mpeg4", rate=10)
+        stream.width = 64
+        stream.height = 48
+        stream.pix_fmt = "yuv420p"
+        for i in range(10):
+            shade = (i * 25) % 256
+            img = Image.new("RGB", (64, 48), color=(shade, 0, 255 - shade))
+            frame = av.VideoFrame.from_image(img).reformat(format="yuv420p")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return buf.getvalue()
+
+
+def test_chat_with_a_video_file_of_the_wrong_type_fails_cleanly(tmp_path, monkeypatch):
+    # The identical "built, unreachable by any real user" gap already
+    # closed for documents and audio, one modality further:
+    # VideoToTextDegrader (real PyAV frame sampling, process-isolated
+    # against native decoder crashes) has been built and unit-tested
+    # since it shipped, but nothing ever constructed a VideoBlock from a
+    # real chat/run turn. Restricted to video/*, matching --image/
+    # --audio's own restrictive validation.
+    _clear_provider_env(monkeypatch)
+    not_video = tmp_path / "notes.txt"
+    not_video.write_text("hello")
+
+    result = runner.invoke(app, ["chat", "what does this show?", "--video", str(not_video)])
+
+    assert result.exit_code != 0
+    assert "cannot determine a video media type" in result.output
+
+
+def test_chat_with_a_nonexistent_video_path_fails_cleanly_not_a_traceback(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(
+        app, ["chat", "what does this show?", "--video", "/nonexistent/clip.mp4"]
+    )
+
+    assert result.exit_code != 0
+    assert "cannot read video file" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_run_with_a_valid_video_file_completes_successfully(tmp_path, monkeypatch):
+    # A real, genuinely PyAV-decodable mp4, not placeholder bytes: with
+    # no cloud key and no reachable Ollama, mock is the only available
+    # model, and mock doesn't declare video support, so this run
+    # genuinely exercises the full recursive degradation-fallback path
+    # this --video flag exists to reach for the first time -- video
+    # samples to real image frames, which further degrade to text since
+    # the fallback model can't take images either (VideoToTextDegrader's
+    # own documented "video -> image frames -> text" chain). Unlike
+    # audio, no availability gate needed: av is a base dependency.
+    _clear_provider_env(monkeypatch)
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(_synthetic_video_bytes_for_test())
+
+    result = runner.invoke(
+        app, ["run", "what does this video show?", "--video", str(video_path), "--auto"]
+    )
+
+    assert result.exit_code == 0
+    assert "what does this video show?" in result.stdout
 
 
 def test_run_with_model_forces_that_exact_model(monkeypatch, tmp_path):

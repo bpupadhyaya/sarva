@@ -24096,3 +24096,41 @@ in the SAME commit as the `App.tsx`/`index.css` changes, before
 pushing rather than as a reactive follow-up.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 457: the third and final unreachable degrader -- `VideoToTextDegrader` closed on the CLI side
+
+The same grep that found the document and audio gaps, applied to
+`VideoBlock` last: nowhere in this project's own source outside tests.
+`VideoToTextDegrader` (real PyAV frame sampling, process-isolated
+against native decoder crashes) has been built and unit-tested since
+it shipped, but nothing ever constructed a `VideoBlock` from a real
+chat/run turn. Fixed by adding `--video` to both `chat`/`run`,
+restricted to `video/*`. Unlike audio, PyAV is a base dependency --
+always installed, no availability gate needed.
+
+Live-verified the full recursive degradation chain for the first time
+via any real user action: a genuinely PyAV-encoded MP4 attached with
+no explicit model correctly failed to route to any video-capable
+candidate (not even ollama/moondream:latest, image-only), triggering
+degradation -- real frame sampling ran (4 frames, correct 2.0s
+duration), and since the fallback text model can't take images
+either, those frames recursively degraded to text too, exactly
+matching the degrader's own documented "video -> image frames -> text"
+chain end to end for the first time outside a unit test.
+
+Verified with a genuine revert-and-check: reverted, all three new
+tests failed, restored. 3 new tests (synthesizing a real PyAV-encodable
+MP4 in the test itself, the same technique test_degraders.py already
+uses), full suite green (975 passed, 1 skipped, 11 deselected -- the
+same pre-existing, unrelated Podman-environment failure as prior
+rounds), `ruff check`/`ruff format --check` both clean.
+`docs/multimodal.md` extended.
+
+This closes the CLI side for all three previously-unreachable
+degraders this project had built (document, audio, video). The server
+API/WebSocket and frontend UI extensions for video remain a real,
+deliberately named, deferred gap for a future round.
+
+**Next:** continuing the hardening sweep, module by module.

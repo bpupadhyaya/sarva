@@ -803,6 +803,45 @@ revert-and-check: reverted, 3 of the 4 failed (the 4th,
 omitted-when-unset, is trivially true either way), restored. Full
 frontend suite green (40 passed, up from 36), `tsc --noEmit` clean.
 
+### The third and final modality: `VideoToTextDegrader` had the identical gap, closed on the CLI side
+
+The same "is `<Block>(` constructed anywhere real" grep that found the
+document and audio gaps, applied to `VideoBlock` last: nowhere in this
+project's own source outside tests. `VideoToTextDegrader` (real PyAV
+frame sampling, process-isolated against native decoder crashes — see
+this file's own earlier section on that) has been built and
+unit-tested since it shipped, but nothing ever constructed a
+`VideoBlock` from a real chat/run turn. Fixed by adding `--video` to
+both `chat`/`run`, restricted to `video/*` like `--image`/`--audio`.
+Unlike audio's optional `sarva[audio]` extra, PyAV (`av`) is a base
+dependency (`core/pyproject.toml`) — always installed, no availability
+gate needed in either the flag itself or its test.
+
+**Live-verified the full recursive degradation chain for the first
+time via any real user action**: a genuinely PyAV-encoded MP4 (20
+solid-color frames, 2.0s at 10fps), attached with `sarva chat --video
+clip.mp4 "describe what you know about this video"` and no explicit
+`--model`. The router failed to find any candidate supporting VIDEO
+(not even `ollama/moondream:latest`, which declares `image` but not
+`video`), triggering degradation. Real frame sampling ran (4 frames
+correctly extracted, duration correctly reported as 2.0s), and since
+the fallback text model can't take images either, those sampled frames
+recursively degraded to text too — exactly matching this degrader's
+own documented "video → sampled image frames → text" chain, working
+end to end for the first time outside a unit test.
+
+Verified with a genuine revert-and-check: reverted, all three new
+tests failed with the exact old behavior, restored. 3 new tests (the
+successful-run test synthesizes a real PyAV-encodable MP4 in the test
+itself, the same technique `tests/conformance/test_degraders.py`
+already uses, rather than a fixture file), full suite green.
+
+**This closes the CLI side for all three previously-unreachable
+degraders this project had built** (document, audio, video) — the
+server API/WebSocket and frontend UI extensions for video, mirroring
+what documents and audio both already received, remain a real,
+deliberately named, deferred gap for a future round.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

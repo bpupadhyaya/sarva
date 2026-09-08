@@ -26,7 +26,14 @@ from sarva.atomic_write import atomic_write_bytes
 from sarva.config import ConfigError
 from sarva.mcp_client import connect_http_mcp_server, connect_stdio_mcp_server, list_mcp_tools
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import AudioBlock, ContentBlock, DocumentBlock, ImageBlock, Message
+from sarva.multimodal.content import (
+    AudioBlock,
+    ContentBlock,
+    DocumentBlock,
+    ImageBlock,
+    Message,
+    VideoBlock,
+)
 from sarva.multimodal.degraders import default_degraders
 from sarva.providers.base import TextDeltaEvent
 from sarva.runtime import build_providers, build_router, run_diagnostics
@@ -205,6 +212,24 @@ def _load_audio(path: str) -> AudioBlock:
     return AudioBlock(media_type=media_type, data=_read_bytes_or_exit(Path(path), "audio file"))
 
 
+def _load_video(path: str) -> VideoBlock:
+    # The identical "built, unreachable by any real user" gap already
+    # closed for documents and audio, one modality further:
+    # `VideoToTextDegrader` (real PyAV frame sampling, process-isolated
+    # against native decoder crashes) has been built and unit-tested
+    # since it shipped, but nothing ever constructed a `VideoBlock` from
+    # a real chat/run turn. Unlike audio's `sarva[audio]` extra, PyAV
+    # (`av`) is a base dependency (`core/pyproject.toml`), always
+    # installed -- no availability gate needed here the way audio's own
+    # loose "either real transcription or honest fallback" test
+    # assertion needs one. Restricted to `video/*`, matching `--image`/
+    # `--audio`'s own restrictive validation.
+    media_type, _ = mimetypes.guess_type(path)
+    if media_type is None or not media_type.startswith("video/"):
+        raise typer.BadParameter(f"cannot determine a video media type for {path!r}")
+    return VideoBlock(media_type=media_type, data=_read_bytes_or_exit(Path(path), "video file"))
+
+
 def _load_session_history(store: SessionStore, session: str | None) -> list[Message]:
     # A real bug found by actually running `sarva chat --session "bad
     # name!"`: SessionStore._sanitize() raises a plain ValueError for any
@@ -275,6 +300,13 @@ def chat(
         "if a model can't take audio directly and sarva\\[audio] is installed -- "
         "otherwise a real, honest metadata report, never a fabricated transcript.",
     ),
+    video: Path | None = typer.Option(
+        None,
+        "--video",
+        help="Attach a video file. Really sampled into real decoded frames via "
+        "local PyAV if a model can't take video directly -- degrading further "
+        "to text if it can't take images either, never a fabricated description.",
+    ),
     model: str | None = typer.Option(
         None,
         "--model",
@@ -298,7 +330,7 @@ def chat(
     ),
 ) -> None:
     """One-shot chat — no tools, single turn."""
-    _run_asyncio_command(_chat(message, image, document, audio, model, session, verify))
+    _run_asyncio_command(_chat(message, image, document, audio, video, model, session, verify))
 
 
 async def _chat(
@@ -306,6 +338,7 @@ async def _chat(
     image: Path | None,
     document: Path | None,
     audio: Path | None,
+    video: Path | None,
     model: str | None,
     session: str | None,
     verify: bool,
@@ -331,6 +364,8 @@ async def _chat(
                 extra_content.append(_load_document(str(document)))
             if audio:
                 extra_content.append(_load_audio(str(audio)))
+            if video:
+                extra_content.append(_load_video(str(video)))
 
             loop = AgentLoop(
                 router=_build_router(),
@@ -416,6 +451,13 @@ def run(
         "if a model can't take audio directly and sarva\\[audio] is installed -- "
         "otherwise a real, honest metadata report, never a fabricated transcript.",
     ),
+    video: Path | None = typer.Option(
+        None,
+        "--video",
+        help="Attach a video file. Really sampled into real decoded frames via "
+        "local PyAV if a model can't take video directly -- degrading further "
+        "to text if it can't take images either, never a fabricated description.",
+    ),
     model: str | None = typer.Option(
         None,
         "--model",
@@ -495,6 +537,7 @@ def run(
             image,
             document,
             audio,
+            video,
             model,
             auto,
             session,
@@ -547,6 +590,7 @@ async def _run(
     image: Path | None,
     document: Path | None,
     audio: Path | None,
+    video: Path | None,
     model: str | None,
     auto: bool,
     session: str | None,
@@ -573,6 +617,8 @@ async def _run(
                 extra_content.append(_load_document(str(document)))
             if audio:
                 extra_content.append(_load_audio(str(audio)))
+            if video:
+                extra_content.append(_load_video(str(video)))
             confirm = always_allow if auto else _confirm_prompt
             headers = _parse_mcp_headers(mcp_headers)
             env = _parse_mcp_env(mcp_envs)
