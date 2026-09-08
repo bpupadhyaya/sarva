@@ -207,6 +207,13 @@ def _read_bytes_no_follow(path: Path) -> bytes:
 
 
 class ReadFileTool:
+    """Can race a concurrent `write_file` call on the same path in the
+    same tool-call round and raise `FileNotFoundError` (or return stale
+    content) for a file that was just asked to be written -- see
+    `WriteFileTool`'s own docstring for the real, live-confirmed repro
+    and why this inherent consequence of `AgentLoop`'s concurrent
+    dispatch isn't fixed here."""
+
     spec = ToolSpec(
         name="read_file",
         description="Read a UTF-8 text file relative to the working directory.",
@@ -263,6 +270,22 @@ class ReadFileTool:
 
 
 class WriteFileTool:
+    """Shares `NoteTool`'s own live-confirmed "read-your-own-write" race
+    with `ReadFileTool` when a model pairs `write_file` and `read_file`
+    on the same path in one tool-call round -- `AgentLoop` dispatches
+    every call in a round concurrently via `asyncio.gather`, with no
+    ordering guarantee, and both tools' own file I/O is dispatched via
+    `asyncio.to_thread`. Confirmed live (an artificially slowed write,
+    the same deterministic-repro technique the memory-tools' own fix
+    uses): `read_file` raised a raw `FileNotFoundError` for a file
+    `write_file` had been asked to create one instant earlier -- an
+    even harsher failure mode than the memory tools' own "no notes
+    matched", since this surfaces as `is_error=True` rather than an
+    empty-but-valid result. No data is lost -- the write always
+    completes, and a later read sees it -- so this is the identical
+    inherent ordering gap, not a new bug class; see `NoteTool`'s own
+    docstring for why it isn't fixed here."""
+
     spec = ToolSpec(
         name="write_file",
         description="Write a UTF-8 text file relative to the working directory. "
@@ -326,7 +349,12 @@ class EditFileTool:
     same convention `ReadFileTool`/`WriteFileTool` already establish,
     relying on the loop's own generic tool-dispatch exception handling
     for those; only genuinely tool-specific validation (an empty or
-    ambiguous `old_string`) gets an explicit is_error result here."""
+    ambiguous `old_string`) gets an explicit is_error result here.
+
+    Shares `WriteFileTool`/`ReadFileTool`'s own live-confirmed "read-
+    your-own-write" race when paired with either on the same path in
+    one tool-call round -- see `WriteFileTool`'s own docstring for the
+    real repro and why it isn't fixed here."""
 
     spec = ToolSpec(
         name="edit_file",

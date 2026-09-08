@@ -449,6 +449,22 @@ own docstrings now name this explicitly, so a caller hitting the same
 confusing "just saved it, can't find it" shape has an honest
 explanation rather than mistaking it for data loss.
 
+**The same fresh-eyes lens immediately found the identical race in the
+single most commonly used tool pair in this whole file**: `write_file`
+paired with `read_file` on the same path in one round. Confirmed live
+with the identical deterministic-repro technique (an artificially
+slowed write): `read_file` raised a raw `FileNotFoundError` for a file
+`write_file` had been asked to create one instant earlier — an even
+harsher failure mode than the memory tools' own "no notes matched",
+since this surfaces as `is_error=True` rather than an empty-but-valid
+result (the loop's own generic tool-dispatch exception handling
+absorbs it cleanly, matching spec-03's own "tool errors don't kill the
+loop" invariant — the *turn* survives, just with a confusing result for
+this one call). `EditFileTool` shares the identical exposure against
+either sibling. Same conclusion, same reason it isn't fixed in code:
+`WriteFileTool`/`ReadFileTool`/`EditFileTool`'s own docstrings now name
+it explicitly too.
+
 ### `RunCodeTool`: genuine sandbox isolation via Docker/Podman, no unsandboxed fallback ever
 
 Closed the second of the three completeness-audit backlog items (round

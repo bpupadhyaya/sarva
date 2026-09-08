@@ -23673,4 +23673,40 @@ green (955 passed, 1 skipped, 11 deselected), `ruff check`/`ruff
 format --check` both clean. `docs/agent-loop.md`'s "Tool use: concurrent,
 typed, gated by one policy" section extended with this finding.
 
+## Round 446: the identical read-your-own-write race, confirmed in the single most commonly used tool pair in this whole file -- write_file + read_file
+
+Immediate follow-up to round 445, asking the obvious next question:
+does the exact same concurrent-dispatch race affect `write_file`/
+`read_file`, the pair a real agent turn hits far more often than the
+memory tools?
+
+**Confirmed live**, using the identical deterministic-repro technique
+(an artificially slowed write): a model requesting `write_file` and
+`read_file` on the same path in one tool-call round hit the same race
+-- `read_file` raised a raw `FileNotFoundError` for a file `write_file`
+had been asked to create one instant earlier. This is actually a
+harsher failure mode than the memory tools' own "no notes matched",
+since it surfaces as `is_error=True` rather than an empty-but-valid
+result -- though the loop's own generic tool-dispatch exception
+handling still absorbs it cleanly (matching spec-03's own "tool errors
+don't kill the loop" invariant, already audited in round 445's own
+follow-up sweep): the *turn* survives, just with a confusing result
+for that one call. `EditFileTool` shares the identical exposure against
+either sibling, for the identical reason.
+
+**Not fixed in code, for the identical reasoning as round 445**: no
+data is lost (the write always completes, a later read sees it), and a
+robust fix would need the same invasive scheduling change or
+impossible-to-construct synchronization primitive (nothing exists yet
+to lock, before the write's own thread has even started).
+`WriteFileTool`/`ReadFileTool`/`EditFileTool`'s own docstrings now name
+this explicitly, alongside the memory tools' own docstrings from round
+445 -- together these are the five built-in tools where this exact
+architectural gap is most likely to actually surface in ordinary use.
+
+Docs-only change -- full suite reconfirmed green (955 passed, 1
+skipped, 11 deselected), `ruff check`/`ruff format --check` both clean.
+`docs/agent-loop.md`'s round-445 section extended directly with this
+second, more impactful instance.
+
 **Next:** continuing the hardening sweep, module by module.
