@@ -24262,4 +24262,41 @@ gone), `ruff check`/`ruff format --check` clean. No product code
 changed this round -- test-isolation fix plus a documentation-backed
 live verification, both real, both worth recording.
 
+## Round 461: MCP AudioContent/EmbeddedResource results were silently downgraded, even though the matching content types are fully wired everywhere else
+
+A fresh-eyes sweep of the real `mcp` SDK's own `ContentBlock` union
+(`TextContent | ImageContent | AudioContent | ResourceLink |
+EmbeddedResource`) against `mcp_client.py`'s `_convert_content` found
+it only ever handled the first two -- `AudioContent` (base64 `data` +
+a declared `mimeType`, structurally identical to `ImageContent`, which
+*is* handled) fell through to the generic "unsupported content type"
+text note, discarding real audio bytes even though `AudioBlock`/
+`AudioToTextDegrader` have been reachable from every other real input
+surface since the document/audio/video attachment arc (rounds
+451-458). `EmbeddedResource` (a tool result carrying real inline bytes
+or text, not a bare reference) had the identical gap.
+
+Fixed: `AudioContent` -> `AudioBlock` (mirrors `ImageContent` exactly);
+`EmbeddedResource`/`TextResourceContents` -> `TextBlock` directly (the
+resource's content already is text); `EmbeddedResource`/
+`BlobResourceContents` -> whichever `_MediaBlock` subtype matches the
+resource's own declared `mimeType` (image/audio/video prefixes,
+`DocumentBlock` as the permissive fallback, matching `_load_document`'s
+own stance); a resource with no declared `mimeType` stays honestly
+unsupported. `ResourceLink` (a bare URI with no inline data, in
+whatever namespace the *server* meant it, not necessarily a
+Sarva-reachable URL) deliberately left on the existing honest fallback
+-- unlike round 459's CLI/server URL support, there's no way to know in
+advance a ResourceLink's URI is safely fetchable.
+
+Proven against a real MCP round trip: the fixture server
+(`tests/fixtures/mcp_echo_server.py`) gained a `rich_content` tool
+(FastMCP's own `CallToolResult` escape hatch, the same one
+`structured_only` already uses) returning one real `AudioContent` and
+two real `EmbeddedResource` blocks. Genuine revert-and-check: reverted
+just `mcp_client.py`, the new test failed with the exact old behavior
+(`audio.type == "text"`, not `"audio"`), restored. Full suite green
+(986 passed, 1 skipped, 11 deselected), `ruff check`/`ruff format
+--check` clean. `docs/mcp.md` extended with the closing narrative.
+
 **Next:** continuing the hardening sweep, module by module.

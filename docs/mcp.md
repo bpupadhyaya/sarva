@@ -402,3 +402,46 @@ Live-gated like every other real-external-service test in this project
 isn't on `PATH`) — a CI run depending on npm registry availability on
 every push isn't a
 tradeoff this project makes for any live external verification.
+
+### `AudioContent`/`EmbeddedResource` MCP results were silently downgraded to a text note, even though the matching content types have been fully wired everywhere else since round 454-458
+
+A real gap found by a fresh-eyes sweep of the actual `mcp` SDK's own
+`ContentBlock` union — `TextContent | ImageContent | AudioContent |
+ResourceLink | EmbeddedResource` — against `_convert_content`, which
+only ever handled the first two. `AudioContent` carries base64 `data` +
+a declared `mimeType`, the exact same shape `ImageContent` already
+converts to `ImageBlock` — but it fell through to `_convert_content`'s
+own honest-but-lossy fallback (`"[MCP tool returned unsupported content
+type: audio]"`), discarding real, usable audio bytes even though
+`AudioBlock`/`AudioToTextDegrader` have been reachable from every other
+real input surface (CLI, REST, WebSocket) since the document/audio/
+video attachment arc. `EmbeddedResource` — a tool result that carries
+real inline bytes or text, not just a bare reference — had the
+identical gap.
+
+Fixed by extending `_convert_content`: `AudioContent` → `AudioBlock`
+(mirroring `ImageContent` exactly); `EmbeddedResource` wrapping
+`TextResourceContents` → `TextBlock` directly (the resource's content
+already *is* text — no reason to round-trip it through a document
+degrader); `EmbeddedResource` wrapping `BlobResourceContents` → whichever
+`_MediaBlock` subtype matches the resource's own declared `mimeType`
+(image/audio/video prefixes, `DocumentBlock` as the permissive fallback
+for everything else, matching `_load_document`'s own stance) — a
+resource with no declared `mimeType` at all is honestly reported as
+unsupported rather than guessed at. `ResourceLink` (a bare URI
+reference with no inline data, fetchable only in whatever namespace the
+*server* meant it in, which may not even be a Sarva-reachable
+`http(s)://` URL) was deliberately left on the existing honest fallback
+— unlike a CLI/server `--image`/`--document`/`--audio`/`--video` URL
+(round 459), there's no way to know in advance whether a `ResourceLink`'s
+URI is something this client can safely fetch at all.
+
+Proven against a real MCP round trip, not a hand-constructed
+`mcp_types` object with no server on the other end: the fixture server
+(`tests/fixtures/mcp_echo_server.py`) gained a `rich_content` tool,
+built on the same `CallToolResult` escape hatch `structured_only`
+already uses, returning one real `AudioContent` and two real
+`EmbeddedResource` blocks (blob + text). Verified with a genuine
+revert-and-check: reverted just `mcp_client.py`, the new test failed
+with the exact old behavior (`audio.type == "text"`, not `"audio"`),
+restored. Full suite green.

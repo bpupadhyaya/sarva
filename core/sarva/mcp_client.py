@@ -33,7 +33,15 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 from sarva.agent.tools import ToolContext
-from sarva.multimodal.content import ImageBlock, TextBlock, ToolResultBlock
+from sarva.multimodal.content import (
+    AudioBlock,
+    ContentBlock,
+    DocumentBlock,
+    ImageBlock,
+    TextBlock,
+    ToolResultBlock,
+    VideoBlock,
+)
 from sarva.providers.base import ToolSpec
 
 # A real bug found by a fresh-eyes sweep: `ClientSession`'s own
@@ -133,15 +141,58 @@ class McpToolAdapter:
         return ToolResultBlock(tool_call_id="", content=content, is_error=result.isError)
 
 
-def _convert_content(block: mcp_types.ContentBlock) -> TextBlock | ImageBlock:
+def _convert_content(block: mcp_types.ContentBlock) -> ContentBlock:
     if isinstance(block, mcp_types.TextContent):
         return TextBlock(text=block.text)
     if isinstance(block, mcp_types.ImageContent):
         return ImageBlock(media_type=block.mimeType, data=base64.b64decode(block.data))
-    # Audio/resource-link/embedded-resource content: report what's
-    # verifiably known (the block's own declared type) rather than
-    # silently dropping it or raising -- the same honesty principle the
-    # multimodal degraders use for content a layer can't fully consume.
+    # A real gap found by a fresh-eyes sweep of the real `mcp` SDK's own
+    # `ContentBlock` union (TextContent | ImageContent | AudioContent |
+    # ResourceLink | EmbeddedResource): AudioContent carries base64 `data`
+    # + a declared `mimeType`, the exact same shape ImageContent above
+    # already converts -- but it fell through to the generic "unsupported
+    # content type" text note regardless, discarding real, usable audio
+    # bytes even though AudioBlock/AudioToTextDegrader have been fully
+    # wired to every other real input surface since round 454-456. Same
+    # fix, one modality over.
+    if isinstance(block, mcp_types.AudioContent):
+        return AudioBlock(media_type=block.mimeType, data=base64.b64decode(block.data))
+    if isinstance(block, mcp_types.EmbeddedResource):
+        resource = block.resource
+        if isinstance(resource, mcp_types.TextResourceContents):
+            return TextBlock(text=resource.text)
+        # BlobResourceContents: real inline base64 bytes with a declared
+        # `mimeType`, not silently dropped -- dispatches to whichever
+        # `_MediaBlock` subtype actually matches, the same `data=`
+        # construction ImageContent/AudioContent above already use, just
+        # keyed off the resource's own mimeType instead of a fixed
+        # content type. Falls back to DocumentBlock (not restricted to
+        # one media-type prefix, matching `_load_document`'s own
+        # permissive stance) for anything that isn't image/audio/video --
+        # only a genuinely undeclared mimeType is honestly reported as
+        # unsupported instead of guessed at.
+        media_type = resource.mimeType
+        if media_type is None:
+            return TextBlock(
+                text=f"[MCP tool returned an embedded resource with no declared "
+                f"media type: {resource.uri}]"
+            )
+        data = base64.b64decode(resource.blob)
+        if media_type.startswith("image/"):
+            return ImageBlock(media_type=media_type, data=data)
+        if media_type.startswith("audio/"):
+            return AudioBlock(media_type=media_type, data=data)
+        if media_type.startswith("video/"):
+            return VideoBlock(media_type=media_type, data=data)
+        return DocumentBlock(media_type=media_type, data=data)
+    # ResourceLink (a bare URI reference with no inline data -- fetchable
+    # only in whatever namespace the *server* meant it in, which may not
+    # even be a Sarva-reachable http(s) URL) and any future content type
+    # the mcp SDK adds: report what's verifiably known (the block's own
+    # declared type) rather than silently dropping it or guessing at a
+    # fetch that might not even be a real URL, the same honesty principle
+    # the multimodal degraders use for content a layer can't fully
+    # consume.
     return TextBlock(text=f"[MCP tool returned unsupported content type: {block.type}]")
 
 

@@ -35,7 +35,7 @@ async def test_list_tools_reflects_the_real_server():
     async with _connect() as session:
         tools = await list_mcp_tools(session)
     names = {t.spec.name for t in tools}
-    assert names == {"echo", "structured_only", "fail", "env_var"}
+    assert names == {"echo", "structured_only", "rich_content", "fail", "env_var"}
     echo = next(t for t in tools if t.spec.name == "echo")
     assert echo.spec.input_schema["properties"]["text"]["type"] == "string"
 
@@ -112,6 +112,48 @@ async def test_structured_content_is_not_silently_dropped(tmp_path):
 
     assert not result.is_error
     assert any('"sum": 42' in b.text for b in result.content)
+
+
+@pytest.mark.asyncio
+async def test_audio_and_embedded_resource_content_are_not_silently_dropped(tmp_path):
+    # A real gap found by a fresh-eyes sweep of the real `mcp` SDK's own
+    # ContentBlock union (TextContent | ImageContent | AudioContent |
+    # ResourceLink | EmbeddedResource): _convert_content only ever
+    # handled the first two, so AudioContent -- base64 `data` + a
+    # declared `mimeType`, the exact same shape ImageContent already
+    # converts -- fell through to a generic "unsupported content type"
+    # text note, discarding real, usable audio bytes even though
+    # AudioBlock/AudioToTextDegrader have been fully wired to every
+    # other real input surface since round 454-456. EmbeddedResource
+    # (a tool result carrying real inline bytes or text, not just a bare
+    # reference) had the identical gap. Proven here against a real MCP
+    # round trip (the fixture server's own `rich_content` tool, built on
+    # FastMCP's CallToolResult escape hatch the same way `structured_only`
+    # already is), not a hand-constructed mcp_types object with no server
+    # on the other end.
+    async with _connect() as session:
+        tools = await list_mcp_tools(session)
+        rich_content = next(t for t in tools if t.spec.name == "rich_content")
+        ctx = ToolContext(workdir=str(tmp_path), run_dir=str(tmp_path / "run"))
+        result = await rich_content.run({}, ctx)
+
+    assert not result.is_error
+    audio, blob_resource, text_resource = result.content[0], result.content[1], result.content[2]
+
+    assert audio.type == "audio"
+    assert audio.media_type == "audio/wav"
+    assert audio.data == b"RIFF....WAVEfmt "
+
+    # text/csv doesn't match image/audio/video -- DocumentBlock's own
+    # permissive fallback, matching _load_document's stance.
+    assert blob_resource.type == "document"
+    assert blob_resource.media_type == "text/csv"
+    assert blob_resource.data == b"a,b\n1,2\n"
+
+    # A text resource's content already IS text -- converted directly,
+    # not round-tripped through a DocumentBlock/degrader for no reason.
+    assert text_resource.type == "text"
+    assert text_resource.text == "a real embedded text resource"
 
 
 async def _env_var_result(env: dict[str, str] | None, tmp_path) -> str:
