@@ -26,7 +26,7 @@ from sarva.atomic_write import atomic_write_bytes
 from sarva.config import ConfigError
 from sarva.mcp_client import connect_http_mcp_server, connect_stdio_mcp_server, list_mcp_tools
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import ContentBlock, ImageBlock, Message
+from sarva.multimodal.content import ContentBlock, DocumentBlock, ImageBlock, Message
 from sarva.multimodal.degraders import default_degraders
 from sarva.providers.base import TextDeltaEvent
 from sarva.runtime import build_providers, build_router, run_diagnostics
@@ -160,6 +160,31 @@ def _load_image(path: str) -> ImageBlock:
     return ImageBlock(media_type=media_type, data=_read_bytes_or_exit(Path(path), "image file"))
 
 
+def _load_document(path: str) -> DocumentBlock:
+    # A real gap found by a fresh-eyes sweep of `sarva.multimodal.
+    # degraders.document`'s own docstring: `DocumentToTextDegrader` (real
+    # pypdf-backed PDF extraction, plus honest plain-text-adjacent
+    # decoding) has been built and unit-tested since it shipped, but
+    # `DocumentBlock` was never constructed anywhere reachable from a
+    # real user action -- not this CLI (no --document flag existed),
+    # not `read_file` (UTF-8 text only, would raise UnicodeDecodeError
+    # on real PDF bytes rather than degrade them). The identical "built,
+    # unreachable by any real user" shape this project has already found
+    # and closed once for `sarva.audio.transcribe()` (see `transcribe`'s
+    # own command docstring). Unlike `_load_image`, not restricted to a
+    # specific media-type prefix: the degrader itself already handles
+    # an unrecognized format honestly (declared-metadata-only, never a
+    # fabricated summary -- see its own docstring), so this only rejects
+    # what `mimetypes` can't identify at all, the same "reject, don't
+    # guess" floor `_load_image` applies for its own narrower case.
+    media_type, _ = mimetypes.guess_type(path)
+    if media_type is None:
+        raise typer.BadParameter(f"cannot determine a media type for {path!r}")
+    return DocumentBlock(
+        media_type=media_type, data=_read_bytes_or_exit(Path(path), "document file")
+    )
+
+
 def _load_session_history(store: SessionStore, session: str | None) -> list[Message]:
     # A real bug found by actually running `sarva chat --session "bad
     # name!"`: SessionStore._sanitize() raises a plain ValueError for any
@@ -216,6 +241,13 @@ def chat(
     image: Path | None = typer.Option(
         None, "--image", help="Attach an image file (requires a vision-capable model)."
     ),
+    document: Path | None = typer.Option(
+        None,
+        "--document",
+        help="Attach a document file (PDF or plain text/markdown/csv/html/json). "
+        "Extracted to real text if a model can't take documents directly -- "
+        "never a fabricated summary.",
+    ),
     model: str | None = typer.Option(
         None,
         "--model",
@@ -239,11 +271,16 @@ def chat(
     ),
 ) -> None:
     """One-shot chat — no tools, single turn."""
-    _run_asyncio_command(_chat(message, image, model, session, verify))
+    _run_asyncio_command(_chat(message, image, document, model, session, verify))
 
 
 async def _chat(
-    message: str, image: Path | None, model: str | None, session: str | None, verify: bool
+    message: str,
+    image: Path | None,
+    document: Path | None,
+    model: str | None,
+    session: str | None,
+    verify: bool,
 ) -> None:
     store = SessionStore()
     final_state = None
@@ -259,7 +296,11 @@ async def _chat(
     try:
         async with store.locked(session):
             history = _load_session_history(store, session)
-            extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
+            extra_content: list[ContentBlock] = []
+            if image:
+                extra_content.append(_load_image(str(image)))
+            if document:
+                extra_content.append(_load_document(str(document)))
 
             loop = AgentLoop(
                 router=_build_router(),
@@ -330,6 +371,13 @@ def run(
     workdir: str = typer.Option(".", help="Working directory for file/shell tools."),
     image: Path | None = typer.Option(
         None, "--image", help="Attach an image file (requires a vision-capable model)."
+    ),
+    document: Path | None = typer.Option(
+        None,
+        "--document",
+        help="Attach a document file (PDF or plain text/markdown/csv/html/json). "
+        "Extracted to real text if a model can't take documents directly -- "
+        "never a fabricated summary.",
     ),
     model: str | None = typer.Option(
         None,
@@ -404,7 +452,19 @@ def run(
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
     _run_asyncio_command(
-        _run(task, workdir, image, model, auto, session, mcp_server, mcp_header, mcp_env, verify)
+        _run(
+            task,
+            workdir,
+            image,
+            document,
+            model,
+            auto,
+            session,
+            mcp_server,
+            mcp_header,
+            mcp_env,
+            verify,
+        )
     )
 
 
@@ -447,6 +507,7 @@ async def _run(
     task: str,
     workdir: str,
     image: Path | None,
+    document: Path | None,
     model: str | None,
     auto: bool,
     session: str | None,
@@ -466,7 +527,11 @@ async def _run(
     try:
         async with store.locked(session):
             history = _load_session_history(store, session)
-            extra_content: list[ContentBlock] = [_load_image(str(image))] if image else []
+            extra_content: list[ContentBlock] = []
+            if image:
+                extra_content.append(_load_image(str(image)))
+            if document:
+                extra_content.append(_load_document(str(document)))
             confirm = always_allow if auto else _confirm_prompt
             headers = _parse_mcp_headers(mcp_headers)
             env = _parse_mcp_env(mcp_envs)

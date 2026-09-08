@@ -291,6 +291,56 @@ def test_run_with_a_valid_image_completes_successfully(tmp_path, monkeypatch):
     assert "could not be described" in result.stdout
 
 
+def test_chat_with_a_document_of_an_unrecognized_type_fails_cleanly(tmp_path, monkeypatch):
+    # A real gap found by a fresh-eyes sweep: DocumentToTextDegrader
+    # (real pypdf-backed PDF extraction, plus honest plain-text-adjacent
+    # decoding) has been built and unit-tested since it shipped, but
+    # DocumentBlock was never constructed anywhere reachable from a real
+    # user action -- no CLI flag existed to attach one at all. Unlike
+    # --image, --document isn't restricted to one media-type prefix (the
+    # degrader itself already handles an unrecognized format honestly),
+    # so the equivalent failure case is a path mimetypes can't identify
+    # at all, not "the wrong kind of media type".
+    _clear_provider_env(monkeypatch)
+    unrecognized = tmp_path / "notes"
+    unrecognized.write_text("hello")
+
+    result = runner.invoke(app, ["chat", "summarize this", "--document", str(unrecognized)])
+
+    assert result.exit_code != 0
+    assert "cannot determine a media type" in result.output
+
+
+def test_chat_with_a_nonexistent_document_path_fails_cleanly_not_a_traceback(monkeypatch):
+    _clear_provider_env(monkeypatch)
+
+    result = runner.invoke(app, ["chat", "summarize this", "--document", "/nonexistent/report.pdf"])
+
+    assert result.exit_code != 0
+    assert "cannot read document file" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_run_with_a_valid_document_completes_successfully(tmp_path, monkeypatch):
+    # A real, decodable plain-text document, not placeholder bytes: with
+    # no cloud key and no reachable Ollama, mock is the only available
+    # model, and mock doesn't declare document support, so this run
+    # genuinely exercises the degradation-fallback path this --document
+    # flag exists to reach for the first time -- DocumentToTextDegrader
+    # decodes real UTF-8 text for a text/plain media type directly (no
+    # pypdf involved for this simplest case).
+    _clear_provider_env(monkeypatch)
+    doc_path = tmp_path / "report.txt"
+    doc_path.write_text("The quarterly revenue figure is $42,000.")
+
+    result = runner.invoke(
+        app, ["run", "what does this document say?", "--document", str(doc_path), "--auto"]
+    )
+
+    assert result.exit_code == 0
+    assert "what does this document say?" in result.stdout
+
+
 def test_run_with_model_forces_that_exact_model(monkeypatch, tmp_path):
     _clear_provider_env(monkeypatch)
 

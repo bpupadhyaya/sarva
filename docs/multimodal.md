@@ -567,6 +567,44 @@ the new test's own outer 1.5-second safety-net `asyncio.wait_for` raise
 hanging past that deadline — before re-applying. 1 new test, 914 → 915
 Python tests.
 
+### `DocumentToTextDegrader` was real, built, and unit-tested — but no real user action could ever construct a `DocumentBlock` in the first place
+
+The same "built, unreachable by any real user" shape this project has
+already found and closed once before (`sarva.audio.transcribe()` had
+no CLI command until `sarva transcribe` was added). `--image` has
+existed on `chat`/`run` since early on, but there was never a
+`--document` equivalent — and `read_file` couldn't substitute for one
+either: it's explicitly documented as "Read a UTF-8 text file," so
+pointing it at a real PDF's binary bytes would raise a raw
+`UnicodeDecodeError`, not degrade anything. Confirmed by grep before
+writing any code: `DocumentBlock(` was constructed nowhere in this
+project's own source outside of tests — the entire, real,
+already-unit-tested extraction pipeline this chapter documents above
+had no path a real user could ever reach.
+
+Fixed by adding `--document` to both `chat` and `run`, mirroring
+`--image`'s own `_load_image` helper closely (`_load_document`) but
+deliberately *not* restricted to one media-type prefix the way
+`--image` requires `image/*`: the degrader itself already handles an
+unrecognized format honestly (declared-metadata-only, never a
+fabricated summary), so this only rejects what `mimetypes` can't
+identify at all. Verified live end to end for the first time ever: a
+real PDF (generated via macOS's own `cupsfilter`, containing a planted
+"secret code word") attached with `sarva chat --document report.pdf
+"extract the code word"` and no explicit `--model` correctly routed
+through the degradation-fallback path and returned the exact code word
+extracted from the real PDF text. Passing an explicit `--model`
+instead correctly raises a clear provider error ("cannot translate a
+'DocumentBlock' content block") rather than silently degrading behind
+the user's back — an explicit override is an unambiguous, hard choice
+this project's `Router.pick()` never second-guesses (see
+`docs/providers.md`'s own routing chapter), the identical reasoning
+already established for image overrides.
+
+Verified with a genuine revert-and-check: reverted, all three new
+tests failed (`--document` didn't exist yet), restored. 3 new tests,
+full suite green.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's
@@ -591,3 +629,6 @@ Python tests.
   (see `cli.py`) and watch the real fallback: route to a text-capable
   model, degrade the image into an honest metadata report, answer
   anyway instead of failing outright.
+- Or, now that `--document` exists too, skip the manual construction
+  above entirely: `sarva chat "..." --document report.pdf` runs the
+  exact same real pypdf extraction end to end from the command line.

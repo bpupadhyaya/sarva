@@ -23880,3 +23880,40 @@ deterministic and unit-tested independent of whether that model's own
 inference happens to succeed on a given call.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 451: `DocumentToTextDegrader` was real, built, and unit-tested — but no real user action could ever construct a `DocumentBlock` in the first place
+
+The identical "built, unreachable by any real user" shape this project
+has already found and closed once before (`sarva.audio.transcribe()`
+had no CLI command until `sarva transcribe` was added). `--image` has
+existed on `chat`/`run` for a long time, but there was never a
+`--document` equivalent, and `read_file` couldn't substitute (it's
+explicitly UTF-8-text-only, would raise on real PDF bytes rather than
+degrade them). Confirmed by grep before writing any code:
+`DocumentBlock(` was constructed nowhere in this project's own source
+outside of tests.
+
+Fixed by adding `--document` to both `chat` and `run`, mirroring
+`--image`'s own `_load_image` helper (`_load_document`), deliberately
+not restricted to one media-type prefix since the degrader itself
+already handles an unrecognized format honestly. Verified live end to
+end for the first time ever: a real PDF (generated via macOS's own
+`cupsfilter`, containing a planted secret code word) attached via
+`sarva chat --document report.pdf "extract the code word"` with no
+explicit `--model` correctly routed through the degradation-fallback
+path and returned the exact code word extracted from the real PDF
+text. An explicit `--model` instead correctly raises a clear provider
+error rather than silently degrading behind the user's back -- the
+identical reasoning already established for image overrides.
+
+Verified with a genuine revert-and-check: reverted, all three new
+tests failed, restored. 3 new tests, full suite green (961 passed, 1
+skipped, 11 deselected -- the same pre-existing, unrelated
+Podman-environment failure as prior rounds), `ruff check`/`ruff format
+--check` both clean. `docs/multimodal.md` extended with a new section
+and its own "Build it yourself" list updated to point at the new flag
+instead of only manual construction.
+
+**Next:** continuing the hardening sweep, module by module.
