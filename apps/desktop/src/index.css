@@ -150,7 +150,8 @@ header h1 {
   color: white;
 }
 
-.attached-image {
+.attached-image,
+.attached-document {
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -162,7 +163,8 @@ header h1 {
   font-size: 0.85rem;
 }
 
-.attached-image button {
+.attached-image button,
+.attached-document button {
   border: none;
   background: none;
   color: var(--muted);

@@ -19,6 +19,12 @@ interface AttachedImage {
   name: string;
 }
 
+interface AttachedDocument {
+  base64: string;
+  mediaType: string;
+  name: string;
+}
+
 interface ModelInfo {
   id: string;
   display_name: string;
@@ -46,6 +52,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
+  const [attachedDocument, setAttachedDocument] = useState<AttachedDocument | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   // "" means auto (no override) -- the exact meaning omitting the CLI's
   // own --model flag has, kept consistent rather than inventing a
@@ -54,6 +61,7 @@ export default function App() {
   const sessionRef = useRef("web");
   const socketRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const documentInputRef = useRef<HTMLInputElement | null>(null);
 
   // null = still deciding (avoids a first-run screen flashing briefly for
   // an already-configured install while GET /doctor is in flight).
@@ -104,13 +112,16 @@ export default function App() {
     if (!text || streaming) return;
 
     const image = attachedImage;
+    const document = attachedDocument;
+    const attachmentNames = [image?.name, document?.name].filter(Boolean).join(", ");
     setMessages((prev) => [
       ...prev,
-      { role: "user", text: image ? `${text} [${image.name}]` : text },
+      { role: "user", text: attachmentNames ? `${text} [${attachmentNames}]` : text },
       { role: "assistant", text: "" },
     ]);
     setInput("");
     setAttachedImage(null);
+    setAttachedDocument(null);
     setStreaming(true);
     setError(null);
     setPending(null);
@@ -134,14 +145,18 @@ export default function App() {
       // auto: false (the default) — every destructive tool call pauses for
       // an explicit Approve/Deny in the UI before it runs. See
       // core/sarva/server/app.py's ws_chat docstring for the protocol.
-      // image_base64/image_media_type/model are omitted entirely (not
-      // sent as null) when unset, matching the REST /chat request
-      // schema's own optional-field shape.
+      // image_base64/image_media_type/document_base64/
+      // document_media_type/model are omitted entirely (not sent as
+      // null) when unset, matching the REST /chat request schema's own
+      // optional-field shape.
       ws.send(
         JSON.stringify({
           message: text,
           session: sessionRef.current,
           ...(image ? { image_base64: image.base64, image_media_type: image.mediaType } : {}),
+          ...(document
+            ? { document_base64: document.base64, document_media_type: document.mediaType }
+            : {}),
           ...(selectedModel ? { model: selectedModel } : {}),
         }),
       );
@@ -206,7 +221,7 @@ export default function App() {
       setStreaming(false);
       setPending(null);
     };
-  }, [input, streaming, attachedImage, selectedModel, appendToLastAssistant]);
+  }, [input, streaming, attachedImage, attachedDocument, selectedModel, appendToLastAssistant]);
 
   const respondToConfirmation = useCallback((approved: boolean) => {
     socketRef.current?.send(JSON.stringify({ approved }));
@@ -223,6 +238,25 @@ export default function App() {
     }
     const base64 = await fileToBase64(file);
     setAttachedImage({ base64, mediaType: file.type, name: file.name });
+    setError(null);
+  }, []);
+
+  // Mirrors handleFileChange, not restricted to one media-type prefix
+  // the way image attachment is: the backend's own DocumentToTextDegrader
+  // already handles an unrecognized format honestly (declared-metadata-
+  // only, never a fabricated summary -- see docs/multimodal.md), so this
+  // only rejects what the browser couldn't identify at all, the same
+  // "reject, don't guess" floor _load_document applies on the CLI side.
+  const handleDocumentFileChange = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    if (!file.type) {
+      setError(`"${file.name}" doesn't have a recognizable file type`);
+      return;
+    }
+    const base64 = await fileToBase64(file);
+    setAttachedDocument({ base64, mediaType: file.type, name: file.name });
     setError(null);
   }, []);
 
@@ -276,6 +310,15 @@ export default function App() {
         </div>
       )}
 
+      {attachedDocument && (
+        <div className="attached-document">
+          <span>📄 {attachedDocument.name}</span>
+          <button type="button" onClick={() => setAttachedDocument(null)}>
+            Remove document
+          </button>
+        </div>
+      )}
+
       <div className="model-picker">
         <label htmlFor="model-select">Model</label>
         <select
@@ -316,6 +359,21 @@ export default function App() {
           aria-label="Attach image"
         >
           📎
+        </button>
+        <input
+          type="file"
+          ref={documentInputRef}
+          onChange={handleDocumentFileChange}
+          style={{ display: "none" }}
+          data-testid="attach-document-input"
+        />
+        <button
+          type="button"
+          disabled={streaming}
+          onClick={() => documentInputRef.current?.click()}
+          aria-label="Attach document"
+        >
+          📄
         </button>
         <input
           value={input}

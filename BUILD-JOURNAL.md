@@ -23959,3 +23959,35 @@ Podman-environment failure as prior rounds), `ruff check`/`ruff format
 round 451's own section.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 453: the frontend gap named in round 452, closed in the same session rather than left open
+
+`App.tsx`'s attach button was still `image/*`-only even after round
+452 gave the backend API real document support -- a deliberately named
+gap, picked back up immediately. Mirrored the image attachment
+implementation exactly: a second hidden file input + attach button, an
+`attachedDocument` state slot, a `handleDocumentFileChange` handler,
+and the WS payload gains `document_base64`/`document_media_type`
+alongside the image fields when set. Not restricted to `accept="image/
+*"` the way the image input is -- the backend already handles an
+unrecognized format honestly, so only a file the browser couldn't
+assign any type to at all is rejected.
+
+Also updated the TypeScript SDK's own mirror of `ChatRequest`/
+`WsChatRequest` (`sdks/typescript/src/types.ts`) with the same two
+fields -- the exact type-mirror-drift risk category this project's own
+`_extra_content_blocks` docstring already names. The SDK's `chat()`/
+`chatStream()` needed no code changes: both just `JSON.stringify`
+whatever request object the caller passes.
+
+Verified with a genuine revert-and-check: reverted, 3 of 4 new tests
+failed with the exact old behavior (the 4th, omitted-when-unset, is
+trivially true either way), restored. 4 new frontend tests (36
+passed, up from 32), `tsc --noEmit` clean, the TypeScript SDK's own
+test suite (`tsc --noEmit` + `vitest run`, 22 tests) green after the
+type-mirror update. `docs/multimodal.md` extended directly after round
+452's own section.
+
+**Next:** continuing the hardening sweep, module by module.

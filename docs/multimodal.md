@@ -654,6 +654,50 @@ stand-in to `*args, **kwargs`, the same "don't rest correctness on a
 signature a real change might grow past" reasoning already applied
 elsewhere in this codebase. 4 new tests, full suite green.
 
+### The frontend gap named directly above, closed in the same session rather than left open
+
+`App.tsx`'s attach button was still `image/*`-only even after the
+backend API accepted documents from any client — a real, deliberately
+named gap from the section above, picked back up immediately rather
+than left for an indefinite "later." Mirrored the image attachment
+implementation exactly: a second hidden file input + 📄 attach button,
+an `attachedDocument` state slot, a `handleDocumentFileChange` handler,
+and the WS payload gains `document_base64`/`document_media_type`
+alongside `image_base64`/`image_media_type` when set. Both an image
+and a document can be attached to the same message — nothing in either
+the frontend or backend forces a choice between them.
+
+Deliberately not restricted to `accept="image/*"` the way the image
+input is: the backend's own `DocumentToTextDegrader` already handles
+an unrecognized format honestly, so the document input has no `accept`
+restriction at all, and `handleDocumentFileChange` only rejects a file
+the browser couldn't assign any type to (`file.type === ""`) — the
+identical "reject, don't guess" floor `_load_document` applies on the
+CLI side, translated to what a browser's own `File.type` can actually
+tell you.
+
+The TypeScript SDK's own mirror of `ChatRequest`/`WsChatRequest`
+(`sdks/typescript/src/types.ts`) gained the same two fields — the
+exact kind of type-mirror drift this project's own `_extra_content_blocks`
+docstring already names as a real risk category (raised there for
+`image_base64`/`image_media_type` specifically). The SDK's `chat()`/
+`chatStream()` methods needed no code changes at all: both just
+`JSON.stringify` whatever `ChatRequest`/`WsChatRequest` object the
+caller passes, so the new fields become valid, type-checked, callable
+immediately once the interface itself is updated.
+
+Verified via this project's own established frontend test discipline
+(`vitest` + `jsdom`, the same depth `apps/desktop/src-tauri`'s own
+`cargo check`-only verification uses for what a live GUI run can't
+cover in this environment — see `docs/packaging.md`): 4 new tests
+mirroring the image attachment tests exactly (attach-and-send,
+omitted-when-unset, remove-clears-it, reject-unrecognized-type).
+Genuine revert-and-check: reverted, 3 of the 4 failed (the 4th,
+omitted-when-unset, is trivially true either way and isn't expected to
+fail), restored. Full frontend suite green (36 passed, up from 32),
+`tsc --noEmit` clean, the TypeScript SDK's own `npm test` (`tsc
+--noEmit` + `vitest run`, 22 tests) green after the type-mirror update.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

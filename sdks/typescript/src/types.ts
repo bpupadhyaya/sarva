@@ -42,6 +42,8 @@ export interface ChatRequest {
   session?: string | null;
   image_base64?: string | null;
   image_media_type?: string | null;
+  document_base64?: string | null;
+  document_media_type?: string | null;
   model?: string | null;
   verify?: boolean;
 }
@@ -125,6 +127,8 @@ export interface WsChatRequest {
   session?: string | null;
   image_base64?: string | null;
   image_media_type?: string | null;
+  document_base64?: string | null;
+  document_media_type?: string | null;
   model?: string | null;
   auto?: boolean;
   verify?: boolean;

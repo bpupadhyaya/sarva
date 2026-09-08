@@ -327,6 +327,69 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: /remove image/i })).not.toBeInTheDocument();
   });
 
+  it("attaching a document shows a chip and sends it base64-encoded alongside the message", async () => {
+    await renderApp();
+
+    const bytes = new Uint8Array([37, 80, 68, 70]); // "%PDF", real bytes
+    const file = new File([bytes], "report.pdf", { type: "application/pdf" });
+    const input = screen.getByTestId("attach-document-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    expect(screen.getByText(/report\.pdf/)).toBeInTheDocument();
+
+    submitMessage("what does this document say?");
+    const ws = latestSocket();
+    open(ws);
+
+    const sent = JSON.parse(ws.sent[0]);
+    expect(sent.message).toBe("what does this document say?");
+    expect(sent.document_media_type).toBe("application/pdf");
+    expect(atob(sent.document_base64)).toBe(String.fromCharCode(...bytes));
+  });
+
+  it("omits document_base64/document_media_type entirely when nothing is attached", async () => {
+    await renderApp();
+    submitMessage("no document here");
+
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "no document here", session: "web" });
+  });
+
+  it("Remove document clears the attachment and it is not sent on the next message", async () => {
+    await renderApp();
+
+    const file = new File([new Uint8Array([1, 2, 3])], "report.pdf", { type: "application/pdf" });
+    const input = screen.getByTestId("attach-document-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+    expect(screen.getByText(/report\.pdf/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /remove document/i }));
+    expect(screen.queryByText(/report\.pdf/)).not.toBeInTheDocument();
+
+    submitMessage("hi again");
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "hi again", session: "web" });
+  });
+
+  it("rejects a file with no recognizable type with a clear error and does not attach it", async () => {
+    await renderApp();
+
+    const file = new File(["mystery bytes"], "notes", { type: "" });
+    const input = screen.getByTestId("attach-document-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    expect(screen.getByText(/doesn't have a recognizable file type/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /remove document/i })).not.toBeInTheDocument();
+  });
+
   it("populates the model picker from GET /models, defaulting to Auto", async () => {
     await renderApp();
 
