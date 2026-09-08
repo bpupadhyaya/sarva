@@ -24299,4 +24299,36 @@ just `mcp_client.py`, the new test failed with the exact old behavior
 (986 passed, 1 skipped, 11 deselected), `ruff check`/`ruff format
 --check` clean. `docs/mcp.md` extended with the closing narrative.
 
+## Round 462: Anthropic's own registry entries claimed document support the adapter never actually had wire-format code for
+
+Same "sibling has the fix, this doesn't" lens that closed the MCP
+AudioContent/EmbeddedResource gap (round 461), applied one layer
+deeper: models.yaml's claude-opus-4-8/claude-fable-5/claude-haiku-4-5
+entries have declared `document` in modalities_in since the --document
+CLI flag shipped (round 451) -- an accurate claim about Anthropic's
+real Messages API -- but anthropic_provider.py's translation function
+never had any wire-format code for DocumentBlock at all, only a
+deliberate else-raise whose own comment explicitly named this exact
+scenario as a known, anticipated gap. Live-reachable: Router.pick()'s
+explicit-override semantics mean `--model claude-opus-4-8 --document
+x.pdf` always hit that raise, even though Anthropic's real API can
+genuinely accept the document.
+
+Fixed by reading Anthropic's own SDK types directly (`anthropic.types.
+DocumentBlockParam`'s source union): only application/pdf (base64) and
+text/plain (a real str, not base64) have a real wire mapping, narrower
+than Sarva's own permissive DocumentBlock. Both now translate correctly
+at the top level and inside a tool result (DocumentBlockParam confirmed
+as a real member of ToolResultBlockParam.content's own union too).
+Every other document media type still correctly raises -- a genuine
+Anthropic API limitation, not a Sarva gap. Non-UTF-8 text/plain bytes
+fall through to the same honest raise rather than a lossy decode.
+
+5 new tests. Genuine revert-and-check: reverted just
+anthropic_provider.py, 3 of 5 new tests failed with the exact old "no
+wire-format mapping exists for it yet" error, restored. Full suite
+green (990 passed, 1 skipped, 11 deselected), `ruff check`/`ruff format
+--check` clean. `docs/providers.md` extended with the closing
+narrative.
+
 **Next:** continuing the hardening sweep, module by module.

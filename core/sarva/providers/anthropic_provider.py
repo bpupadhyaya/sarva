@@ -30,6 +30,7 @@ from typing import Any
 import anthropic
 
 from sarva.multimodal.content import (
+    DocumentBlock,
     ImageBlock,
     Message,
     TextBlock,
@@ -88,6 +89,53 @@ _PRICE = {
 }
 
 
+async def _anthropic_document_block(b: DocumentBlock) -> dict[str, Any] | None:
+    # A real gap found by a fresh-eyes sweep: models.yaml's own
+    # claude-opus-4-8/claude-fable-5/claude-haiku-4-5 entries have
+    # declared `document` in `modalities_in` since the --document CLI
+    # flag shipped (round 451) -- an accurate claim about Anthropic's
+    # real Messages API, which genuinely accepts a `document` content
+    # block -- but this adapter never had wire-format code for it at
+    # all, only the deliberate `else: raise` a few lines below (see its
+    # own comment). Confirmed live-reachable, not hypothetical: an
+    # explicit `--model claude-opus-4-8 --document x.pdf` bypasses
+    # degradation entirely (Router.pick()'s own override semantics,
+    # confirmed correct and unrelated to this gap), so it always hit
+    # that raise, even though Anthropic's real API can genuinely accept
+    # the document being sent.
+    #
+    # Anthropic's own SDK types (`anthropic.types.DocumentBlockParam`,
+    # read directly rather than guessed) narrow `source` to exactly two
+    # variants: `Base64PDFSourceParam` (`application/pdf` only) and
+    # `PlainTextSourceParam` (`text/plain` only, sent as a real `str`,
+    # not base64) -- genuinely narrower than Sarva's own `DocumentBlock`
+    # (any media type `mimetypes` can identify, per `_load_document`'s
+    # permissive stance). Returns `None` for every other media type (or
+    # for text/plain bytes that don't actually decode as UTF-8, since
+    # `PlainTextSourceParam.data` requires a real `str`) so the caller
+    # falls through to the existing honest raise -- a genuine Anthropic
+    # API limitation, not a Sarva gap, for those cases.
+    document_bytes = await resolve_media_bytes(b)
+    if b.media_type == "application/pdf":
+        source: dict[str, Any] = {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": base64.standard_b64encode(document_bytes).decode(),
+        }
+    elif b.media_type == "text/plain":
+        try:
+            text = document_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        source = {"type": "text", "media_type": "text/plain", "data": text}
+    else:
+        return None
+    block: dict[str, Any] = {"type": "document", "source": source}
+    if b.title is not None:
+        block["title"] = b.title
+    return block
+
+
 async def _to_anthropic_message(m: Message) -> dict[str, Any]:
     blocks: list[dict[str, Any]] = []
     for b in m.content:
@@ -108,6 +156,15 @@ async def _to_anthropic_message(m: Message) -> dict[str, Any]:
                     },
                 }
             )
+        elif isinstance(b, DocumentBlock):
+            document_block = await _anthropic_document_block(b)
+            if document_block is None:
+                raise ValueError(
+                    f"AnthropicProvider cannot translate a {type(b).__name__!r} content "
+                    f"block with media_type {b.media_type!r} (Anthropic's real document "
+                    "content block only accepts application/pdf or text/plain)"
+                )
+            blocks.append(document_block)
         elif isinstance(b, ToolCallBlock):
             blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.arguments})
         elif isinstance(b, ToolResultBlock):
@@ -148,6 +205,20 @@ async def _to_anthropic_message(m: Message) -> dict[str, Any]:
                                 },
                             }
                         )
+                    elif isinstance(c, DocumentBlock):
+                        # Anthropic's own SDK type confirms DocumentBlockParam
+                        # is a real member of ToolResultBlockParam.content's
+                        # union too (read directly, not assumed) -- same
+                        # helper, same two real source types, one level down.
+                        c_document_block = await _anthropic_document_block(c)
+                        if c_document_block is None:
+                            raise ValueError(
+                                f"AnthropicProvider cannot translate a {type(c).__name__!r} "
+                                f"content block with media_type {c.media_type!r} inside a "
+                                "tool result (Anthropic's real document content block only "
+                                "accepts application/pdf or text/plain)"
+                            )
+                        parts.append(c_document_block)
                     else:
                         raise ValueError(
                             f"AnthropicProvider cannot translate a {type(c).__name__!r} "

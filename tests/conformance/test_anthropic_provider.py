@@ -141,19 +141,107 @@ async def test_thinking_block_with_no_signature_is_dropped_not_fabricated():
     assert out["content"] == [{"type": "text", "text": "hi"}]
 
 
-async def test_unsupported_block_type_raises_instead_of_silently_dropping():
-    # DocumentBlock has no wire-format mapping in this adapter yet.
-    # Silently omitting it would send the request missing content the
-    # caller believes is present -- must raise loudly instead.
+async def test_pdf_document_block_translates_to_anthropics_real_document_content_block():
+    # A real gap found by a fresh-eyes sweep: models.yaml's own
+    # claude-opus-4-8/claude-fable-5/claude-haiku-4-5 entries have
+    # declared `document` in modalities_in since round 451 -- an
+    # accurate claim about Anthropic's real Messages API, which
+    # genuinely accepts a `document` content block -- but this adapter
+    # never had wire-format code for it, only a blanket "no mapping
+    # exists" raise. An explicit `--model claude-opus-4-8 --document
+    # x.pdf` bypasses degradation entirely (Router.pick()'s own
+    # override semantics), so this was live-reachable, not
+    # hypothetical: it always raised, even though Anthropic's real API
+    # can genuinely accept the document being sent.
+    raw = b"%PDF-1.4 fake pdf bytes"
+    m = Message(
+        role="user",
+        content=[DocumentBlock(media_type="application/pdf", data=raw, title="report.pdf")],
+    )
+
+    out = await _to_anthropic_message(m)
+
+    block = out["content"][0]
+    assert block["type"] == "document"
+    assert block["title"] == "report.pdf"
+    assert block["source"]["type"] == "base64"
+    assert block["source"]["media_type"] == "application/pdf"
+    assert base64.standard_b64decode(block["source"]["data"]) == raw
+
+
+async def test_plain_text_document_block_translates_to_a_real_text_str_not_base64():
+    # Anthropic's own SDK type (PlainTextSourceParam) requires `data` as
+    # a real `str`, unlike the PDF variant -- confirmed by reading the
+    # SDK type directly rather than assumed from the PDF shape.
+    m = Message(
+        role="user",
+        content=[DocumentBlock(media_type="text/plain", data=b"the quarterly figure is $42,000")],
+    )
+
+    out = await _to_anthropic_message(m)
+
+    block = out["content"][0]
+    assert block["type"] == "document"
+    assert block["source"] == {
+        "type": "text",
+        "media_type": "text/plain",
+        "data": "the quarterly figure is $42,000",
+    }
+
+
+async def test_document_block_with_a_media_type_anthropic_cant_take_still_raises():
+    # Anthropic's real document content block only accepts
+    # application/pdf or text/plain (confirmed by reading
+    # anthropic.types.DocumentBlockParam's own `source` union directly)
+    # -- genuinely narrower than Sarva's own permissive DocumentBlock.
+    # A csv attached with an explicit --model override has no real wire
+    # mapping to fall back to, so this must still raise loudly rather
+    # than silently sending the request without it.
     m = Message(
         role="user",
         content=[
             TextBlock(text="see attached"),
-            DocumentBlock(media_type="application/pdf", data=b"x"),
+            DocumentBlock(media_type="text/csv", data=b"a,b\n1,2\n"),
         ],
     )
     with pytest.raises(ValueError, match="DocumentBlock"):
         await _to_anthropic_message(m)
+
+
+async def test_plain_text_document_block_with_non_utf8_bytes_still_raises():
+    # PlainTextSourceParam.data requires a real str -- bytes that don't
+    # actually decode as UTF-8 can't be sent as one, so this falls
+    # through to the same honest raise as a genuinely unsupported media
+    # type, not a fabricated/replaced decode.
+    m = Message(
+        role="user",
+        content=[DocumentBlock(media_type="text/plain", data=b"\xff\xfe\x00bad utf8")],
+    )
+    with pytest.raises(ValueError, match="DocumentBlock"):
+        await _to_anthropic_message(m)
+
+
+async def test_tool_result_with_a_pdf_document_sends_it_instead_of_raising():
+    # Anthropic's own SDK type confirms DocumentBlockParam is a real
+    # member of ToolResultBlockParam.content's union too (read directly)
+    # -- the identical fix as the top-level case, one level down, the
+    # same way the image fix above already covers both levels.
+    raw = b"%PDF-1.4 fake pdf bytes"
+    result = ToolResultBlock(
+        tool_call_id="t1",
+        content=[
+            TextBlock(text="here's the report:"),
+            DocumentBlock(media_type="application/pdf", data=raw),
+        ],
+    )
+    m = Message(role="user", content=[result])
+
+    out = await _to_anthropic_message(m)
+
+    tool_result = out["content"][0]
+    document_part = tool_result["content"][1]
+    assert document_part["type"] == "document"
+    assert base64.standard_b64decode(document_part["source"]["data"]) == raw
 
 
 class _RaisingStreamContext:

@@ -1511,6 +1511,50 @@ with a long video needs Gemini's separate Files API (upload once,
 reference by URI), named as real, deferred follow-up rather than
 silently mishandled.
 
+### Anthropic's own registry entries claimed document support the adapter never actually had wire-format code for
+
+A real gap found by a fresh-eyes sweep, applying the same "sibling has
+the fix, this doesn't" lens that closed the MCP `AudioContent`/
+`EmbeddedResource` gap: `models.yaml`'s `claude-opus-4-8`/`claude-fable-5`/
+`claude-haiku-4-5` entries have declared `document` in `modalities_in`
+since the `--document` CLI flag shipped — an accurate claim about
+Anthropic's real Messages API, which genuinely accepts a `document`
+content block — but `anthropic_provider.py`'s translation function
+never had any wire-format code for `DocumentBlock` at all, only a
+deliberate `else: raise` for block types it can't translate (see that
+function's own comment, which explicitly named this exact scenario:
+"a model whose registry entry claims document support it doesn't
+actually have wire-level code for"). Live-reachable, not hypothetical:
+`Router.pick()`'s own explicit-override semantics (an explicit
+`--model` bypasses ALL degradation) mean `sarva chat --model
+claude-opus-4-8 --document report.pdf ...` always hit that raise, even
+though Anthropic's real API can genuinely accept the document.
+
+Fixed by reading Anthropic's own SDK types directly rather than
+guessing (`anthropic.types.DocumentBlockParam`'s `source` union) —
+genuinely narrower than Sarva's own permissive `DocumentBlock` (any
+media type `mimetypes` can identify): only `application/pdf` (base64)
+and `text/plain` (a real `str`, not base64) have a real wire mapping.
+Both are now translated to Anthropic's real `document` content block,
+at both the top-level-message and inside-a-tool-result nesting levels
+(the latter confirmed against `ToolResultBlockParam.content`'s own
+union, which also lists `DocumentBlockParam` as a real member — the
+identical fix the image/tool-result gap already received one content
+type over). Every other document media type (csv, docx, markdown,
+html, ...) still correctly raises: a genuine Anthropic API limitation,
+not a Sarva gap, and consistent with the explicit-override design's own
+"an unambiguous, hard choice `Router.pick()` never second-guesses"
+reasoning. `text/plain` bytes that don't actually decode as UTF-8 fall
+through to the same honest raise rather than a fabricated/lossy decode.
+
+5 new tests (PDF success, plain-text success with the real-`str`-not-
+base64 shape, a still-unsupported media type still raising, non-UTF-8
+plain text still raising, and the tool-result-nested PDF case).
+Verified with a genuine revert-and-check: reverted just
+`anthropic_provider.py`, 3 of the 5 new tests failed with the exact old
+"no wire-format mapping exists for it yet" error, restored. Full suite
+green (990 passed).
+
 ## Build it yourself
 
 - Run `sarva models` to see the registry as loaded — which ids exist,
