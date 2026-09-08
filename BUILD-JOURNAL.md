@@ -24029,3 +24029,37 @@ Podman-environment failure as prior rounds), `ruff check`/`ruff format
 round 453's own section.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 455: audio support extended to `/chat`/`/ws/chat`, following the document arc's exact sequence
+
+Direct, same-session follow-up to round 454, applying round 452's own
+document->server sequence to audio next. `ChatRequest` gained
+`audio_base64`/`audio_media_type` mirroring the image/document fields
+exactly, and `_extra_content_blocks` now builds an `AudioBlock` the
+same way, with the identical "both set together, or neither"
+validation. The TypeScript SDK's own type mirror gained the same two
+fields on both `ChatRequest` and `WsChatRequest`.
+
+Verified live end to end against a real running `sarva serve`
+process: the same real TTS-generated WAV from round 454's own
+verification, POSTed to `/chat` as base64 with no explicit model,
+correctly routed through degradation, ran real faster-whisper
+transcription, and returned the exact planted code word. Also
+confirmed the validation error fires correctly for a mismatched field
+pair.
+
+Verified with a genuine revert-and-check: reverted, all four new tests
+failed with the exact old behavior, restored. 4 new tests, full suite
+green (972 passed, 1 skipped, 11 deselected -- the same pre-existing,
+unrelated Podman-environment failure as prior rounds), `ruff check`/
+`ruff format --check` both clean, TypeScript SDK's own test suite
+green (22 tests) after the type-mirror update. `docs/multimodal.md`
+extended directly after round 454's own section.
+
+Honestly named, not silently skipped: the frontend UI's own audio-
+attachment button (mirroring `App.tsx`'s existing image/document
+buttons) remains a real, deferred gap for a later round.
+
+**Next:** continuing the hardening sweep, module by module.

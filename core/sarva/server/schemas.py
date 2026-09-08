@@ -20,6 +20,10 @@ class ChatRequest(BaseModel):
     # way to attach anything but an image at all.
     document_base64: str | None = None
     document_media_type: str | None = None
+    # Mirrors image/document exactly. The CLI's own --audio flag closed
+    # this gap for chat/run; this closes it for /chat and /ws/chat.
+    audio_base64: str | None = None
+    audio_media_type: str | None = None
     model: str | None = None
     verify: bool = False
 

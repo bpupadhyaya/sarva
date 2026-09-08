@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sarva.memory import session as session_module
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import DocumentBlock, ImageBlock, Modality, ToolCallBlock
+from sarva.multimodal.content import AudioBlock, DocumentBlock, ImageBlock, Modality, ToolCallBlock
 from sarva.providers.base import GenerateRequest, ModelCapabilities, ModelCost, ModelInfo
 from sarva.providers.mock import MockProvider, ScriptedTurn
 from sarva.providers.registry import Registry, Router, TaskClass, load_routing
@@ -133,6 +133,33 @@ def _use_capturing_document_mock(monkeypatch) -> _CapturingProvider:
     provider = _CapturingProvider()
     monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
     monkeypatch.setattr(app_module, "build_router", _document_capable_mock_router)
+    return provider
+
+
+def _audio_capable_mock_router() -> Router:
+    """Same reasoning as `_document_capable_mock_router`, for AUDIO."""
+    model = ModelInfo(
+        id="mock",
+        provider="mock",
+        display_name="Audio-capable mock (test-only)",
+        capabilities=ModelCapabilities(
+            modalities_in={Modality.TEXT, Modality.AUDIO},
+            modalities_out={Modality.TEXT},
+            tool_use=True,
+            thinking=False,
+            context_window=100_000,
+            max_output=8_000,
+        ),
+        cost=ModelCost(),
+    )
+    registry = Registry(models={"mock": model})
+    return Router(registry, routing={TaskClass.MAIN: ["mock"]}, available={"mock"})
+
+
+def _use_capturing_audio_mock(monkeypatch) -> _CapturingProvider:
+    provider = _CapturingProvider()
+    monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
+    monkeypatch.setattr(app_module, "build_router", _audio_capable_mock_router)
     return provider
 
 
@@ -833,6 +860,70 @@ def test_chat_with_an_attached_document_reaches_the_provider_as_a_real_document_
     assert documents[0].media_type == "application/pdf"
 
 
+def test_chat_with_malformed_audio_base64_fails_cleanly_not_a_500(monkeypatch):
+    # The identical bug shape already fixed for image_base64/
+    # document_base64, exercised here for the new audio fields.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "hi",
+            "audio_base64": "not valid base64!!!",
+            "audio_media_type": "audio/wav",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert body["message"] is None
+
+
+def test_chat_with_audio_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(monkeypatch):
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={"message": "hi", "audio_base64": "aGVsbG8="},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert "audio_base64" in body["detail"]
+    assert "audio_media_type" in body["detail"]
+
+
+def test_chat_with_an_attached_audio_file_reaches_the_provider_as_a_real_audio_block(monkeypatch):
+    # Uses an audio-capable test router -- the real production registry's
+    # mock entry declines AUDIO on purpose, so an all-mock available set
+    # would degrade any audio away before it reaches the provider at
+    # all. This test is about the audio_base64 -> AudioBlock wiring
+    # itself, not routing/degradation policy (see docs/multimodal.md's
+    # round-454 section for the live-verified degradation path via a
+    # real WAV and real faster-whisper transcription).
+    provider = _use_capturing_audio_mock(monkeypatch)
+    raw = b"RIFF real enough bytes for this test WAVEfmt "
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "what does this audio say?",
+            "audio_base64": base64.b64encode(raw).decode(),
+            "audio_media_type": "audio/wav",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert provider.last_request is not None
+    user_msg = next(m for m in provider.last_request.messages if m.role == "user")
+    audios = [b for b in user_msg.content if isinstance(b, AudioBlock)]
+    assert len(audios) == 1
+    assert audios[0].data == raw
+    assert audios[0].media_type == "audio/wav"
+
+
 def test_websocket_streams_events_and_ends_with_run_done(monkeypatch):
     _force_mock_only(monkeypatch)
     client = _client()
@@ -1190,6 +1281,25 @@ def test_websocket_with_document_base64_but_no_media_type_fails_cleanly_not_a_si
     client = _client()
     with client.websocket_connect("/ws/chat") as ws:
         ws.send_json({"message": "hi", "document_base64": "aGVsbG8="})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_audio_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(
+    monkeypatch,
+):
+    # The WS counterpart to the identical /chat test above, exercised
+    # here for the new audio_base64/audio_media_type fields.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "audio_base64": "aGVsbG8="})
         events = []
         while True:
             data = ws.receive_json()

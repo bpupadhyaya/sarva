@@ -753,6 +753,31 @@ Verified with a genuine revert-and-check: reverted, all three new
 tests failed with the exact old behavior (no `--audio` flag existed),
 restored. 3 new tests, full suite green.
 
+### The audio gap extended to `/chat`/`/ws/chat` in the same session, following the document arc's exact 451→452 sequence
+
+The CLI's `--audio` flag above closed one reachability gap; `/chat`/
+`/ws/chat` had the identical one. `ChatRequest` gained
+`audio_base64`/`audio_media_type` mirroring `image_base64`/
+`document_base64` exactly, and `_extra_content_blocks` now builds an
+`AudioBlock` the same way, with the identical "both fields set
+together, or neither" validation. The TypeScript SDK's own mirror
+(`sdks/typescript/src/types.ts`) gained the same two fields on both
+`ChatRequest` and `WsChatRequest`.
+
+Verified live end to end against a real running `sarva serve`
+process: the same real TTS-generated WAV (secret code word and all)
+from the CLI fix above, POSTed to `/chat` as base64 with no explicit
+`model`, correctly routed through degradation, ran real
+`faster-whisper` transcription, and returned the exact code word.
+Separately confirmed the "both fields required together" validation
+error fires correctly for a mismatched pair.
+
+Verified with a genuine revert-and-check: reverted, all four new
+tests failed with the exact old behavior, restored. 4 new tests, full
+suite green. The frontend UI's own audio-attachment button (mirroring
+`App.tsx`'s image/document buttons) remains a real, deliberately
+named, deferred gap — not attempted this round.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's
