@@ -12,6 +12,14 @@ class ChatRequest(BaseModel):
     session: str | None = None
     image_base64: str | None = None
     image_media_type: str | None = None
+    # Mirrors image_base64/image_media_type exactly -- same independent-
+    # optional-pair shape, same "both or neither" validation in
+    # _extra_content_blocks (server/app.py). The CLI's own --document
+    # flag closed the identical gap for chat/run; this closes it for
+    # /chat and /ws/chat, the two request paths that previously had no
+    # way to attach anything but an image at all.
+    document_base64: str | None = None
+    document_media_type: str | None = None
     model: str | None = None
     verify: bool = False
 

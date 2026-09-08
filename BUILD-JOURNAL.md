@@ -23917,3 +23917,45 @@ and its own "Build it yourself" list updated to point at the new flag
 instead of only manual construction.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 452: `/chat`, `/ws/chat`, and the desktop app's own WebView had no way to attach a document either
+
+A direct follow-up to round 451: checking whether the new `--document`
+CLI flag closed every real reachability gap, or just one of several.
+It didn't. `ChatRequest` only ever had `image_base64`/`image_media_type`
+-- no document equivalent -- and the desktop app's own chat UI only
+accepts `image/*` files in its attach button. `--document` closed the
+CLI's side; the server/WebSocket API and web UI still couldn't send a
+document at all, from any client.
+
+Fixed by mirroring the image fields exactly: `ChatRequest` gained
+`document_base64`/`document_media_type`, and the shared
+`_extra_content_blocks` helper now builds a `DocumentBlock` the same
+way it already built an `ImageBlock`, with the identical "both fields
+set together, or neither" validation. Verified live end to end
+against a real running `sarva serve` process: the same real PDF from
+round 451's own live verification, POSTed to `/chat` as base64 with no
+explicit model, correctly routed through degradation and returned the
+exact planted code word. Also verified the validation error fires
+correctly for a mismatched field pair.
+
+Honestly scoped: the desktop app's own frontend UI (still
+`image/*`-only) was NOT touched this round -- the backend now accepts
+documents from any client that sends them, but the shipped web UI has
+no button to attach one yet. A real, named, deferred gap for a later
+round.
+
+Verified with a genuine revert-and-check: reverted, all four new tests
+failed with the old silent-drop/missing-field behavior, restored. One
+pre-existing test also broke on the revert cycle for an unrelated
+reason (a monkeypatched stand-in pinned to the old two-parameter
+`_extra_content_blocks` signature) -- fixed by widening it to
+`*args, **kwargs`. 4 new tests, full suite green (965 passed, 1
+skipped, 11 deselected -- the same pre-existing, unrelated
+Podman-environment failure as prior rounds), `ruff check`/`ruff format
+--check` both clean. `docs/multimodal.md` extended directly after
+round 451's own section.
+
+**Next:** continuing the hardening sweep, module by module.

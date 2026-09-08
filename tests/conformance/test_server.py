@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sarva.memory import session as session_module
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import ImageBlock, Modality, ToolCallBlock
+from sarva.multimodal.content import DocumentBlock, ImageBlock, Modality, ToolCallBlock
 from sarva.providers.base import GenerateRequest, ModelCapabilities, ModelCost, ModelInfo
 from sarva.providers.mock import MockProvider, ScriptedTurn
 from sarva.providers.registry import Registry, Router, TaskClass, load_routing
@@ -100,6 +100,39 @@ def _use_capturing_vision_mock(monkeypatch) -> _CapturingProvider:
     provider = _CapturingProvider()
     monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
     monkeypatch.setattr(app_module, "build_router", _vision_capable_mock_router)
+    return provider
+
+
+def _document_capable_mock_router() -> Router:
+    """Same reasoning as `_vision_capable_mock_router`, for DOCUMENT
+    instead of IMAGE: the real production registry's mock entry
+    declines both on purpose (see models.yaml's own comment), so a test
+    that only cares whether document_base64/document_media_type on the
+    wire correctly becomes a real DocumentBlock reaching provider.
+    generate() unmodified needs its own genuinely document-capable
+    router rather than depending on routing/degradation policy."""
+    model = ModelInfo(
+        id="mock",
+        provider="mock",
+        display_name="Document-capable mock (test-only)",
+        capabilities=ModelCapabilities(
+            modalities_in={Modality.TEXT, Modality.DOCUMENT},
+            modalities_out={Modality.TEXT},
+            tool_use=True,
+            thinking=False,
+            context_window=100_000,
+            max_output=8_000,
+        ),
+        cost=ModelCost(),
+    )
+    registry = Registry(models={"mock": model})
+    return Router(registry, routing={TaskClass.MAIN: ["mock"]}, available={"mock"})
+
+
+def _use_capturing_document_mock(monkeypatch) -> _CapturingProvider:
+    provider = _CapturingProvider()
+    monkeypatch.setattr(app_module, "build_providers", lambda: {"mock": provider})
+    monkeypatch.setattr(app_module, "build_router", _document_capable_mock_router)
     return provider
 
 
@@ -495,9 +528,9 @@ async def test_a_slow_image_decode_does_not_freeze_the_event_loop(monkeypatch):
 
     real_extra_content_blocks = app_module._extra_content_blocks
 
-    def slow_extra_content_blocks(image_base64, image_media_type):
+    def slow_extra_content_blocks(*args, **kwargs):
         time.sleep(0.3)  # simulate a slow/large real-world image decode
-        return real_extra_content_blocks(image_base64, image_media_type)
+        return real_extra_content_blocks(*args, **kwargs)
 
     monkeypatch.setattr(app_module, "_extra_content_blocks", slow_extra_content_blocks)
 
@@ -732,6 +765,72 @@ def test_chat_with_an_attached_image_reaches_the_provider_as_a_real_image_block(
     assert len(images) == 1
     assert images[0].data == raw
     assert images[0].media_type == "image/png"
+
+
+def test_chat_with_malformed_document_base64_fails_cleanly_not_a_500(monkeypatch):
+    # The identical bug shape already fixed for image_base64: a real gap
+    # found by a fresh-eyes sweep applying `--document`'s own new
+    # server-side wiring the same lens the image tests above already
+    # cover, not assumed safe just because the pattern was copied.
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "hi",
+            "document_base64": "not valid base64!!!",
+            "document_media_type": "application/pdf",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert body["message"] is None
+
+
+def test_chat_with_document_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(monkeypatch):
+    _force_mock_only(monkeypatch)
+
+    resp = _client().post(
+        "/chat",
+        json={"message": "hi", "document_base64": "aGVsbG8="},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "failed"
+    assert "document_base64" in body["detail"]
+    assert "document_media_type" in body["detail"]
+
+
+def test_chat_with_an_attached_document_reaches_the_provider_as_a_real_document_block(monkeypatch):
+    # Uses a document-capable test router, not _mock_only_router -- the
+    # real production registry's mock entry declines DOCUMENT on
+    # purpose, so an all-mock available set would degrade any document
+    # away before it reaches the provider at all. This test is about the
+    # document_base64 -> DocumentBlock wiring itself, not routing/
+    # degradation policy (see docs/multimodal.md's round-451 section for
+    # the live-verified degradation path via a real PDF).
+    provider = _use_capturing_document_mock(monkeypatch)
+    raw = b"%PDF-1.4 real enough bytes for this test"
+
+    resp = _client().post(
+        "/chat",
+        json={
+            "message": "what does this document say?",
+            "document_base64": base64.b64encode(raw).decode(),
+            "document_media_type": "application/pdf",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert provider.last_request is not None
+    user_msg = next(m for m in provider.last_request.messages if m.role == "user")
+    documents = [b for b in user_msg.content if isinstance(b, DocumentBlock)]
+    assert len(documents) == 1
+    assert documents[0].data == raw
+    assert documents[0].media_type == "application/pdf"
 
 
 def test_websocket_streams_events_and_ends_with_run_done(monkeypatch):
@@ -1071,6 +1170,26 @@ def test_websocket_with_image_base64_but_no_media_type_fails_cleanly_not_a_silen
     client = _client()
     with client.websocket_connect("/ws/chat") as ws:
         ws.send_json({"message": "hi", "image_base64": "aGVsbG8="})
+        events = []
+        while True:
+            data = ws.receive_json()
+            events.append(data)
+            if data["type"] == "run_done":
+                break
+
+    assert events[-1]["state"] == "failed"
+
+
+def test_websocket_with_document_base64_but_no_media_type_fails_cleanly_not_a_silent_drop(
+    monkeypatch,
+):
+    # The WS counterpart to the identical /chat test above, and the same
+    # real bug class the image tests already cover -- exercised here for
+    # the new document_base64/document_media_type fields.
+    _force_mock_only(monkeypatch)
+    client = _client()
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "hi", "document_base64": "aGVsbG8="})
         events = []
         while True:
             data = ws.receive_json()

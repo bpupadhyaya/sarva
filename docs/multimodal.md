@@ -605,6 +605,55 @@ Verified with a genuine revert-and-check: reverted, all three new
 tests failed (`--document` didn't exist yet), restored. 3 new tests,
 full suite green.
 
+### The identical gap, one layer over: `/chat`, `/ws/chat`, and the desktop app's own WebView had no way to attach a document either
+
+A direct follow-up, found by checking whether the CLI fix above closed
+*every* real reachability gap or just one of several: it didn't.
+`ChatRequest` (`sarva.server.schemas`) only ever had `image_base64`/
+`image_media_type` — no document equivalent — and the desktop app's
+own chat UI (`apps/desktop/src/App.tsx`) only accepts `image/*` files
+in its attach button. `--document` closed the CLI's side of this gap;
+the server/WebSocket API and the web UI still couldn't send a document
+at all, no matter which client asked.
+
+Fixed by mirroring the image fields exactly: `ChatRequest` gained
+`document_base64`/`document_media_type`, and `_extra_content_blocks`
+(the function shared by `/chat`'s validated request and `/ws/chat`'s
+schema-less JSON frame, specifically so the two paths can't drift
+apart on what "an attached document" means — see that function's own
+docstring) now builds a `DocumentBlock` the same way it already built
+an `ImageBlock`, with the identical "both fields set together, or
+neither" validation raising a clean, actionable error rather than
+silently dropping a caller's attachment. Verified live end to end
+against a real running `sarva serve` process: the same real PDF
+(secret code word and all) from the CLI fix above, POSTed to `/chat`
+as base64 with no explicit `model`, correctly routed through
+degradation and returned the exact code word — and, separately,
+confirmed the "both fields required together" validation error fires
+correctly for a mismatched pair, the server-side counterpart to the
+CLI's own `BadParameter`.
+
+**Honestly scoped, not claimed further than shipped**: the desktop
+app's own frontend UI (`App.tsx`'s attach button, still `image/*`-only)
+was NOT touched in this round — the backend API now accepts documents
+from any client that sends them, but nothing in the shipped web UI
+yet lets a person click to attach one. A real, named, deferred gap for
+a later round, not an implicit one.
+
+Verified with a genuine revert-and-check: reverted, all four new
+tests failed with the exact old behavior (`AssertionError: assert
+'done' == 'failed'` for the silent-drop case — the identical shape the
+image tests above already guard against, now failing for real before
+the fix). A pre-existing test (`test_a_slow_image_decode_does_not_
+freeze_the_event_loop`) also broke on the revert-and-restore cycle for
+an unrelated reason worth naming: it monkeypatches
+`_extra_content_blocks` with a stand-in matching the *old*
+two-parameter signature, so adding two new parameters broke it on a
+signature mismatch, not a real regression — fixed by widening the
+stand-in to `*args, **kwargs`, the same "don't rest correctness on a
+signature a real change might grow past" reasoning already applied
+elsewhere in this codebase. 4 new tests, full suite green.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

@@ -35,7 +35,7 @@ from sarva.agent.loop import AgentLoop
 from sarva.agent.tools import BUILTIN_TOOLS, always_allow
 from sarva.config import ConfigError, save_config
 from sarva.memory.session import SessionStore
-from sarva.multimodal.content import ContentBlock, ImageBlock, Message, ToolCallBlock
+from sarva.multimodal.content import ContentBlock, DocumentBlock, ImageBlock, Message, ToolCallBlock
 from sarva.multimodal.degraders import default_degraders
 from sarva.runtime import build_providers, build_router, run_diagnostics
 from sarva.server.schemas import (
@@ -137,7 +137,10 @@ def _is_same_origin(origin: str | None, host: str | None) -> bool:
 
 
 def _extra_content_blocks(
-    image_base64: str | None, image_media_type: str | None
+    image_base64: str | None,
+    image_media_type: str | None,
+    document_base64: str | None = None,
+    document_media_type: str | None = None,
 ) -> list[ContentBlock]:
     """Shared by /chat (a validated ChatRequest) and /ws/chat (a raw JSON
     frame with no schema of its own) so the two request paths can't drift
@@ -163,11 +166,20 @@ def _extra_content_blocks(
     sites already catch `ValueError` from this exact function for the
     malformed-base64 case, so raising here reuses existing, already-
     tested clean-failure plumbing rather than needing any new handling."""
+    blocks: list[ContentBlock] = []
     if image_base64 and image_media_type:
-        return [ImageBlock(media_type=image_media_type, data=base64.b64decode(image_base64))]
-    if image_base64 or image_media_type:
+        blocks.append(ImageBlock(media_type=image_media_type, data=base64.b64decode(image_base64)))
+    elif image_base64 or image_media_type:
         raise ValueError("image_base64 and image_media_type must both be set together, or neither")
-    return []
+    if document_base64 and document_media_type:
+        blocks.append(
+            DocumentBlock(media_type=document_media_type, data=base64.b64decode(document_base64))
+        )
+    elif document_base64 or document_media_type:
+        raise ValueError(
+            "document_base64 and document_media_type must both be set together, or neither"
+        )
+    return blocks
 
 
 def create_app(workdir: str = ".") -> FastAPI:
@@ -357,7 +369,11 @@ def create_app(workdir: str = ".") -> FastAPI:
                 # -- every other concurrent user's in-flight /chat or
                 # /ws/chat turn freezes too, not just this one request.
                 extra_content = await asyncio.to_thread(
-                    _extra_content_blocks, req.image_base64, req.image_media_type
+                    _extra_content_blocks,
+                    req.image_base64,
+                    req.image_media_type,
+                    req.document_base64,
+                    req.document_media_type,
                 )
 
                 try:
@@ -445,7 +461,11 @@ def create_app(workdir: str = ".") -> FastAPI:
         the desktop app's only chat surface (it never calls /chat), so
         until this existed there was genuinely no way to send an image
         through the web UI at all despite the CLI and REST endpoint both
-        already supporting it. Optional "model" forces a specific model
+        already supporting it. Optional "document_base64"/
+        "document_media_type" attach one document (PDF or plain text/
+        markdown/csv/html/json) the same way -- the CLI's own --document
+        flag closed the identical CLI-side gap; this closes it here.
+        Optional "model" forces a specific model
         id (same meaning as the CLI's own --model), bypassing the
         router's default selection entirely -- an unknown id surfaces as
         a real, visible `state_changed` frame with a `detail` message
@@ -716,6 +736,8 @@ def create_app(workdir: str = ".") -> FastAPI:
                             _extra_content_blocks,
                             payload.get("image_base64"),
                             payload.get("image_media_type"),
+                            payload.get("document_base64"),
+                            payload.get("document_media_type"),
                         )
                     except (ValueError, TypeError) as e:
                         await _send_failure(str(e))
