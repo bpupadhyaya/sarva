@@ -390,6 +390,69 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: /remove document/i })).not.toBeInTheDocument();
   });
 
+  it("attaching audio shows a chip and sends it base64-encoded alongside the message", async () => {
+    await renderApp();
+
+    const bytes = new Uint8Array([82, 73, 70, 70]); // "RIFF", real bytes
+    const file = new File([bytes], "clip.wav", { type: "audio/wav" });
+    const input = screen.getByTestId("attach-audio-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    expect(screen.getByText(/clip\.wav/)).toBeInTheDocument();
+
+    submitMessage("what does this audio say?");
+    const ws = latestSocket();
+    open(ws);
+
+    const sent = JSON.parse(ws.sent[0]);
+    expect(sent.message).toBe("what does this audio say?");
+    expect(sent.audio_media_type).toBe("audio/wav");
+    expect(atob(sent.audio_base64)).toBe(String.fromCharCode(...bytes));
+  });
+
+  it("omits audio_base64/audio_media_type entirely when nothing is attached", async () => {
+    await renderApp();
+    submitMessage("no audio here");
+
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "no audio here", session: "web" });
+  });
+
+  it("Remove audio clears the attachment and it is not sent on the next message", async () => {
+    await renderApp();
+
+    const file = new File([new Uint8Array([1, 2, 3])], "clip.wav", { type: "audio/wav" });
+    const input = screen.getByTestId("attach-audio-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+    expect(screen.getByText(/clip\.wav/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /remove audio/i }));
+    expect(screen.queryByText(/clip\.wav/)).not.toBeInTheDocument();
+
+    submitMessage("hi again");
+    const ws = latestSocket();
+    open(ws);
+    expect(JSON.parse(ws.sent[0])).toEqual({ message: "hi again", session: "web" });
+  });
+
+  it("rejects a non-audio file with a clear error and does not attach it", async () => {
+    await renderApp();
+
+    const file = new File(["not audio"], "notes.txt", { type: "text/plain" });
+    const input = screen.getByTestId("attach-audio-input") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    expect(screen.getByText(/doesn't look like audio/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /remove audio/i })).not.toBeInTheDocument();
+  });
+
   it("populates the model picker from GET /models, defaulting to Auto", async () => {
     await renderApp();
 

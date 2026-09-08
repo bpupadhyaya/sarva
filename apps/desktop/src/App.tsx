@@ -25,6 +25,12 @@ interface AttachedDocument {
   name: string;
 }
 
+interface AttachedAudio {
+  base64: string;
+  mediaType: string;
+  name: string;
+}
+
 interface ModelInfo {
   id: string;
   display_name: string;
@@ -53,6 +59,7 @@ export default function App() {
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
   const [attachedDocument, setAttachedDocument] = useState<AttachedDocument | null>(null);
+  const [attachedAudio, setAttachedAudio] = useState<AttachedAudio | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   // "" means auto (no override) -- the exact meaning omitting the CLI's
   // own --model flag has, kept consistent rather than inventing a
@@ -62,6 +69,7 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const documentInputRef = useRef<HTMLInputElement | null>(null);
+  const audioInputRef = useRef<HTMLInputElement | null>(null);
 
   // null = still deciding (avoids a first-run screen flashing briefly for
   // an already-configured install while GET /doctor is in flight).
@@ -113,7 +121,10 @@ export default function App() {
 
     const image = attachedImage;
     const document = attachedDocument;
-    const attachmentNames = [image?.name, document?.name].filter(Boolean).join(", ");
+    const audio = attachedAudio;
+    const attachmentNames = [image?.name, document?.name, audio?.name]
+      .filter(Boolean)
+      .join(", ");
     setMessages((prev) => [
       ...prev,
       { role: "user", text: attachmentNames ? `${text} [${attachmentNames}]` : text },
@@ -122,6 +133,7 @@ export default function App() {
     setInput("");
     setAttachedImage(null);
     setAttachedDocument(null);
+    setAttachedAudio(null);
     setStreaming(true);
     setError(null);
     setPending(null);
@@ -146,9 +158,9 @@ export default function App() {
       // an explicit Approve/Deny in the UI before it runs. See
       // core/sarva/server/app.py's ws_chat docstring for the protocol.
       // image_base64/image_media_type/document_base64/
-      // document_media_type/model are omitted entirely (not sent as
-      // null) when unset, matching the REST /chat request schema's own
-      // optional-field shape.
+      // document_media_type/audio_base64/audio_media_type/model are
+      // omitted entirely (not sent as null) when unset, matching the
+      // REST /chat request schema's own optional-field shape.
       ws.send(
         JSON.stringify({
           message: text,
@@ -157,6 +169,7 @@ export default function App() {
           ...(document
             ? { document_base64: document.base64, document_media_type: document.mediaType }
             : {}),
+          ...(audio ? { audio_base64: audio.base64, audio_media_type: audio.mediaType } : {}),
           ...(selectedModel ? { model: selectedModel } : {}),
         }),
       );
@@ -221,7 +234,15 @@ export default function App() {
       setStreaming(false);
       setPending(null);
     };
-  }, [input, streaming, attachedImage, attachedDocument, selectedModel, appendToLastAssistant]);
+  }, [
+    input,
+    streaming,
+    attachedImage,
+    attachedDocument,
+    attachedAudio,
+    selectedModel,
+    appendToLastAssistant,
+  ]);
 
   const respondToConfirmation = useCallback((approved: boolean) => {
     socketRef.current?.send(JSON.stringify({ approved }));
@@ -257,6 +278,24 @@ export default function App() {
     }
     const base64 = await fileToBase64(file);
     setAttachedDocument({ base64, mediaType: file.type, name: file.name });
+    setError(null);
+  }, []);
+
+  // Mirrors handleFileChange's restrictive audio/* validation (not
+  // handleDocumentFileChange's permissive one): --audio on the CLI side
+  // is restricted the same way, since an "attach audio" control
+  // silently accepting a non-audio file would be a surprising,
+  // wrong-shaped attachment.
+  const handleAudioFileChange = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    if (!file.type.startsWith("audio/")) {
+      setError(`"${file.name}" doesn't look like audio (${file.type || "unknown type"})`);
+      return;
+    }
+    const base64 = await fileToBase64(file);
+    setAttachedAudio({ base64, mediaType: file.type, name: file.name });
     setError(null);
   }, []);
 
@@ -319,6 +358,15 @@ export default function App() {
         </div>
       )}
 
+      {attachedAudio && (
+        <div className="attached-audio">
+          <span>🎤 {attachedAudio.name}</span>
+          <button type="button" onClick={() => setAttachedAudio(null)}>
+            Remove audio
+          </button>
+        </div>
+      )}
+
       <div className="model-picker">
         <label htmlFor="model-select">Model</label>
         <select
@@ -374,6 +422,22 @@ export default function App() {
           aria-label="Attach document"
         >
           📄
+        </button>
+        <input
+          type="file"
+          accept="audio/*"
+          ref={audioInputRef}
+          onChange={handleAudioFileChange}
+          style={{ display: "none" }}
+          data-testid="attach-audio-input"
+        />
+        <button
+          type="button"
+          disabled={streaming}
+          onClick={() => audioInputRef.current?.click()}
+          aria-label="Attach audio"
+        >
+          🎤
         </button>
         <input
           value={input}

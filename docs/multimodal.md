@@ -778,6 +778,31 @@ suite green. The frontend UI's own audio-attachment button (mirroring
 `App.tsx`'s image/document buttons) remains a real, deliberately
 named, deferred gap — not attempted this round.
 
+### The frontend audio-attachment gap, closed in the same session as round 452's document one was
+
+`App.tsx` gained a third attach button (🎤), mirroring the image/
+document ones exactly: an `attachedAudio` state slot, an
+`audioInputRef`, `handleAudioFileChange`, and the WS payload gains
+`audio_base64`/`audio_media_type` alongside the other two when set.
+Restricted to `accept="audio/*"`, matching `handleFileChange`'s own
+restrictive validation (not `handleDocumentFileChange`'s permissive
+one) — the same reasoning `--audio`'s own CLI-side restriction already
+established: an "attach audio" control silently accepting a non-audio
+file would be a surprising, wrong-shaped attachment.
+
+This closes the full CLI → server API → WebSocket → frontend UI →
+TypeScript SDK chain for audio attachment, the identical sequence
+already proven once for documents (rounds 451→452→453), now completed
+for a second modality (454→455→this section) within the same session.
+
+Verified via this project's own established frontend test discipline
+(`vitest`+`jsdom`, deliberately not a live browser session — see the
+port-8000 hazard note in the private session log): 4 new tests
+mirroring the document attachment tests exactly. Genuine
+revert-and-check: reverted, 3 of the 4 failed (the 4th,
+omitted-when-unset, is trivially true either way), restored. Full
+frontend suite green (40 passed, up from 36), `tsc --noEmit` clean.
+
 ## Build it yourself
 
 - Read `tests/conformance/test_degraders.py` — the video degrader's

@@ -24063,3 +24063,36 @@ attachment button (mirroring `App.tsx`'s existing image/document
 buttons) remains a real, deferred gap for a later round.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 456: frontend audio attachment, closing the full CLI->server->UI->SDK chain for a second modality
+
+Direct, same-session follow-up to round 455 -- `App.tsx` gained a
+third attach button (audio), mirroring the image/document ones
+exactly: an `attachedAudio` state slot, an `audioInputRef`,
+`handleAudioFileChange`, and the WS payload gains `audio_base64`/
+`audio_media_type` when set. Restricted to `accept="audio/*"`,
+matching the image input's own restrictive validation (not the
+document input's permissive one) -- the same reasoning `--audio`'s
+own CLI-side restriction already established.
+
+This closes the full CLI -> server API -> WebSocket -> frontend UI ->
+TypeScript SDK chain for audio attachment, the identical sequence
+already proven once for documents (rounds 451-453), now completed for
+a second modality (454-456) within the same session.
+
+Verified via this project's own established frontend test discipline
+(`vitest`+`jsdom`, deliberately not a live browser session given the
+port-8000 hazard already learned this session): 4 new tests mirroring
+the document attachment tests exactly. Genuine revert-and-check:
+reverted, 3 of 4 failed with the exact old behavior (the 4th is
+trivially true either way), restored. Full frontend suite green (40
+passed, up from 36), `tsc --noEmit` clean.
+
+Remembered this round's own lesson from round 453's CI failure:
+`./scripts/build-web.sh` run and `core/sarva/server/static/` staged
+in the SAME commit as the `App.tsx`/`index.css` changes, before
+pushing rather than as a reactive follow-up.
+
+**Next:** continuing the hardening sweep, module by module.
