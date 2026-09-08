@@ -1459,6 +1459,52 @@ or GUI runtime available here — see the grandchild-reaping fix above
 for the same caveat) plus the standalone `log`-crate repro proving the
 no-logger behavior this bug depended on.
 
+**A real gap found live, in a scenario this module's own doc comment had
+already anticipated but only partly closed**: the comment above states
+that when the sidecar fails to bind its port (another `sarva serve`
+already running there), the window "transparently ends up talking to
+whichever process actually holds the port" — a deliberate, accepted
+tradeoff *when that process is a real, compatible sarva-server*. Live
+testing (both a synthetic repro — occupying the port with a plain local
+static-file server — and, separately, an organic collision with an
+unrelated local web app already running on the same default port on the
+test machine) showed the actually-true behavior: the window happily
+connects to whatever answers, shows that content or a permanently blank
+page (if what answers isn't something a browser can render), and gives
+no indication anything is wrong. The `CommandEvent::Terminated` branch
+only ever reached a log line, invisible to anyone who hasn't already
+opened the app's log file.
+
+Fixed with a real HTTP health check (not just "did the sidecar's exit
+code look bad"), the only way to actually tell the two cases apart
+without regressing the deliberate friendly-coexistence one: if
+something on the port answers `/health` correctly after the sidecar
+exits, the UI is fine and this stays silent; anything else shows a
+native error dialog explaining the backend didn't start and naming the
+likely cause. Guarded against firing on an ordinary, intentional
+shutdown (window close, SIGINT/SIGTERM) by checking the same
+`SidecarHandle` state those paths already clear before killing the
+sidecar — an unguarded version would show a false-alarm "backend
+unavailable" dialog on every normal quit, since a health check
+performed right after deliberately killing a healthy server obviously
+fails.
+
+Verified with a genuine revert-and-check on the health-check logic (3
+new Rust unit tests, each against its own OS-assigned ephemeral port —
+never port 8000 itself, since a live test against that specific port
+risks colliding with whatever a real machine happens to already be
+running there, exactly the failure mode being tested) — reverted, all
+three failed to compile (the function didn't exist), restored, all
+three passed. `cargo clippy --all-targets` and `cargo test --lib` both
+clean. **What this does NOT verify**: whether the native error dialog
+itself visually renders in every environment — this session's own
+sandboxed test setup could not confirm the dialog actually appearing on
+screen despite the underlying logic being correct and the API call
+matching the dialog plugin's own documented, main-thread-dispatching
+implementation; an honest gap in the same spirit as this file's other
+"verified by `cargo check`, not a live GUI run" caveats above, not a
+claim that it's confirmed working end-to-end.
+
 Real, working cross-platform installers do exist:
 `.github/workflows/release-bundle.yml` ("Release bundle (unsigned)")
 builds `.dmg` (macOS), `.msi`/`.exe` (Windows), and `.AppImage`/`.deb`

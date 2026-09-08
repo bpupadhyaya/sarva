@@ -67,9 +67,63 @@
 
 use std::sync::Mutex;
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_shell::{process::CommandChild, process::CommandEvent, ShellExt};
 
 struct SidecarHandle(Mutex<Option<CommandChild>>);
+
+// A real gap found by actually occupying port 8000 with an unrelated local
+// server (not another `sarva serve` -- this module's own doc comment above
+// already, deliberately, accepts that friendlier case: the UI just ends up
+// talking to the pre-existing compatible instance) before launching `tauri
+// dev`: the sidecar fails to bind and exits in well under a second, exactly
+// as documented, but the WebView still successfully connects to port 8000 --
+// there IS something listening, just not anything that serves the real API
+// or a working bundle. Confirmed live with a plain `python3 -m http.server
+// 8000` standing in for "some other unrelated dev tool defaulted to the
+// same port" (extremely plausible: 8000 is Python's own `http.server`
+// default):
+// the window loaded a raw, un-transpiled `index.html` referencing
+// `/src/main.tsx`, which a browser can't execute, leaving a permanently
+// blank white window with zero indication anything went wrong -- the
+// `CommandEvent::Terminated` branch below only ever reached `log::warn!`,
+// invisible to anyone who didn't already know to open the app's log file.
+// A real HTTP health check (not just "did the sidecar's own exit code look
+// bad") is what actually distinguishes the two cases without regressing the
+// documented friendly-coexistence one: if something on port 8000 answers
+// `/health` correctly, the UI is fine and this stays silent; only an actual
+// dead end shows the user a real, actionable native dialog instead of an
+// unexplained blank window.
+fn sarva_health_check_ok() -> bool {
+    sarva_health_check_at("127.0.0.1:8000")
+}
+
+// Takes the address as a parameter (rather than hardcoding it inline) purely
+// so the test below can point it at a throwaway loopback listener instead of
+// the real port 8000 -- a live end-to-end check against 8000 itself risks
+// colliding with whatever else might already be bound there on a real
+// machine, the exact failure mode this function exists to detect in the
+// first place.
+fn sarva_health_check_at(addr: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let Ok(mut stream) = TcpStream::connect(addr) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    response.starts_with("HTTP/1.1 200") && response.contains("\"status\":\"ok\"")
+}
 
 fn kill_sidecar(child: CommandChild) {
     #[cfg(unix)]
@@ -108,6 +162,7 @@ fn kill_sidecar(child: CommandChild) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // A real bug found by actually checking what happens with no
             // logger registered (a standalone `log`-crate repro, not just
@@ -170,6 +225,15 @@ pub fn run() {
                 .spawn()
                 .expect("failed to spawn sarva-server sidecar");
 
+            // Managed here, before the sidecar-event task below, rather than
+            // after it: the Terminated branch reads this same state to tell
+            // an unexpected crash apart from our own intentional shutdown
+            // (`kill_sidecar`'s callers `.take()` it right before killing),
+            // so it must already be `Some` by the time any real event can
+            // possibly arrive.
+            app.manage(SidecarHandle(Mutex::new(Some(child))));
+
+            let dialog_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     match event {
@@ -181,13 +245,41 @@ pub fn run() {
                         }
                         CommandEvent::Terminated(payload) => {
                             log::warn!("sarva-server exited: {:?}", payload.code);
+                            // An intentional shutdown (window close, SIGINT/SIGTERM)
+                            // already `.take()`s the handle right before calling
+                            // `kill_sidecar` -- if it's gone, this Terminated event
+                            // is that expected kill, not a real crash, and a
+                            // health check would obviously fail (we just killed
+                            // it) and show a false-alarm dialog on ordinary quit.
+                            let intentional_shutdown = dialog_app_handle
+                                .try_state::<SidecarHandle>()
+                                .map(|s| s.0.lock().unwrap().is_none())
+                                .unwrap_or(false);
+                            if !intentional_shutdown && !sarva_health_check_ok() {
+                                // `.show()`, not `.blocking_show()`: the
+                                // plugin's own simplest documented form,
+                                // callable directly with no extra thread of
+                                // our own -- there's no result here worth
+                                // blocking on, just a fire-and-forget
+                                // notification.
+                                dialog_app_handle
+                                    .dialog()
+                                    .message(
+                                        "Sarva's local backend did not start correctly \
+                                         (it may have crashed, or port 8000 is already \
+                                         used by something else). The window may not \
+                                         work until this is resolved -- free up port \
+                                         8000 or check the app log, then restart Sarva.",
+                                    )
+                                    .title("Sarva backend unavailable")
+                                    .kind(MessageDialogKind::Error)
+                                    .show(|_| {});
+                            }
                         }
                         _ => {}
                     }
                 }
             });
-
-            app.manage(SidecarHandle(Mutex::new(Some(child))));
 
             #[cfg(unix)]
             {
@@ -223,4 +315,58 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sarva_health_check_at;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // Each test binds its own ephemeral port (`:0`, OS-assigned, never 8000)
+    // specifically to avoid the real collision this function was written to
+    // detect -- confirmed live once already that testing against the real
+    // port 8000 is not safe to repeat on a machine that might have something
+    // else genuinely running there.
+    fn serve_once(response: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_real_sarva_health_endpoint_is_recognized_as_healthy() {
+        let addr = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n\
+             {\"status\":\"ok\"}",
+        );
+        assert!(sarva_health_check_at(&addr));
+    }
+
+    #[test]
+    fn an_unrelated_service_on_the_same_port_is_recognized_as_unhealthy() {
+        // The exact shape of the real bug: some other, unrelated local
+        // service (a plain static file server, in the live repro) answers
+        // on the port instead of a real sarva-server, and its response
+        // doesn't match the health check.
+        let addr = serve_once(
+            "HTTP/1.0 404 File not found\r\nConnection: close\r\n\r\n<html>not found</html>",
+        );
+        assert!(!sarva_health_check_at(&addr));
+    }
+
+    #[test]
+    fn nothing_listening_at_all_is_recognized_as_unhealthy() {
+        // Port 0 never accepts a real connection -- the plain "nothing
+        // answered" case, e.g. the sidecar crashed and no other process
+        // happens to be squatting on the port either.
+        assert!(!sarva_health_check_at("127.0.0.1:0"));
+    }
 }

@@ -23746,3 +23746,50 @@ clean. `docs/agent-loop.md`'s interrupted-run section extended directly
 with this follow-up.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 448: the desktop app silently showed unrelated content (or a blank window) when its sidecar couldn't bind its port
+
+A live-testing follow-up to round 447, going one surface further: the
+Tauri desktop app (`apps/desktop/src-tauri`) has its own equivalent of
+the CLI's now-fixed silent-failure shape. Live-tested by actually
+running `npx tauri dev` while something else already occupied port
+8000 -- first a synthetic repro (a plain local static-file server
+standing in for "some other unrelated dev tool defaulted to the same
+port"), then, separately, an organic real-world instance of the exact
+same collision against an unrelated local web app already running on
+the test machine. In both cases the window connected to whatever
+answered on the port and showed that content (or a blank page, when
+what answered wasn't something a browser could render) with zero
+indication the actual Sarva backend never started.
+
+Fixed with a real HTTP health check gating a native error dialog: if
+something on the port answers `/health` correctly after the sidecar
+exits, the window is fine and nothing fires (preserving the module's
+own deliberate "another real sarva serve instance is fine to share the
+port with" design); anything else shows an explicit "Sarva backend
+unavailable" dialog. Guarded against false-firing on an ordinary window
+close or SIGINT/SIGTERM by checking the same shared-state flag those
+paths already clear before killing the sidecar.
+
+Verified with a genuine revert-and-check on the health-check logic: 3
+new Rust unit tests, each against its own OS-assigned ephemeral port
+rather than port 8000 itself (a live test against that specific port
+risks colliding with whatever a real machine already has running
+there -- learned directly from the organic collision above). Reverted,
+all three failed to compile, restored, all three passed. `cargo clippy
+--all-targets` and `cargo test --lib` both clean. Full Python suite
+reconfirmed unaffected (955 passed, 1 pre-existing unrelated failure).
+
+**Honestly scoped, not claimed further than verified**: whether the
+native dialog itself visually renders could not be confirmed in this
+session's sandboxed environment, despite the health-check logic being
+correct and the dialog API call matching the plugin's own documented
+main-thread-dispatching design -- the same "verified by compiling and
+targeted tests, not a live GUI run" limit this file already applies to
+other `src-tauri/` work (no Windows machine, no code-signing
+verification). `docs/packaging.md` extended with the same honest
+accounting.
+
+**Next:** continuing the hardening sweep, module by module.
