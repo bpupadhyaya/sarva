@@ -86,6 +86,42 @@ first place, now ending with `run_done`/`state=interrupted` on disk. 1
 new test, 966 → 967 Python tests. Full suite run three times in a row
 (cancellation-adjacent code) with zero flakiness across all three runs.
 
+### The transcript now ends cleanly on a real interrupt — but the terminal itself said nothing about it
+
+A follow-up to the fix above, found by going one step further than the
+existing test's simulated `.aclose()`: sending a genuine `SIGINT` to a
+real, live `sarva run` process mid-stream (auto-approving tools so it
+was actually mid-generation, not blocked on a confirmation prompt).
+The transcript itself behaved exactly as designed — it landed a proper
+`run_done`/`state=interrupted` line, confirming the fix above holds
+under a real interrupt propagating as an exception out of `asyncio.run()`,
+not just a directly-invoked `aclose()`. But the terminal the user was
+actually looking at printed nothing at all: no message, no traceback,
+just silent return to the shell prompt with exit code 130.
+
+The CLI framework's own usual conversion of a `KeyboardInterrupt` into
+a friendly "Aborted!" message never got a chance to run here — confirmed
+by reproducing the identical silent exit in a bare, Sarva-free Typer
+app with nothing but a `while True: await asyncio.sleep(...)` body. So
+each CLI command's own `asyncio.run(...)` call is now wrapped in a
+small helper (`_run_asyncio_command`) that catches `KeyboardInterrupt`
+itself and prints an explicit "Interrupted." before exiting — every
+command that drives the agent loop (`chat`, `run`, `eval`, `distill`,
+`sessions clear`) goes through the same helper now, so a Ctrl-C gives
+the same clear feedback everywhere instead of only at a confirmation
+prompt (where Click's own EOF/interrupt handling already covered it).
+
+Verified with a genuine revert-and-check: reverted, the new test
+(swapping in a stand-in that raises `KeyboardInterrupt` in place of a
+real provider call) failed with empty output instead of "Interrupted.",
+restored — then re-verified live against a real `sarva run` process on
+a real Ollama model, sending an actual `SIGINT` mid-stream. 1 new test.
+Full suite reconfirmed green (955 passed, 1 skipped, 11 deselected — one
+unrelated, pre-existing environment-dependent test now fails only
+because this session separately installed a real container runtime
+that its own comment assumes is absent), `ruff check`/`ruff format
+--check` both clean.
+
 ### Every run's transcript directory used to live forever — a real resource leak in any long-running `sarva serve`
 
 A round-43 sweep, looking specifically for "resources that accumulate

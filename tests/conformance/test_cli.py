@@ -116,6 +116,31 @@ def test_run_with_an_invalid_session_name_fails_cleanly_instead_of_a_raw_traceba
     assert "Traceback" not in result.stdout
 
 
+def test_chat_interrupted_mid_run_prints_a_clean_message_not_silence(monkeypatch):
+    # A real bug found by sending a live SIGINT to a running `sarva run`
+    # mid-stream: the transcript already lands a proper terminal
+    # run_done/interrupted event (loop.py's own finally block), but the
+    # terminal itself showed nothing at all -- Click's usual
+    # KeyboardInterrupt-to-"Aborted!" conversion never got a chance to
+    # run (confirmed live with a bare, sarva-free Typer app reproducing
+    # the identical silent exit), so `_run_asyncio_command` now catches
+    # it itself. `_chat` is swapped for a stand-in that raises
+    # KeyboardInterrupt the same way a real SIGINT would inside the
+    # actual provider call.
+    _clear_provider_env(monkeypatch)
+
+    async def _boom(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_module, "_chat", _boom)
+
+    result = runner.invoke(app, ["chat", "hi"])
+
+    assert result.exit_code == 130
+    assert "Interrupted" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_sessions_clear_with_an_invalid_name_fails_cleanly(monkeypatch, tmp_path):
     _isolate_sessions(monkeypatch, tmp_path)
 

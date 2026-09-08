@@ -23710,3 +23710,39 @@ skipped, 11 deselected), `ruff check`/`ruff format --check` both clean.
 second, more impactful instance.
 
 **Next:** continuing the hardening sweep, module by module.
+
+---
+
+## Round 447: `sarva run`/`chat`/`eval`/`distill`/`sessions clear` printed nothing at all on a real Ctrl-C mid-run
+
+Found by going one step further than the existing async-generator-close
+test for the interrupted-run transcript fix: sending a genuine `SIGINT`
+to a real, live `sarva run` process actively mid-stream (not blocked on
+a confirmation prompt). The on-disk transcript behaved exactly as
+designed, ending in a proper `run_done`/`state=interrupted` line. But
+the terminal itself printed nothing at all -- no message, no traceback,
+silent return to the shell prompt with exit code 130. The CLI
+framework's own usual conversion of an interrupt into a friendly
+message never got a chance to run here, confirmed by reproducing the
+identical silent exit in a bare, Sarva-free reproduction with the same
+CLI framework and nothing but a sleep loop.
+
+Fixed by wrapping every command's own `asyncio.run(...)` call in a
+small helper that catches the interrupt itself and prints an explicit
+"Interrupted." before exiting -- `chat`, `run`, `eval`, `distill`, and
+`sessions clear` all go through it now, so a Ctrl-C gives the same
+clear feedback everywhere instead of only at a confirmation prompt.
+
+Verified with a genuine revert-and-check: reverted, the new test
+(swapping in a stand-in that raises the interrupt in place of a real
+provider call) failed with empty output instead of "Interrupted.",
+restored -- then re-verified live against a real `sarva run` process on
+a real Ollama model, sending an actual `SIGINT` mid-stream. 1 new test.
+Full suite reconfirmed green (955 passed, 1 skipped, 11 deselected --
+one unrelated, pre-existing environment-dependent test now fails only
+because this session separately installed a real container runtime its
+own comment assumes is absent), `ruff check`/`ruff format --check` both
+clean. `docs/agent-loop.md`'s interrupted-run section extended directly
+with this follow-up.
+
+**Next:** continuing the hardening sweep, module by module.

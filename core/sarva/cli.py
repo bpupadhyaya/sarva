@@ -39,6 +39,28 @@ app.add_typer(config_app, name="config")
 console = Console()
 
 
+def _run_asyncio_command(coro: Any) -> None:
+    # A real bug found by actually sending a live SIGINT to a running
+    # `sarva run` mid-stream (not just calling the async generator's own
+    # aclose(), which is all the existing test suite exercised): the
+    # in-flight run's transcript.jsonl already lands a proper terminal
+    # run_done/interrupted event on disk (loop.py's run() finally block,
+    # BUILD-JOURNAL round 444) -- but the terminal itself showed nothing
+    # at all. Click's own KeyboardInterrupt handling (core.py: `except
+    # (EOFError, KeyboardInterrupt): raise Abort()`, printing "Aborted!")
+    # never gets a chance to run here -- confirmed live with a bare,
+    # sarva-free Typer app reproducing the identical silent exit -- so an
+    # uncaught KeyboardInterrupt from inside `asyncio.run()` has to be
+    # caught in this file's own command bodies, not left to Click.
+    # Confirmed live this actually closes the gap: same process, same
+    # SIGINT, "Interrupted." now prints and the exit code is unchanged.
+    try:
+        asyncio.run(coro)
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted.[/yellow]")
+        raise typer.Exit(130) from None
+
+
 def _build_router():
     # A real bug found by actually corrupting ~/.sarva/config.json and
     # running any command: get_env() backs nearly every provider-
@@ -217,7 +239,7 @@ def chat(
     ),
 ) -> None:
     """One-shot chat — no tools, single turn."""
-    asyncio.run(_chat(message, image, model, session, verify))
+    _run_asyncio_command(_chat(message, image, model, session, verify))
 
 
 async def _chat(
@@ -381,7 +403,7 @@ def run(
     ),
 ) -> None:
     """Run the agent loop with built-in tools (files, shell) plus any MCP servers."""
-    asyncio.run(
+    _run_asyncio_command(
         _run(task, workdir, image, model, auto, session, mcp_server, mcp_header, mcp_env, verify)
     )
 
@@ -762,7 +784,7 @@ def eval_cmd(
 ) -> None:
     """Grade available models against the bundled benchmark — the same
     yardstick for every model, whichever provider it comes from."""
-    asyncio.run(_eval(model))
+    _run_asyncio_command(_eval(model))
 
 
 async def _eval(model_filter: str | None) -> None:
@@ -806,7 +828,7 @@ def distill_cmd(
 ) -> None:
     """Generate (prompt, completion) pairs from a real model — frontier-
     as-teacher synthetic data (spec §3.6c) for foundry SFT training."""
-    asyncio.run(_distill(prompts_file, model, out, system))
+    _run_asyncio_command(_distill(prompts_file, model, out, system))
 
 
 async def _distill(prompts_file: Path, model: str, out: Path, system: str | None) -> None:
@@ -921,7 +943,7 @@ def sessions_list() -> None:
 @sessions_app.command("clear")
 def sessions_clear(name: str = typer.Argument(..., help="Session name to delete.")) -> None:
     """Delete a saved session."""
-    asyncio.run(_sessions_clear(name))
+    _run_asyncio_command(_sessions_clear(name))
 
 
 async def _sessions_clear(name: str) -> None:
