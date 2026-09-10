@@ -17,7 +17,22 @@ routing:
   # currently cannot view or analyze images directly" (qwen3:8b after
   # degradation) to a real, correct visual description once moondream
   # was actually in reach.
-  main: [claude-opus-4-8, "ollama/qwen3:8b", "ollama/moondream:latest", mock]
+  # gpt-4o-mini/gemini-2.0-flash sit right after claude-opus-4-8, ahead of
+  # the free local Ollama models -- matching the exact precedent this
+  # chain already set for claude-opus-4-8 itself (any configured paid
+  # provider outranks the free local fallback here; this fix doesn't
+  # relitigate that existing ordering, just extends it to the two
+  # providers that previously had zero registry entries to ever reach --
+  # see models.yaml's own comment on that gap).
+  main:
+    [
+      claude-opus-4-8,
+      gpt-4o-mini,
+      gemini-2.0-flash,
+      "ollama/qwen3:8b",
+      "ollama/moondream:latest",
+      mock,
+    ]
   subtask: [claude-haiku-4-5, "ollama/qwen3:8b", mock]
   escalation: [claude-fable-5, claude-opus-4-8, mock]
   vision: [claude-opus-4-8, mock]

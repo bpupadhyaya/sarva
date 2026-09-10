@@ -1555,6 +1555,62 @@ Verified with a genuine revert-and-check: reverted just
 "no wire-format mapping exists for it yet" error, restored. Full suite
 green (990 passed).
 
+### The OpenAI and Google adapters were fully built and tested, but had zero entries in the registry that actually decides what gets routed to
+
+The single biggest reachability gap found this session, by the same
+"sibling has the fix, this doesn't" lens applied one level up from a
+single content-block type to an entire provider tier: `OpenAIProvider`/
+`GoogleProvider` have been fully built and unit-tested since early in
+this project (real streaming, tool-use, and error-handling fixes — see
+the OpenAI/Gemini sections above), and `runtime.py`'s own
+`build_providers()`/`run_diagnostics()` have always gated availability
+on `OPENAI_API_KEY`/`GEMINI_API_KEY` being set. But `build_router()`
+only ever loads candidate models *from `models.yaml`* — and until now,
+not one model in that file declared `provider: openai` or `provider:
+google`. Confirmed live before the fix: `available |= {m.id for m in
+registry.all() if m.provider == "openai"}` (`runtime.py`) computed an
+**empty set** regardless of whether a real key was configured, so
+`router.pick()` never even considered an OpenAI/Google model — a real,
+valid `OPENAI_API_KEY`/`GEMINI_API_KEY` produced exactly the same
+routing as no key at all. `sarva doctor`'s own "OpenAI API key:
+OPENAI_API_KEY is set" line was true but materially misleading: a
+configured key that could never actually be routed to.
+
+Fixed by adding one real model entry per provider — `gpt-4o-mini`
+(OpenAI) and `gemini-2.0-flash` (Google), both already this project's
+own `tests/live/test_live_providers.py` live-test defaults, not fresh
+guesses — to `models.yaml`, and threading both into `routing.yaml`'s
+`main` chain right after `claude-opus-4-8` (the same precedent that
+chain already set: any configured paid provider outranks the free
+local Ollama fallback here). `modalities_in` for each entry claims only
+what that adapter's own translation function can *actually* send today
+— `[text, image]` for OpenAI (no `DocumentBlock` branch exists there),
+`[text, image, video]` for Google (which does have a real, tested
+`VideoBlock` branch) — deliberately applying the exact "claim only what
+the adapter code backs up" discipline the Anthropic document-block fix
+(the section above) had to learn the hard way, from the start this
+time instead of repeating that gap for two new providers.
+
+**Honestly scoped, not silently assumed permanently current:** neither
+entry's id/pricing/context-window has been verified against a live key
+in this environment (see each adapter's own "not yet exercised against
+a live API key" module-docstring caveat) — a real, dated 2026-09
+snapshot, named in the registry file's own comment for a future
+maintainer with a real key to confirm (and to add a flagship tier
+alongside the mini/flash entries shipped here) rather than silently
+assumed correct forever.
+
+2 new tests (`test_runtime.py`) prove the actual fix, not just that the
+YAML parses: with a real key set and Ollama unreachable, `router.pick()`
+now genuinely resolves to `gpt-4o-mini`/`gemini-2.0-flash` instead of
+falling through to mock. Verified with a genuine revert-and-check:
+reverted just `models.yaml`/`routing.yaml`, both new tests failed with
+`router.available == {"mock"}` — the exact old, broken behavior —
+restored. Verified live end to end via the real CLI too: `sarva models`
+with a fake `OPENAI_API_KEY` set shows `gpt-4o-mini` as `[x]`
+available for the first time; before this fix, the row didn't exist in
+the output at all. Full suite green (992 passed).
+
 ## Build it yourself
 
 - Run `sarva models` to see the registry as loaded — which ids exist,

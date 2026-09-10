@@ -38,6 +38,87 @@ models:
       max_output: 64000
     cost: { input_per_mtok: 1.0, output_per_mtok: 5.0 }
 
+  - id: gpt-4o-mini
+    provider: openai
+    display_name: GPT-4o mini
+    capabilities:
+      # A real gap found by a fresh-eyes sweep: OpenAIProvider/GoogleProvider
+      # have been fully built and unit-tested since early in this project
+      # (real streaming, tool-use, error-handling fixes -- see
+      # docs/providers.md), and runtime.py's own build_providers()/
+      # run_diagnostics() have always gated availability on OPENAI_API_KEY/
+      # GEMINI_API_KEY being set -- but build_router() only ever loads
+      # models FROM THIS FILE, and neither provider had a single entry
+      # here. Confirmed live: `available |= {m.id for m in registry.all()
+      # if m.provider == "openai"}` (runtime.py) computed an empty set
+      # regardless of whether a real key was configured, since no model
+      # anywhere in the registry declared `provider: openai` -- meaning a
+      # user with a real, valid OPENAI_API_KEY/GEMINI_API_KEY configured
+      # got exactly the same routing as no key at all. `sarva doctor`'s own
+      # "OpenAI API key: OPENAI_API_KEY is set" line was true but
+      # materially misleading -- a configured key that could never
+      # actually be routed to.
+      #
+      # modalities_in matches what openai_provider.py's own translation
+      # function can ACTUALLY send today (text + image only -- no
+      # DocumentBlock branch exists there), not what OpenAI's platform
+      # supports in the abstract -- the identical "claim only what the
+      # adapter code backs up" discipline the Anthropic document-block fix
+      # (round 462) established, applied here from the start rather than
+      # repeating that gap for a new provider.
+      #
+      # id/pricing/context window: a real, named snapshot of this
+      # project's own knowledge as of 2026-09 (gpt-4o-mini was already
+      # this project's own `OPENAI_TEST_MODEL` live-test default in
+      # tests/live/test_live_providers.py, not a fresh guess) -- NOT
+      # verified against a live API key in this environment (see this
+      # provider's own module docstring). Flagged honestly, the same
+      # "not yet exercised against a live API key" caveat every adapter
+      # in this file already carries: a maintainer with a real key should
+      # confirm this entry (and add a flagship OpenAI tier alongside it)
+      # before fully trusting it, rather than this being silently assumed
+      # permanently current.
+      modalities_in: [text, image]
+      modalities_out: [text]
+      tool_use: true
+      thinking: false
+      context_window: 128000
+      max_output: 16384
+    cost: { input_per_mtok: 0.15, output_per_mtok: 0.6 }
+
+  - id: gemini-2.0-flash
+    provider: google
+    display_name: Gemini 2.0 Flash
+    capabilities:
+      # The identical registry gap gpt-4o-mini above closes, one
+      # provider over -- see that entry's own comment for the full story
+      # (runtime.py's availability check silently resolved to an empty
+      # set for `provider: google` too, regardless of a real
+      # GEMINI_API_KEY/GOOGLE_API_KEY being configured).
+      #
+      # modalities_in includes `video`, not just `image`: unlike the
+      # OpenAI entry above, google_provider.py's own translation function
+      # already has a real, tested VideoBlock branch (the identical
+      # inline_data/Blob shape as images -- Gemini's native video
+      # understanding, see docs/providers.md's "Video-in" chapter) --
+      # `document` is still correctly left out, since that adapter has no
+      # DocumentBlock branch either, the same "claim only what the code
+      # backs up" discipline as the OpenAI entry.
+      #
+      # id/pricing/context window: gemini-2.0-flash was already this
+      # project's own `GOOGLE_TEST_MODEL` live-test default in
+      # tests/live/test_live_providers.py -- a real, named 2026-09
+      # snapshot, NOT verified against a live API key in this environment
+      # (see this provider's own module docstring). Same honest,
+      # named-for-a-future-maintainer caveat as the OpenAI entry above.
+      modalities_in: [text, image, video]
+      modalities_out: [text]
+      tool_use: true
+      thinking: false
+      context_window: 1048576
+      max_output: 8192
+    cost: { input_per_mtok: 0.1, output_per_mtok: 0.4 }
+
   - id: ollama/qwen3:8b
     provider: ollama
     display_name: Qwen 3 8B (local)

@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 
 import sarva.runtime as runtime
+from sarva.multimodal.content import Modality
+from sarva.providers.registry import TaskClass
 
 
 def _clear_frontier_keys(monkeypatch) -> None:
@@ -64,6 +66,45 @@ def test_google_key_respects_an_explicitly_cleared_gemini_api_key_over_a_stale_g
     # unset (not just emptied) still falls back to GOOGLE_API_KEY.
     monkeypatch.delenv("GEMINI_API_KEY")
     assert runtime._google_key() == "stale-google-key-should-not-be-used"
+
+
+def test_openai_key_resolves_to_a_real_routable_model_not_an_empty_set(monkeypatch):
+    # A real gap found by a fresh-eyes sweep: OpenAIProvider has been
+    # fully built and unit-tested since early in this project, and
+    # build_providers()/run_diagnostics() have always gated availability
+    # on OPENAI_API_KEY being set -- but build_router() only ever loads
+    # models from models.yaml, and no model there ever declared
+    # `provider: openai` until this fix. Confirmed live before the fix:
+    # `available |= {m.id for m in registry.all() if m.provider ==
+    # "openai"}` computed an empty set regardless of a real key being
+    # configured -- `router.pick(MAIN, needs={TEXT})` fell straight
+    # through to `ollama/qwen3:8b`/mock, never actually reaching OpenAI,
+    # even with a genuinely valid key set. `sarva doctor`'s own "OpenAI
+    # API key: OPENAI_API_KEY is set" line was true but materially
+    # misleading -- a configured key that could never route to anything.
+    _clear_frontier_keys(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: False)
+
+    router = runtime.build_router()
+
+    assert "gpt-4o-mini" in router.available
+    picked = router.pick(TaskClass.MAIN, needs={Modality.TEXT})
+    assert picked.id == "gpt-4o-mini"
+
+
+def test_google_key_resolves_to_a_real_routable_model_not_an_empty_set(monkeypatch):
+    # The identical registry gap the OpenAI test above closes, one
+    # provider over -- see that test's own comment for the full story.
+    _clear_frontier_keys(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-not-real")
+    monkeypatch.setattr(runtime, "ollama_reachable", lambda *a, **kw: False)
+
+    router = runtime.build_router()
+
+    assert "gemini-2.0-flash" in router.available
+    picked = router.pick(TaskClass.MAIN, needs={Modality.TEXT})
+    assert picked.id == "gemini-2.0-flash"
 
 
 def test_ollama_model_is_unavailable_when_reachable_but_not_the_pulled_tag(monkeypatch):

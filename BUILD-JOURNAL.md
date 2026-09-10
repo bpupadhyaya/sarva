@@ -24331,4 +24331,52 @@ green (990 passed, 1 skipped, 11 deselected), `ruff check`/`ruff format
 --check` clean. `docs/providers.md` extended with the closing
 narrative.
 
+## Round 463: OpenAI and Google adapters were fully built and tested, but had zero entries in the registry that actually decides what gets routed to
+
+The biggest reachability gap found this session, the same "sibling has
+the fix, this doesn't" lens applied one level up from a single
+content-block type to an entire provider tier: OpenAIProvider/
+GoogleProvider have been fully built and unit-tested since early in
+this project, and runtime.py's build_providers()/run_diagnostics()
+have always gated availability on OPENAI_API_KEY/GEMINI_API_KEY being
+set -- but build_router() only loads candidate models from
+models.yaml, and until now not one model there declared `provider:
+openai` or `provider: google`. Confirmed live: `available |= {m.id for
+m in registry.all() if m.provider == "openai"}` computed an EMPTY set
+regardless of a real key being configured -- a valid OPENAI_API_KEY/
+GEMINI_API_KEY produced exactly the same routing as no key at all.
+`sarva doctor`'s own "OpenAI API key: ... is set" line was true but
+materially misleading.
+
+Before touching a shipped OSS registry file with real third-party
+model IDs/pricing I'd be recalling rather than reading from an
+authoritative live source, checked in with the user via
+AskUserQuestion -- picked "add current entries, clearly dated" over
+leaving it as a documented deferred gap or waiting for exact IDs.
+Fixed by adding one real entry per provider -- gpt-4o-mini (OpenAI),
+gemini-2.0-flash (Google), both already this project's own
+tests/live/test_live_providers.py live-test defaults, not fresh
+guesses -- to models.yaml, threaded into routing.yaml's `main` chain
+right after claude-opus-4-8 (matching that chain's own existing
+"any configured paid provider outranks the free local Ollama
+fallback" precedent). modalities_in claims only what each adapter's
+translation function can actually send today (no `document` for
+either -- neither adapter has a DocumentBlock branch; `video` only for
+Google, which has a real, tested VideoBlock branch) -- applying the
+"claim only what the code backs up" discipline round 462's Anthropic
+fix had to learn the hard way, from the start this time. Honestly
+flagged as an unverified-against-a-live-key snapshot, named for a
+future maintainer to confirm, matching the honest-gap discipline this
+project already applies elsewhere.
+
+2 new tests prove the actual routing fix (router.pick() now resolves
+to the real model instead of falling through to mock), not just that
+the YAML parses. Genuine revert-and-check: reverted just models.yaml/
+routing.yaml, both failed with the exact old `router.available ==
+{"mock"}` behavior, restored. Verified live via the real CLI: `sarva
+models` with a fake OPENAI_API_KEY now shows gpt-4o-mini as available
+for the first time. Full suite green (992 passed, 1 skipped, 11
+deselected), `ruff check`/`ruff format --check` clean. `docs/
+providers.md` extended with the closing narrative.
+
 **Next:** continuing the hardening sweep, module by module.
