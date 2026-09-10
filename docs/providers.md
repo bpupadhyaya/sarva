@@ -1591,14 +1591,22 @@ the adapter code backs up" discipline the Anthropic document-block fix
 (the section above) had to learn the hard way, from the start this
 time instead of repeating that gap for two new providers.
 
-**Honestly scoped, not silently assumed permanently current:** neither
-entry's id/pricing/context-window has been verified against a live key
-in this environment (see each adapter's own "not yet exercised against
-a live API key" module-docstring caveat) — a real, dated 2026-09
-snapshot, named in the registry file's own comment for a future
-maintainer with a real key to confirm (and to add a flagship tier
-alongside the mini/flash entries shipped here) rather than silently
-assumed correct forever.
+**Honestly scoped, not silently assumed permanently current — and
+partially strengthened by a genuine live check immediately after
+shipping.** Neither entry's pricing/context-window has been verified
+against a real, successful response in this environment (a real key
+would be needed to check actual usage/cost fields against the claimed
+numbers) — still a real, dated 2026-09 snapshot, named in the registry
+file's own comment for a future maintainer to confirm. But the model
+*id* strings themselves are no longer an open question: `sarva chat
+--model gpt-4o-mini "hello"` and `--model gemini-2.0-flash "hello"`,
+run with deliberately invalid keys, both reached the real production
+APIs and came back with a real, provider-issued "invalid API key"
+error — not a "model not found"/404-shaped error, which is exactly
+what an actually-stale or invented model id would have produced
+instead. Confirms both ids are genuinely live, current, and correctly
+spelled on the real APIs, even though pricing/capabilities remain an
+honest, named gap for a real key to close.
 
 2 new tests (`test_runtime.py`) prove the actual fix, not just that the
 YAML parses: with a real key set and Ollama unreachable, `router.pick()`

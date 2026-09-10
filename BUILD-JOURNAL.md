@@ -24402,4 +24402,21 @@ each had a now-stale "deliberately not adding registry entries" claim
 left uncorrected from before round 463. Full suite green (993 passed, 1
 skipped, 11 deselected), `ruff check`/`ruff format --check` clean.
 
+## Round 465: round 463's new model ids live-confirmed genuinely current, not stale guesses
+
+A follow-up verification, no code changed: round 463 added
+`gpt-4o-mini`/`gemini-2.0-flash` to `models.yaml` as a named, honest
+"2026-09 snapshot, not verified against a live key" gap. Closed part of
+that gap for real: `sarva chat --model gpt-4o-mini "hello"` and
+`--model gemini-2.0-flash "hello"`, run with deliberately invalid keys,
+both reached the real production APIs and came back with a genuine
+provider-issued "invalid API key" error -- not a "model not found"
+error, which is exactly what a stale or invented model id would have
+produced instead. Confirms both ids are genuinely live and correctly
+spelled on the real APIs today. Pricing/context-window numbers remain
+an honest, still-open gap (checking those needs a real successful
+response, not just an auth failure) -- `docs/providers.md` updated to
+distinguish what's now confirmed from what's still open, rather than
+leaving the original blanket "unverified" caveat stale.
+
 **Next:** continuing the hardening sweep, module by module.
