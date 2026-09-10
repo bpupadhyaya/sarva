@@ -24379,4 +24379,27 @@ for the first time. Full suite green (992 passed, 1 skipped, 11
 deselected), `ruff check`/`ruff format --check` clean. `docs/
 providers.md` extended with the closing narrative.
 
+## Round 464: Gemini's tool-result handling had the identical image/video asymmetry the Anthropic document fix (round 462) had
+
+A direct follow-up found while updating google_provider.py's own module
+docstring to reflect round 463's registry fix (the docstring used to
+say "no entries added to models.yaml," which round 463 made stale the
+moment it shipped gemini-2.0-flash): the top-level translation loop
+already sends a VideoBlock to Gemini via inline_data/Blob, but the
+nested tool-result loop only ever matched ImageBlock, raising "no
+wire-format mapping" for a VideoBlock inside a tool result -- even
+though types.FunctionResponsePart.from_bytes (the exact call the image
+case already uses) is genuinely mime-type-agnostic, confirmed by
+reading its own source directly.
+
+Fixed by widening the existing isinstance(c, ImageBlock) branch to
+isinstance(c, ImageBlock | VideoBlock) -- same body, from_bytes needed
+no per-type handling. 1 new test mirroring the existing image test.
+Genuine revert-and-check: reverted just google_provider.py, the new
+test failed with the exact old error, restored. Both openai_provider.py
+and google_provider.py module docstrings corrected in the same round --
+each had a now-stale "deliberately not adding registry entries" claim
+left uncorrected from before round 463. Full suite green (993 passed, 1
+skipped, 11 deselected), `ruff check`/`ruff format --check` clean.
+
 **Next:** continuing the hardening sweep, module by module.

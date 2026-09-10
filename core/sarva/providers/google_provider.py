@@ -42,13 +42,20 @@ long video would need Gemini's separate Files API (upload once,
 reference by URI), left as real, separate, deferred follow-up rather
 than silently mishandled here.
 
-Same deliberate scope boundary as openai_provider.py: no entries added
-to `providers/data/models.yaml`. That file states it's "re-validated at
-every release," and this session has no verified-current Gemini model
-catalog (IDs, capabilities, per-token pricing) to add responsibly rather
-than guess. The adapter is the code-side half of "add a model = one
-registry entry" — wiring a specific verified model in is left for
-whoever has that data.
+`providers/data/models.yaml` now carries one real entry for this
+adapter (`gemini-2.0-flash`) — the identical fix openai_provider.py's
+own docstring names for its own sibling gap, closed in the same round:
+this adapter sat fully built and unit-tested with ZERO registry
+entries for a long stretch of this project's history, meaning a real,
+valid `GEMINI_API_KEY`/`GOOGLE_API_KEY` routed to exactly nothing
+(`build_router()` only loads candidates from that file; see the
+registry entry's own comment for the full story). That entry only
+claims `[text, image, video]` — not `document`, since this adapter
+still has no `DocumentBlock` wire-format branch — and is honestly
+labeled a 2026-09 snapshot, not verified against a live API key in
+this environment, flagged for a maintainer with a real key to confirm
+(and to add a flagship tier alongside the flash one shipped here)
+rather than silently assumed permanently current.
 
 Also deliberately unmapped: `GenerateConfig.effort`/`.thinking`. Gemini's
 "thinking" models use a separate `thinking_config` shape this session
@@ -202,7 +209,21 @@ async def _to_gemini_content(m: Message, call_names: dict[str, str]) -> types.Co
             for c in b.content:
                 if isinstance(c, TextBlock):
                     continue
-                elif isinstance(c, ImageBlock):
+                elif isinstance(c, ImageBlock | VideoBlock):
+                    # A real gap found by a fresh-eyes sweep: the
+                    # top-level branch above already sends a VideoBlock
+                    # to Gemini via this exact `FunctionResponsePart.
+                    # from_bytes(data=..., mime_type=...)` shape one
+                    # level up -- `from_bytes` itself is genuinely
+                    # mime-type-agnostic (confirmed by reading its own
+                    # source directly: it just wraps `data`/`mime_type`
+                    # into a `FunctionResponseBlob`, no image-specific
+                    # validation at all), but this nested loop only ever
+                    # matched `ImageBlock`, so a video-analysis tool's
+                    # own result (e.g. returning a processed clip) fell
+                    # through to the same "no wire-format mapping" raise
+                    # the union type below still correctly applies to
+                    # anything genuinely untranslatable.
                     c_bytes = await resolve_media_bytes(c)
                     response_parts.append(
                         types.FunctionResponsePart.from_bytes(data=c_bytes, mime_type=c.media_type)

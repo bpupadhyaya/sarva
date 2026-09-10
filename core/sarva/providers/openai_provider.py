@@ -13,15 +13,18 @@ without OPENAI_API_KEY) until a real run validates it, same discipline
 as anthropic_provider.py and ollama_provider.py before their first live
 runs. See BUILD-JOURNAL.md.
 
-Deliberately NOT adding entries to `providers/data/models.yaml` in this
-change: that file's own header states it's "re-validated at every
-release," and this project's honesty principle (no fabricated content
-anywhere, degraders included) applies just as much to a registry file as
-to model output — this session has no verified-current OpenAI model
-catalog (IDs, capabilities, per-token pricing) to add responsibly.
-Wiring a specific model in is a one-entry config change for whoever has
-that data, not a code change (the entire point of the registry design)
-- the adapter itself is what needed writing.
+`providers/data/models.yaml` now carries one real entry for this
+adapter (`gpt-4o-mini`) — added only after this adapter had sat fully
+built and unit-tested with ZERO registry entries for a long stretch of
+this project's history, meaning a real, valid `OPENAI_API_KEY` routed
+to exactly nothing (`build_router()` only loads candidates from that
+file; see its own comment on `gpt-4o-mini` for the full story). That
+entry is honestly labeled a 2026-09 snapshot, not verified against a
+live API key in this environment — the same "not yet exercised against
+a live key" caveat this docstring's NOTE above already carries for the
+adapter code itself — flagged for a maintainer with a real key to
+confirm (and to add a flagship tier alongside the mini one shipped
+here) rather than silently assumed permanently current.
 
 Reasoning-effort control (`GenerateConfig.effort`) is also deliberately
 left unmapped for now: OpenAI's `reasoning_effort` parameter only

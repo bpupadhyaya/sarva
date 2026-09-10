@@ -136,6 +136,37 @@ async def test_tool_result_with_an_image_attaches_it_instead_of_silently_droppin
     assert fr.parts[0].inline_data.data == raw
 
 
+async def test_tool_result_with_a_video_attaches_it_instead_of_raising():
+    # A real gap found by a fresh-eyes sweep: the top-level translation
+    # loop already sends a VideoBlock to Gemini via inline_data/Blob
+    # (Gemini's real, native video understanding -- see the module
+    # docstring), but this nested tool-result loop only ever matched
+    # ImageBlock, so a video-analysis tool's own result fell through to
+    # the "no wire-format mapping" raise even though
+    # `FunctionResponsePart.from_bytes` (the exact call the image case
+    # above already uses) is genuinely mime-type-agnostic, confirmed by
+    # reading its own source directly rather than assumed.
+    raw = b"fake mp4 bytes"
+    m = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_call_id="t1",
+                content=[
+                    TextBlock(text="clip:"),
+                    VideoBlock(media_type="video/mp4", data=raw),
+                ],
+            )
+        ],
+    )
+    out = await _to_gemini_content(m, {"t1": "analyze_video"})
+
+    fr = out.parts[0].function_response
+    assert fr.response == {"output": "clip:"}
+    assert fr.parts[0].inline_data.mime_type == "video/mp4"
+    assert fr.parts[0].inline_data.data == raw
+
+
 async def test_thinking_block_is_explicitly_dropped_not_translated():
     # Deliberate, named skip -- Gemini surfaces "thought" parts on the
     # way out (ThinkingDeltaEvent) but there's no documented way to feed

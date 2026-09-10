@@ -1611,6 +1611,36 @@ with a fake `OPENAI_API_KEY` set shows `gpt-4o-mini` as `[x]`
 available for the first time; before this fix, the row didn't exist in
 the output at all. Full suite green (992 passed).
 
+### Gemini's tool-result handling had the identical image/video asymmetry the Anthropic document fix (round 462) had — found immediately after seeding gemini-2.0-flash into the registry
+
+A direct follow-up found while updating this adapter's own module
+docstring to reflect round 463's registry fix: the top-level
+translation loop already sends a `VideoBlock` to Gemini via
+`inline_data`/`Blob` (this adapter's own real, native video
+understanding, see the chapter above), but the nested tool-result loop
+only ever matched `ImageBlock`, falling through to the generic "no
+wire-format mapping" raise for a `VideoBlock` inside a tool result —
+even though `types.FunctionResponsePart.from_bytes` (the exact call
+the image case already uses) is genuinely mime-type-agnostic, confirmed
+by reading its own source directly (`data: bytes, mime_type: str`, no
+image-specific validation at all). A video-analysis tool returning a
+processed clip as part of its own result would have hit that raise.
+
+Fixed by widening the existing `isinstance(c, ImageBlock)` branch to
+`isinstance(c, ImageBlock | VideoBlock)` — same body, since
+`from_bytes` needed no per-type handling to begin with. 1 new test
+(`test_tool_result_with_a_video_attaches_it_instead_of_raising`),
+mirroring the existing image test exactly. Verified with a genuine
+revert-and-check: reverted just `google_provider.py`, the new test
+failed with the exact old "cannot translate a 'VideoBlock'" error,
+restored. Both provider module docstrings (`openai_provider.py`/
+`google_provider.py`) also updated in the same round — each used to
+say "deliberately NOT adding entries to models.yaml" / "no entries
+added," a claim round 463 made stale the moment it shipped
+`gpt-4o-mini`/`gemini-2.0-flash`; left uncorrected, a future reader
+would have trusted a docstring describing behavior that no longer
+held. Full suite green (993 passed).
+
 ## Build it yourself
 
 - Run `sarva models` to see the registry as loaded — which ids exist,
