@@ -24419,4 +24419,30 @@ response, not just an auth failure) -- `docs/providers.md` updated to
 distinguish what's now confirmed from what's still open, rather than
 leaving the original blanket "unverified" caveat stale.
 
+## Round 466: re-verified the real frozen desktop sidecar from scratch after this session's own later changes
+
+No code changed. The frozen-sidecar size/functionality fix
+(238MB -> 39MB via explicit `--exclude-module` flags) was verified once,
+earlier in this project's history -- worth checking it still holds
+after rounds 451-465 added real weight to the source tree this script
+freezes (PyAV as a new base dependency, new MCP conversion paths, two
+new registry entries), rather than trusting a fix verified once stays
+true forever. Ran the real `./scripts/build-web.sh` +
+`./scripts/freeze-server.sh` from this session's own venv (extras
+installed -- the exact case the original bug depended on) and got a
+39MB binary, matching the original number exactly. Started the real
+frozen binary standalone (no GUI -- this machine turned out to have a
+real, active display this time, confirmed by checking, but launching a
+visible window unattended during an autonomous session isn't a risk
+worth taking, so this stayed scoped to the backend binary as an
+ordinary background process) and hit `/health`, `/models` (correctly
+listed `gpt-4o-mini`/`gemini-2.0-flash`, confirming round 463's
+registry entries are genuinely bundled into the frozen artifact via
+`--add-data`, not just present in the dev checkout), and a real
+`/chat` request against local Ollama, which returned a genuine
+completion. `docs/packaging.md` extended with this re-verification;
+the Tauri-GUI-wrapper-specific gaps (app_data_dir resolution, native
+dialog rendering) remain exactly as honestly unverified as before --
+this only re-confirms the backend binary itself.
+
 **Next:** continuing the hardening sweep, module by module.

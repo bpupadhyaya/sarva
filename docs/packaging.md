@@ -1437,6 +1437,34 @@ specifically confirmed reporting all three now-excluded capabilities
 as cleanly "not installed" via the exact same graceful-degradation
 path a real end user's install would hit, not a crash.
 
+**Re-verified from scratch after this session's own later changes,
+not just trusted as still true.** Rounds 451-465 added real weight to
+the source tree this script freezes (PyAV as a new *base* dependency
+for video support, new MCP conversion paths, two new registry entries)
+— worth checking the size/functionality claims above still hold rather
+than assuming a fix verified once stays true forever. Ran the real
+`./scripts/build-web.sh` + `./scripts/freeze-server.sh` from this
+session's own venv (extras installed, the exact "natural venv a
+developer might freeze from" case the original bug depended on) and
+got a 39MB binary — matching the original fix's own number, confirming
+the `--exclude-module` deterministic-size guarantee still holds.
+Started the real frozen binary as a standalone process (no GUI, no
+Tauri wrapper — this sandbox has a real display now (confirmed: a live
+macOS session with real running apps), but launching a visible GUI
+window unattended during an autonomous session isn't a risk worth
+taking, so this stays scoped to the backend binary itself, launched as
+an ordinary background process the same way `sarva serve` already is
+throughout this project's own test suite) and hit `/health` (`{"status":
+"ok"}`), `/models` (correctly listed `gpt-4o-mini`/`gemini-2.0-flash`,
+confirming round 463's registry entries are correctly bundled via
+`--add-data` into the frozen artifact, not just the dev checkout), and
+a real `/chat` request against local Ollama, which returned a genuine
+model completion. The Tauri-GUI-wrapper-specific gaps named above
+(`app_data_dir()` resolution, the native error dialog's visual
+rendering) remain exactly as honestly unverified as before — this
+re-check only re-confirms the backend binary itself, not the GUI shell
+around it.
+
 **A real bug found by actually checking what a `log::info!`/`log::warn!`
 call does with no logger registered** (a standalone `log`-crate repro,
 not just reading the plugin's source): it's a genuine silent no-op —
